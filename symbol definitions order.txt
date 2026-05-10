@@ -1,0 +1,18 @@
+[A] / [B]: Group A goes before B, but both have the same structure
+
+const <N> = @This()
+[private] / [public]
+    [@imports]
+    [@import.member (namespaces)]
+    [@import.member (values)] / [constant decls (values)]
+    [@import.member (types)] / [constant decls (types)]
+        [error sets]
+        [enums]
+        [packed structs]
+        [extern structs]
+        [structs]
+        [packed unions]
+        [extern unions]
+        [unions]
+        [tagged unions]
+    [functions]

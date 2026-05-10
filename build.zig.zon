@@ -1,0 +1,29 @@
+.{
+    .name = .bare_blocks,
+    .fingerprint = 0xb1f619523bcf4010,
+    .version = "0.0.1",
+    .minimum_zig_version = "0.15.1",
+
+    .dependencies = .{
+        .coroutines = .{ .path = "./coroutines" },
+        .vulkan = .{
+            .url = "git+https://github.com/Snektron/vulkan-zig#f75b0011214705d6593e6ad64948c4832b1e6f27",
+            .hash = "vulkan-0.0.0-r7Ytx759AwBNdwE-gHKt3vzRQaU7RFerBg3FmD7iTEv4",
+        },
+        .vulkan_headers = .{
+            .url = "git+https://github.com/KhronosGroup/Vulkan-Headers#8cfaaa1d4deedc865e52a42e654c5ec0d7d75eb0",
+            .hash = "N-V-__8AAGfhdwLcch-RCImEQbiTe8n0-ZfevT6sXEEfSuKT",
+        },
+        .sdl = .{
+            .url = "git+https://github.com/castholm/SDL#21c6b79840d123e94a9f183f4b0fa1731668f48d",
+            .hash = "sdl-0.5.0+3.4.8-SDL--k4DpgH323IfF6cEaGzKUdtUQv1azbBmmcv0RMAu",
+        },
+    },
+
+    .paths = .{
+        "src/",
+        ".gitignore",
+        "build.zig",
+        "build.zig.zon",
+    },
+}
