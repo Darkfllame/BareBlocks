@@ -8,7 +8,6 @@ const buildzigzon: struct {
     dependencies: struct {
         coroutines: Dep,
         vulkan: Dep,
-        vulkan_2: Dep,
         vulkan_headers: Dep,
         sdl: Dep,
     },
@@ -39,10 +38,6 @@ pub fn build(b: *std.Build) !void {
     const coro_mod = b.dependency("coroutines", .{ .target = target, .optimize = optimize })
         .module("coroutines");
     const vulkan_mod = b.dependency("vulkan", .{
-        .registry = vk_headers.path("registry/vk.xml"),
-        .video = vk_headers.path("registry/video.xml"),
-    }).module("vulkan-zig");
-    const vulkan2_mod = b.dependency("vulkan_2", .{
         .registry = vk_headers.path("registry/vk.xml"),
         .video = vk_headers.path("registry/video.xml"),
     }).module("vulkan-zig");
@@ -95,7 +90,6 @@ pub fn build(b: *std.Build) !void {
                 .{ .name = "utils", .module = utils_mod },
                 .{ .name = "net", .module = net_mod },
                 .{ .name = "vulkan", .module = vulkan_mod },
-                .{ .name = "vulkan2", .module = vulkan2_mod },
                 .{ .name = "sdl", .module = sdl_mod },
                 .{ .name = "config", .module = config_mod },
             },

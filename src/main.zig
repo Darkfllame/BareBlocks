@@ -1,11 +1,8 @@
-// TODO: Clean up that shih :sob:
-// Tutorial chapter: https://docs.vulkan.org/tutorial/latest/03_Drawing_a_triangle/02_Graphics_pipeline_basics/00_Introduction.html
-
 const std = @import("std");
 const builtin = @import("builtin");
 const core = @import("core");
 const utils = @import("utils");
-const vk = @import("vulkan2");
+const vk = @import("vulkan");
 const sdl = @import("sdl");
 const config = @import("config");
 
@@ -27,19 +24,19 @@ const debug_required_layers: []const [*:0]const u8 = &.{
 
 const vulkan_11_features = vk.PhysicalDeviceVulkan11Features{
     .p_next = @constCast(&vulkan_13_features),
-    .shader_draw_parameters = .true,
+    .shader_draw_parameters = true,
 };
 const vulkan_13_features = vk.PhysicalDeviceVulkan13Features{
     .p_next = @constCast(&extended_dynamic_state_features),
-    .dynamic_rendering = .true,
+    .dynamic_rendering = true,
 };
 const extended_dynamic_state_features = vk.PhysicalDeviceExtendedDynamicStateFeaturesEXT{
-    .extended_dynamic_state = .true,
+    .extended_dynamic_state = true,
 };
 const create_device_chain = vk.PhysicalDeviceFeatures2{
     .p_next = @constCast(&vulkan_11_features),
     .features = .{
-        .logic_op = .true,
+        .logic_op = true,
     },
 };
 
@@ -173,7 +170,7 @@ const QueueFamilyIndices = struct {
             if (props.queue_count - used == 0) continue;
 
             if (present_family_index == null and
-                (try app.vki.getPhysicalDeviceSurfaceSupportKHR(pdev, @intCast(i), app.surface)) == .true)
+                (try app.vki.getPhysicalDeviceSurfaceSupportKHR(pdev, @intCast(i), app.surface)))
             {
                 present_family_index = @intCast(i);
                 used += 1;
@@ -446,7 +443,7 @@ const App = struct {
             .enabled_extension_count = extensions.len,
             .pp_enabled_extension_names = &extensions,
         }, null);
-        self.vkd = .load(self.device, self.vki.dispatch.vkGetDeviceProcAddr.?);
+        self.vkd.load(self.device, self.vki.dispatch.vkGetDeviceProcAddr.?);
         errdefer self.vkd.destroyDevice(self.device, null);
 
         inline for (QueueFamilyIndices.fields) |f| {
@@ -539,7 +536,7 @@ const App = struct {
             .pre_transform = capabilities.current_transform,
             .composite_alpha = .{ .opaque_bit_khr = true },
             .present_mode = pm,
-            .clipped = .true,
+            .clipped = true,
             .old_swapchain = self.swapchain.handle,
         }, null);
 
@@ -637,7 +634,6 @@ const App = struct {
     }
 
     inline fn destroyPipelineLayout(self: *App, ppl: vk.PipelineLayout) void {
-        assert(ppl != .null_handle);
         return self.vkd.destroyPipelineLayout(self.device, ppl, null);
     }
 
@@ -675,7 +671,6 @@ const App = struct {
     }
 
     inline fn destroyPipeline(self: *App, pl: vk.Pipeline) void {
-        assert(pl != .null_handle);
         return self.vkd.destroyPipeline(self.device, pl, null);
     }
 
@@ -753,7 +748,7 @@ const App = struct {
         };
         errdefer sdl.SDL_DestroyWindow(self.window);
 
-        self.vkb = .load(vk_loader);
+        self.vkb.load(vk_loader);
 
         //#region VkInstance
         const all_required_extensions = try std.mem.concat(
@@ -826,7 +821,7 @@ const App = struct {
         }
 
         self.instance = try self.vkb.createInstance(&inst_cinfo, null);
-        self.vki = .load(self.instance, vk_loader);
+        self.vki.load(self.instance, vk_loader);
         errdefer self.vki.destroyInstance(self.instance, null);
 
         if (builtin.mode == .Debug) {
@@ -840,7 +835,7 @@ const App = struct {
         //#region VkSurfaceKHR
         if (!sdl.SDL_Vulkan_CreateSurface(
             self.window,
-            @ptrFromInt(@intFromEnum(self.instance)),
+            @ptrCast(self.instance),
             null,
             @ptrCast(&self.surface),
         )) {
@@ -942,19 +937,19 @@ const App = struct {
                 .vertex_input_state = .{},
                 .input_assembly_state = .{
                     .topology = .triangle_list,
-                    .primitive_restart_enable = .false,
+                    .primitive_restart_enable = false,
                 },
                 .viewport_state = .{
                     .viewport_count = 1,
                     .scissor_count = 1,
                 },
                 .rasterization_state = .{
-                    .depth_clamp_enable = .false,
-                    .rasterizer_discard_enable = .false,
+                    .depth_clamp_enable = false,
+                    .rasterizer_discard_enable = false,
                     .polygon_mode = .fill,
                     .cull_mode = .{ .back_bit = true },
                     .front_face = .counter_clockwise,
-                    .depth_bias_enable = .false,
+                    .depth_bias_enable = false,
                     .depth_bias_constant_factor = 0,
                     .depth_bias_clamp = 0,
                     .depth_bias_slope_factor = 0,
@@ -962,28 +957,28 @@ const App = struct {
                 },
                 .multisample_state = .{
                     .rasterization_samples = .{ .@"1_bit" = true },
-                    .sample_shading_enable = .false,
+                    .sample_shading_enable = false,
                     .min_sample_shading = 0,
-                    .alpha_to_coverage_enable = .false,
-                    .alpha_to_one_enable = .false,
+                    .alpha_to_coverage_enable = false,
+                    .alpha_to_one_enable = false,
                 },
                 .depth_stencil_state = .{
-                    .depth_test_enable = .false,
-                    .depth_write_enable = .false,
+                    .depth_test_enable = false,
+                    .depth_write_enable = false,
                     .depth_compare_op = .less,
-                    .depth_bounds_test_enable = .false,
-                    .stencil_test_enable = .false,
+                    .depth_bounds_test_enable = false,
+                    .stencil_test_enable = false,
                     .front = undefined,
                     .back = undefined,
                     .min_depth_bounds = 0,
                     .max_depth_bounds = 0,
                 },
                 .color_blend_state = .{
-                    .logic_op_enable = .true,
+                    .logic_op_enable = true,
                     .logic_op = .copy,
                     .attachment_count = 1,
                     .p_attachments = &[_]vk.PipelineColorBlendAttachmentState{.{
-                        .blend_enable = .true,
+                        .blend_enable = true,
                         .src_color_blend_factor = .src_alpha,
                         .dst_color_blend_factor = .one_minus_src_alpha,
                         .color_blend_op = .add,
