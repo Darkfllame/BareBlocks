@@ -44,8 +44,11 @@ const HoverEvent = union(enum) {
 const Formatting = struct {
     const MaskPacked = blk: {
         const info = @typeInfo(Formatting).@"struct";
-        var types = [_]type{bool} ** info.fields.len;
+        var types: [info.fields.len]type = undefined;
+        @memset(&types, bool);
         var names: [info.fields.len][]const u8 = undefined;
+        var attribs: [info.fields.len]std.builtin.Type.StructField.Attributes = undefined;
+        @memset(&attribs, .{ .default_value_ptr = &@as(bool, false) });
         for (info.fields, &names) |f, *out| {
             out.* = f.name;
         }
@@ -55,9 +58,7 @@ const Formatting = struct {
             @Int(.unsigned, info.fields.len),
             &names,
             &types,
-            &([_]std.builtin.Type.StructField.Attributes{
-                .{ .default_value_ptr = &@as(bool, false) },
-            } ** info.fields.len),
+            &attribs,
         );
     };
     const Mask = struct {

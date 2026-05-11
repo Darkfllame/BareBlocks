@@ -5,7 +5,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const core = @import("core");
 const utils = @import("utils");
-const vk = @import("vulkan");
+const vk = @import("vulkan2");
 const sdl = @import("sdl");
 const config = @import("config");
 
@@ -16,6 +16,8 @@ const Io = std.Io;
 const process = std.process;
 const assert = std.debug.assert;
 
+const default_shader_code align(4) = @embedFile("default_shader_code").*;
+
 const debug_required_extensions: []const [*:0]const u8 = &.{
     vk.extensions.ext_debug_utils.name.ptr,
 };
@@ -23,16 +25,23 @@ const debug_required_layers: []const [*:0]const u8 = &.{
     "VK_LAYER_KHRONOS_validation",
 };
 
-const create_device_chain = vk.PhysicalDeviceFeatures2{
-    .p_next = @constCast(&vk.PhysicalDeviceVulkan13Features{
-        .p_next = @constCast(&vk.PhysicalDeviceExtendedDynamicStateFeaturesEXT{
-            .extended_dynamic_state = .true,
-        }),
-        .dynamic_rendering = .true,
-    }),
-    .features = .{},
+const vulkan_11_features = vk.PhysicalDeviceVulkan11Features{
+    .p_next = @constCast(&vulkan_13_features),
+    .shader_draw_parameters = .true,
 };
-const req_feats_slice: []const vk.Bool32 = @ptrCast(&create_device_chain.features);
+const vulkan_13_features = vk.PhysicalDeviceVulkan13Features{
+    .p_next = @constCast(&extended_dynamic_state_features),
+    .dynamic_rendering = .true,
+};
+const extended_dynamic_state_features = vk.PhysicalDeviceExtendedDynamicStateFeaturesEXT{
+    .extended_dynamic_state = .true,
+};
+const create_device_chain = vk.PhysicalDeviceFeatures2{
+    .p_next = @constCast(&vulkan_11_features),
+    .features = .{
+        .logic_op = .true,
+    },
+};
 
 fn stringFromBuffer(s: []const u8) [:0]const u8 {
     for (s, 0..) |c, i| {
@@ -40,6 +49,11 @@ fn stringFromBuffer(s: []const u8) [:0]const u8 {
     }
     @panic("Not zero terminated");
 }
+const PhysicalDeviceExtendedDynamicStateFeaturesEXT = extern struct {
+    s_type: vk.StructureType = .physical_device_extended_dynamic_state_features_ext,
+    p_next: ?*anyopaque = null,
+    extended_dynamic_state: bool align(4) = false,
+};
 
 const DebugUtilsDataFormatter = struct {
     app: *App,
@@ -105,7 +119,11 @@ const DebugUtilsDataFormatter = struct {
 
 const QueueFamilyIndices = struct {
     const fields = @typeInfo(QueueFamilyIndices).@"struct".fields;
-    const queue_priorities = [_]f32{0} ** fields.len;
+    const queue_priorities = blk: {
+        var values: [fields.len]f32 = undefined;
+        @memset(&values, 0);
+        break :blk values;
+    };
 
     graphics: u32,
     transfer: u32,
@@ -204,6 +222,36 @@ const QueueFamilyIndices = struct {
 };
 
 const App = struct {
+    const PipelineLayoutCreateInfo = struct {
+        flags: vk.PipelineLayoutCreateFlags = .{},
+        set_layouts: []const vk.DescriptorSetLayoutCreateInfo = &.{},
+        push_constant_ranges: []const vk.PushConstantRange = &.{},
+    };
+    const GraphicsPipelineCreateInfo = struct {
+        p_next: ?*const anyopaque = null,
+        flags: vk.PipelineCreateFlags = .{},
+        stages: []const vk.PipelineShaderStageCreateInfo,
+        vertex_input_state: ?vk.PipelineVertexInputStateCreateInfo = null,
+        input_assembly_state: ?vk.PipelineInputAssemblyStateCreateInfo = null,
+        tessellation_state: ?vk.PipelineTessellationStateCreateInfo = null,
+        viewport_state: ?vk.PipelineViewportStateCreateInfo = null,
+        rasterization_state: ?vk.PipelineRasterizationStateCreateInfo = null,
+        multisample_state: ?vk.PipelineMultisampleStateCreateInfo = null,
+        depth_stencil_state: ?vk.PipelineDepthStencilStateCreateInfo = null,
+        color_blend_state: ?vk.PipelineColorBlendStateCreateInfo = null,
+        dynamic_state: ?vk.PipelineDynamicStateCreateInfo = null,
+        /// Interface layout of the pipeline
+        layout: vk.PipelineLayout = .null_handle,
+        render_pass: vk.RenderPass = .null_handle,
+        subpass: u32 = 0,
+        /// If VK_PIPELINE_CREATE_DERIVATIVE_BIT is set and this value is nonzero, it specifies the handle
+        /// of the base pipeline this is a derivative of
+        base_pipeline_handle: vk.Pipeline = .null_handle,
+        /// If VK_PIPELINE_CREATE_DERIVATIVE_BIT is set and this value is not -1, it specifies an index into
+        /// CreateInfos of the base pipeline this is a derivative of
+        base_pipeline_index: i32 = 0,
+    };
+
     fn checkExtensions(self: *App, required: []const [*:0]const u8) !bool {
         if (required.len == 0) return true;
 
@@ -294,13 +342,35 @@ const App = struct {
     }
 
     fn chosePhysicalDevice(self: *App) ?u8 {
+        const Inner = struct {
+            fn hasFeatures(check: []const vk.Bool32, available: []const vk.Bool32) bool {
+                for (check, available) |c, a| {
+                    if (c == .true and a == .false) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+
+            fn hasFeatures2(comptime T: type, check: *const T, ptr: *const vk.BaseOutStructure) bool {
+                const fields = @typeInfo(T).@"struct".fields;
+                const feats_count = (@sizeOf(T) - @sizeOf(vk.BaseOutStructure)) / 4;
+
+                const feats_ptr: *const T = @ptrCast(ptr);
+
+                const feats_bools: [*]const vk.Bool32 = @ptrCast(&@field(feats_ptr, fields[2].name));
+                const check_bools: [*]const vk.Bool32 = @ptrCast(&@field(check, fields[2].name));
+
+                return hasFeatures(check_bools[0..feats_count], feats_bools[0..feats_count]);
+            }
+        };
+
         var highest_rating: u32 = 0;
         var best_index: ?u8 = null;
-        for (self.phys_devs, 0..) |pdev, i| {
+        dev_rating: for (self.phys_devs, 0..) |pdev, i| {
             var rating: u32 = 0;
             var feats: vk.PhysicalDeviceFeatures2 = .{ .features = undefined };
             self.vki.getPhysicalDeviceFeatures2(pdev, &feats);
-            const feats_bools: []const vk.Bool32 = @ptrCast(&feats.features);
             const props = self.vki.getPhysicalDeviceProperties(pdev);
             rating += switch (props.device_type) {
                 // I guess this should be fine for now...
@@ -310,10 +380,34 @@ const App = struct {
                 else => 0,
             };
 
-            const feats_fields = @typeInfo(vk.PhysicalDeviceFeatures).@"struct".fields;
-            for (0..feats_fields.len) |j| {
-                if (req_feats_slice[i] == .true and feats_bools[j] == .false) {
-                    rating = 0;
+            {
+                var current: ?*const vk.BaseOutStructure = @ptrCast(@alignCast(&feats));
+                while (current) |curr| {
+                    current = curr.p_next;
+                    // break :dev_rating; on mismatched features
+                    switch (curr.s_type) {
+                        .physical_device_features_2 => if (!Inner.hasFeatures2(
+                            vk.PhysicalDeviceFeatures2,
+                            &create_device_chain,
+                            curr,
+                        )) continue :dev_rating,
+                        .physical_device_vulkan_1_1_features => if (!Inner.hasFeatures2(
+                            vk.PhysicalDeviceVulkan11Features,
+                            &vulkan_11_features,
+                            curr,
+                        )) continue :dev_rating,
+                        .physical_device_vulkan_1_3_features => if (!Inner.hasFeatures2(
+                            vk.PhysicalDeviceVulkan13Features,
+                            &vulkan_13_features,
+                            curr,
+                        )) continue :dev_rating,
+                        .physical_device_extended_dynamic_state_features_ext => if (!Inner.hasFeatures2(
+                            vk.PhysicalDeviceExtendedDynamicStateFeaturesEXT,
+                            &extended_dynamic_state_features,
+                            curr,
+                        )) continue :dev_rating,
+                        else => {},
+                    }
                 }
             }
             if (highest_rating < rating) {
@@ -380,15 +474,16 @@ const App = struct {
             self.gpa,
         );
         defer self.gpa.free(formats);
-        const fmt_idx = for (formats, 0..) |fmt, i| {
+        const format = for (formats) |fmt| {
             if (fmt.color_space == .srgb_nonlinear_khr and fmt.format == .b8g8r8a8_srgb) {
-                break i;
+                break fmt;
             }
         } else {
             @branchHint(.cold);
             logger.err("Couldn't find surface format", .{});
             return error.Vulkan;
         };
+        self.swapchain.surface_format = format;
 
         const present_modes = try self.vki.getPhysicalDeviceSurfacePresentModesAllocKHR(
             self.phys_devs[self.chosen_pdev],
@@ -396,18 +491,19 @@ const App = struct {
             self.gpa,
         );
         defer self.gpa.free(present_modes);
-        var fifo_idx: ?usize = null;
-        const pm_idx = for (present_modes, 0..) |pm, i| {
+        var has_fifo = false;
+        const pm: vk.PresentModeKHR = for (present_modes) |pm| {
             if (pm == .fifo_khr) {
-                fifo_idx = i;
+                has_fifo = true;
             } else if (pm == .mailbox_khr) {
-                break i;
+                break pm;
             }
-        } else fifo_idx orelse {
+        } else if (has_fifo) .fifo_khr else {
             @branchHint(.cold);
             logger.err("FIFO Present mode should always be present. Bug in the vulkan driver ?", .{});
             return error.Vulkan;
         };
+        self.swapchain.present_mode = pm;
 
         const extent = blk: {
             if (capabilities.current_extent.width != std.math.maxInt(u32)) {
@@ -434,24 +530,24 @@ const App = struct {
         self.swapchain.handle = try self.vkd.createSwapchainKHR(self.device, &vk.SwapchainCreateInfoKHR{
             .surface = self.surface,
             .min_image_count = min_image_count,
-            .image_format = formats[fmt_idx].format,
-            .image_color_space = formats[fmt_idx].color_space,
+            .image_format = format.format,
+            .image_color_space = format.color_space,
             .image_extent = extent,
             .image_array_layers = 1,
             .image_usage = .{ .color_attachment_bit = true },
             .image_sharing_mode = .exclusive,
             .pre_transform = capabilities.current_transform,
             .composite_alpha = .{ .opaque_bit_khr = true },
-            .present_mode = present_modes[pm_idx],
+            .present_mode = pm,
             .clipped = .true,
-            .old_swapchain = self.swapchain,
+            .old_swapchain = self.swapchain.handle,
         }, null);
 
         self.swapchain.image_count = 0;
         var image_count: u32 = undefined;
         _ = try self.vkd.getSwapchainImagesKHR(
             self.device,
-            self.swapchain,
+            self.swapchain.handle,
             &image_count,
             null,
         );
@@ -460,7 +556,7 @@ const App = struct {
         errdefer self.gpa.free(images);
         _ = try self.vkd.getSwapchainImagesKHR(
             self.device,
-            self.swapchain,
+            self.swapchain.handle,
             &image_count,
             @constCast(self.swapchain.images.?),
         );
@@ -472,7 +568,7 @@ const App = struct {
         var iv_ci = vk.ImageViewCreateInfo{
             .image = undefined,
             .view_type = .@"2d",
-            .format = formats[fmt_idx].format,
+            .format = format.format,
             .components = .{
                 .r = .identity,
                 .g = .identity,
@@ -492,7 +588,7 @@ const App = struct {
                 self.vkd.destroyImageView(self.device, iv2, null);
             };
             iv_ci.image = img;
-            iv.* = try self.vkd.createImageView(self.device, &iv_ci, null);
+            @constCast(iv).* = try self.vkd.createImageView(self.device, &iv_ci, null);
         }
 
         errdefer for (views) |iv| { // prob not needed
@@ -500,6 +596,87 @@ const App = struct {
         };
 
         self.swapchain.image_count = @intCast(images.len);
+    }
+
+    inline fn createShader(self: *App, code: []const u32) !vk.ShaderModule {
+        return self.vkd.createShaderModule(self.device, &vk.ShaderModuleCreateInfo{
+            .code_size = code.len * 4,
+            .p_code = code.ptr,
+        }, null);
+    }
+
+    inline fn destroyShader(self: *App, sh: vk.ShaderModule) void {
+        assert(sh != .null_handle);
+        return self.vkd.destroyShaderModule(self.device, sh, null);
+    }
+
+    inline fn createPipelineLayout(self: *App, info: PipelineLayoutCreateInfo) !vk.PipelineLayout {
+        assert(info.set_layouts.len <= std.math.maxInt(u32));
+        assert(info.push_constant_ranges.len <= std.math.maxInt(u32));
+
+        const set_layouts = try self.gpa.alloc(vk.DescriptorSetLayout, info.set_layouts.len);
+        defer self.gpa.free(set_layouts);
+
+        for (set_layouts, info.set_layouts, 0..) |*out, *dsl_info, i| {
+            errdefer for (set_layouts[0..i]) |dsl| {
+                self.vkd.destroyDescriptorSetLayout(self.device, dsl, null);
+            };
+            out.* = try self.vkd.createDescriptorSetLayout(self.device, dsl_info, null);
+        }
+        defer for (set_layouts) |dsl| {
+            self.vkd.destroyDescriptorSetLayout(self.device, dsl, null);
+        };
+
+        return self.vkd.createPipelineLayout(self.device, &vk.PipelineLayoutCreateInfo{
+            .flags = info.flags,
+            .set_layout_count = @intCast(set_layouts.len),
+            .p_set_layouts = set_layouts.ptr,
+            .push_constant_range_count = @intCast(info.push_constant_ranges.len),
+            .p_push_constant_ranges = info.push_constant_ranges.ptr,
+        }, null);
+    }
+
+    inline fn destroyPipelineLayout(self: *App, ppl: vk.PipelineLayout) void {
+        assert(ppl != .null_handle);
+        return self.vkd.destroyPipelineLayout(self.device, ppl, null);
+    }
+
+    fn createGraphicsPipeline(self: *App, info: GraphicsPipelineCreateInfo) !vk.Pipeline {
+        var out: vk.Pipeline = undefined;
+
+        _ = try self.vkd.createGraphicsPipelines(
+            self.device,
+            .null_handle,
+            (&vk.GraphicsPipelineCreateInfo{
+                .p_next = info.p_next,
+                .flags = info.flags,
+                .stage_count = @intCast(info.stages.len),
+                .p_stages = info.stages.ptr,
+                .p_vertex_input_state = if (info.vertex_input_state) |*ptr| ptr else null,
+                .p_input_assembly_state = if (info.input_assembly_state) |*ptr| ptr else null,
+                .p_tessellation_state = if (info.tessellation_state) |*ptr| ptr else null,
+                .p_viewport_state = if (info.viewport_state) |*ptr| ptr else null,
+                .p_rasterization_state = if (info.rasterization_state) |*ptr| ptr else null,
+                .p_multisample_state = if (info.multisample_state) |*ptr| ptr else null,
+                .p_depth_stencil_state = if (info.depth_stencil_state) |*ptr| ptr else null,
+                .p_color_blend_state = if (info.color_blend_state) |*ptr| ptr else null,
+                .p_dynamic_state = if (info.dynamic_state) |*ptr| ptr else null,
+                .layout = info.layout,
+                .render_pass = info.render_pass,
+                .subpass = info.subpass,
+                .base_pipeline_handle = info.base_pipeline_handle,
+                .base_pipeline_index = info.base_pipeline_index,
+            })[0..1],
+            null,
+            (&out)[0..1],
+        );
+
+        return out;
+    }
+
+    inline fn destroyPipeline(self: *App, pl: vk.Pipeline) void {
+        assert(pl != .null_handle);
+        return self.vkd.destroyPipeline(self.device, pl, null);
     }
 
     gpa: Allocator,
@@ -532,6 +709,11 @@ const App = struct {
     swapchain: struct {
         handle: vk.SwapchainKHR = .null_handle,
         image_count: u8 = 0,
+        surface_format: vk.SurfaceFormatKHR = .{
+            .format = .undefined,
+            .color_space = .srgb_nonlinear_khr,
+        },
+        present_mode: vk.PresentModeKHR = .immediate_khr,
         images: ?[*]const vk.Image = null,
         img_views: ?[*]const vk.ImageView = null,
 
@@ -543,6 +725,9 @@ const App = struct {
             return if (self.img_views) |imgs| imgs[0..self.image_count] else &.{};
         }
     },
+
+    pipeline_layout: vk.PipelineLayout,
+    pipeline: vk.Pipeline,
 
     pub fn create(
         init: process.Init,
@@ -643,6 +828,13 @@ const App = struct {
         self.instance = try self.vkb.createInstance(&inst_cinfo, null);
         self.vki = .load(self.instance, vk_loader);
         errdefer self.vki.destroyInstance(self.instance, null);
+
+        if (builtin.mode == .Debug) {
+            self.debug_messenger = try self.vki.createDebugUtilsMessengerEXT(self.instance, &msg_cinfo, null);
+        }
+        errdefer if (builtin.mode == .Debug) {
+            self.vki.destroyDebugUtilsMessengerEXT(self.instance, self.debug_messenger, null);
+        };
         //#endregion VkInstance
 
         //#region VkSurfaceKHR
@@ -715,11 +907,115 @@ const App = struct {
         errdefer self.vkd.destroySwapchainKHR(self.device, self.swapchain.handle, null);
         //#endregion VkSwapchainKHR
 
+        //#region GraphicsPipline
+        {
+            const vertex_module = try self.createShader(@ptrCast(&default_shader_code));
+            defer self.destroyShader(vertex_module);
+            const fragment_module = try self.createShader(@ptrCast(&default_shader_code));
+            defer self.destroyShader(fragment_module);
+
+            self.pipeline_layout = try self.createPipelineLayout(.{});
+            errdefer self.destroyPipelineLayout(self.pipeline_layout);
+
+            const dynamic_states = [_]vk.DynamicState{ .viewport, .scissor };
+
+            self.pipeline = try self.createGraphicsPipeline(GraphicsPipelineCreateInfo{
+                .p_next = &vk.PipelineRenderingCreateInfo{
+                    .view_mask = 0,
+                    .color_attachment_count = 1,
+                    .p_color_attachment_formats = @ptrCast(&self.swapchain.surface_format.format),
+                    .depth_attachment_format = .undefined,
+                    .stencil_attachment_format = .undefined,
+                },
+                .stages = &.{
+                    .{
+                        .stage = .{ .vertex_bit = true },
+                        .module = vertex_module,
+                        .p_name = "vertexMain",
+                    },
+                    .{
+                        .stage = .{ .fragment_bit = true },
+                        .module = fragment_module,
+                        .p_name = "fragmentMain",
+                    },
+                },
+                .vertex_input_state = .{},
+                .input_assembly_state = .{
+                    .topology = .triangle_list,
+                    .primitive_restart_enable = .false,
+                },
+                .viewport_state = .{
+                    .viewport_count = 1,
+                    .scissor_count = 1,
+                },
+                .rasterization_state = .{
+                    .depth_clamp_enable = .false,
+                    .rasterizer_discard_enable = .false,
+                    .polygon_mode = .fill,
+                    .cull_mode = .{ .back_bit = true },
+                    .front_face = .counter_clockwise,
+                    .depth_bias_enable = .false,
+                    .depth_bias_constant_factor = 0,
+                    .depth_bias_clamp = 0,
+                    .depth_bias_slope_factor = 0,
+                    .line_width = 1,
+                },
+                .multisample_state = .{
+                    .rasterization_samples = .{ .@"1_bit" = true },
+                    .sample_shading_enable = .false,
+                    .min_sample_shading = 0,
+                    .alpha_to_coverage_enable = .false,
+                    .alpha_to_one_enable = .false,
+                },
+                .depth_stencil_state = .{
+                    .depth_test_enable = .false,
+                    .depth_write_enable = .false,
+                    .depth_compare_op = .less,
+                    .depth_bounds_test_enable = .false,
+                    .stencil_test_enable = .false,
+                    .front = undefined,
+                    .back = undefined,
+                    .min_depth_bounds = 0,
+                    .max_depth_bounds = 0,
+                },
+                .color_blend_state = .{
+                    .logic_op_enable = .true,
+                    .logic_op = .copy,
+                    .attachment_count = 1,
+                    .p_attachments = &[_]vk.PipelineColorBlendAttachmentState{.{
+                        .blend_enable = .true,
+                        .src_color_blend_factor = .src_alpha,
+                        .dst_color_blend_factor = .one_minus_src_alpha,
+                        .color_blend_op = .add,
+                        .src_alpha_blend_factor = .one,
+                        .dst_alpha_blend_factor = .zero,
+                        .alpha_blend_op = .add,
+                        .color_write_mask = .{
+                            .r_bit = true,
+                            .g_bit = true,
+                            .b_bit = true,
+                            .a_bit = true,
+                        },
+                    }},
+                    .blend_constants = .{ 0, 0, 0, 0 },
+                },
+                .dynamic_state = .{
+                    .dynamic_state_count = dynamic_states.len,
+                    .p_dynamic_states = &dynamic_states,
+                },
+                .layout = self.pipeline_layout,
+            });
+        }
+        errdefer self.destroyPipeline(self.pipeline);
+        //#endregion GraphicsPipline
+
         _ = sdl.SDL_ShowWindow(self.window);
         return self;
     }
 
     pub fn destroy(self: *App) void {
+        self.destroyPipeline(self.pipeline);
+        self.destroyPipelineLayout(self.pipeline_layout);
         for (self.swapchain.getImageViews()) |iv| {
             self.vkd.destroyImageView(self.device, iv, null);
         }
@@ -729,6 +1025,9 @@ const App = struct {
         self.vkd.destroyDevice(self.device, null);
         self.gpa.free(self.phys_devs);
         self.vki.destroySurfaceKHR(self.instance, self.surface, null);
+        if (builtin.mode == .Debug) {
+            self.vki.destroyDebugUtilsMessengerEXT(self.instance, self.debug_messenger, null);
+        }
         self.vki.destroyInstance(self.instance, null);
         self.gpa.free(self.layers_properties);
         self.gpa.free(self.extensions_properties);

@@ -8,6 +8,7 @@ const buildzigzon: struct {
     dependencies: struct {
         coroutines: Dep,
         vulkan: Dep,
+        vulkan_2: Dep,
         vulkan_headers: Dep,
         sdl: Dep,
     },
@@ -38,6 +39,10 @@ pub fn build(b: *std.Build) !void {
     const coro_mod = b.dependency("coroutines", .{ .target = target, .optimize = optimize })
         .module("coroutines");
     const vulkan_mod = b.dependency("vulkan", .{
+        .registry = vk_headers.path("registry/vk.xml"),
+        .video = vk_headers.path("registry/video.xml"),
+    }).module("vulkan-zig");
+    const vulkan2_mod = b.dependency("vulkan_2", .{
         .registry = vk_headers.path("registry/vk.xml"),
         .video = vk_headers.path("registry/video.xml"),
     }).module("vulkan-zig");
@@ -90,6 +95,7 @@ pub fn build(b: *std.Build) !void {
                 .{ .name = "utils", .module = utils_mod },
                 .{ .name = "net", .module = net_mod },
                 .{ .name = "vulkan", .module = vulkan_mod },
+                .{ .name = "vulkan2", .module = vulkan2_mod },
                 .{ .name = "sdl", .module = sdl_mod },
                 .{ .name = "config", .module = config_mod },
             },
@@ -97,30 +103,32 @@ pub fn build(b: *std.Build) !void {
         .use_llvm = true,
         .use_lld = true,
     });
-
-    const download_jar_exe = b.addExecutable(.{
-        .name = "download_mcjar",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("build/download_jar.zig"),
-            .target = b.resolveTargetQuery(.{}),
-            .optimize = .Debug,
-        }),
+    main_exe.root_module.addAnonymousImport("default_shader_code", .{
+        .root_source_file = compileShader(b, b.path("assets/shaders/default.slang")),
     });
 
     b.installArtifact(main_exe);
 
-    const run_download_jar = b.addRunArtifact(download_jar_exe);
-    run_download_jar.addArg("-v1.21.11");
-    const server_jar = run_download_jar.addPrefixedOutputFileArg("-o", "minecraft_1.21.11.jar");
-    b.getInstallStep().dependOn(&run_download_jar.step);
+    // const download_jar_exe = b.addExecutable(.{
+    //     .name = "download_mcjar",
+    //     .root_module = b.createModule(.{
+    //         .root_source_file = b.path("build/download_jar.zig"),
+    //         .target = b.resolveTargetQuery(.{}),
+    //         .optimize = .Debug,
+    //     }),
+    // });
 
-    const run_datagen = b.addSystemCommand(&.{ "java", "-DbundlerMainClass=net.minecraft.data.Main", "-jar" });
-    run_datagen.addFileArg(server_jar);
-    run_datagen.addArgs(&.{ "--all", "--output" });
-    const generated = run_datagen.addOutputDirectoryArg("generated");
-    const tfiles = b.addTempFiles();
-    run_datagen.setCwd(tfiles.getDirectory());
-    _ = generated;
+    // const run_download_jar = b.addRunArtifact(download_jar_exe);
+    // run_download_jar.addArg("-v1.21.11");
+    // const server_jar = run_download_jar.addPrefixedOutputFileArg("-o", "minecraft_1.21.11.jar");
+    // b.getInstallStep().dependOn(&run_download_jar.step);
+
+    // const run_datagen = b.addSystemCommand(&.{ "java", "-DbundlerMainClass=net.minecraft.data.Main", "-jar" });
+    // run_datagen.addFileArg(server_jar);
+    // run_datagen.addArgs(&.{ "--all", "--output" });
+    // const generated = run_datagen.addOutputDirectoryArg("generated");
+    // const tfiles = b.addTempFiles();
+    // run_datagen.setCwd(tfiles.getDirectory());
 
     // b.installDirectory(.{
     //     .install_dir = .prefix,
@@ -135,4 +143,16 @@ pub fn build(b: *std.Build) !void {
 
     const run_step = b.step("run", "Run the executable");
     run_step.dependOn(&run_exe.step);
+}
+
+fn compileShader(b: *std.Build, path: std.Build.LazyPath) std.Build.LazyPath {
+    const run_slangc = b.addSystemCommand(&.{
+        "slangc", "-g",           "-target", "spirv",
+        "-entry", "vertexMain",   "-stage",  "vertex",
+        "-entry", "fragmentMain", "-stage",  "fragment",
+    });
+    run_slangc.addArg("-o");
+    const out = run_slangc.addOutputFileArg("shader.spv");
+    run_slangc.addFileArg(path);
+    return out;
 }

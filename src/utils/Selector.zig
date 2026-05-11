@@ -36,8 +36,11 @@ pub const at_n = Selector{ .sort = .nearest };
 pub const ArgumentsMask = struct {
     const Packed = blk: {
         const info = @typeInfo(Arguments).@"struct";
-        var types = [_]type{bool} ** info.fields.len;
+        var types: [info.fields.len]type = undefined;
+        @memset(&types, bool);
         var names: [info.fields.len][]const u8 = undefined;
+        var attribs: [info.fields.len]std.builtin.Type.StructField.Attributes = undefined;
+        @memset(&attribs, .{ .default_value_ptr = &@as(bool, false) });
         for (info.fields, &names) |f, *out| {
             out.* = f.name;
         }
@@ -47,9 +50,7 @@ pub const ArgumentsMask = struct {
             @Int(.unsigned, info.fields.len),
             &names,
             &types,
-            &([_]std.builtin.Type.StructField.Attributes{
-                .{ .default_value_ptr = &@as(bool, false) },
-            } ** info.fields.len),
+            &attribs,
         );
     };
 
