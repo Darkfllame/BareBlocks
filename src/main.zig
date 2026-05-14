@@ -5,6 +5,8 @@ const utils = @import("utils");
 const vk = @import("vulkan");
 const sdl = @import("sdl");
 const config = @import("config");
+const Device = @import("graphics/Device.zig");
+const Swapchain = @import("graphics/Swapchain.zig");
 
 const logger = core.logger;
 
@@ -46,11 +48,6 @@ fn stringFromBuffer(s: []const u8) [:0]const u8 {
     }
     @panic("Not zero terminated");
 }
-const PhysicalDeviceExtendedDynamicStateFeaturesEXT = extern struct {
-    s_type: vk.StructureType = .physical_device_extended_dynamic_state_features_ext,
-    p_next: ?*anyopaque = null,
-    extended_dynamic_state: bool align(4) = false,
-};
 
 const DebugUtilsDataFormatter = struct {
     app: *App,
@@ -218,37 +215,16 @@ const QueueFamilyIndices = struct {
     }
 };
 
-const App = struct {
-    const PipelineLayoutCreateInfo = struct {
-        flags: vk.PipelineLayoutCreateFlags = .{},
-        set_layouts: []const vk.DescriptorSetLayoutCreateInfo = &.{},
-        push_constant_ranges: []const vk.PushConstantRange = &.{},
-    };
-    const GraphicsPipelineCreateInfo = struct {
-        p_next: ?*const anyopaque = null,
-        flags: vk.PipelineCreateFlags = .{},
-        stages: []const vk.PipelineShaderStageCreateInfo,
-        vertex_input_state: ?vk.PipelineVertexInputStateCreateInfo = null,
-        input_assembly_state: ?vk.PipelineInputAssemblyStateCreateInfo = null,
-        tessellation_state: ?vk.PipelineTessellationStateCreateInfo = null,
-        viewport_state: ?vk.PipelineViewportStateCreateInfo = null,
-        rasterization_state: ?vk.PipelineRasterizationStateCreateInfo = null,
-        multisample_state: ?vk.PipelineMultisampleStateCreateInfo = null,
-        depth_stencil_state: ?vk.PipelineDepthStencilStateCreateInfo = null,
-        color_blend_state: ?vk.PipelineColorBlendStateCreateInfo = null,
-        dynamic_state: ?vk.PipelineDynamicStateCreateInfo = null,
-        /// Interface layout of the pipeline
-        layout: vk.PipelineLayout = .null_handle,
-        render_pass: vk.RenderPass = .null_handle,
-        subpass: u32 = 0,
-        /// If VK_PIPELINE_CREATE_DERIVATIVE_BIT is set and this value is nonzero, it specifies the handle
-        /// of the base pipeline this is a derivative of
-        base_pipeline_handle: vk.Pipeline = .null_handle,
-        /// If VK_PIPELINE_CREATE_DERIVATIVE_BIT is set and this value is not -1, it specifies an index into
-        /// CreateInfos of the base pipeline this is a derivative of
-        base_pipeline_index: i32 = 0,
-    };
+const cache_file_path: []const []const u8 = &.{ "bare_blocks", "pipeline_cache.dat" };
+const cache_file_path_len: usize = blk: {
+    var len: usize = 0;
+    for (cache_file_path) |str| {
+        len += str.len + 1;
+    }
+    break :blk len;
+};
 
+const App = struct {
     fn checkExtensions(self: *App, required: []const [*:0]const u8) !bool {
         if (required.len == 0) return true;
 
@@ -338,419 +314,68 @@ const App = struct {
         return .false;
     }
 
-    fn chosePhysicalDevice(self: *App) ?u8 {
-        const Inner = struct {
-            fn hasFeatures(check: []const vk.Bool32, available: []const vk.Bool32) bool {
-                for (check, available) |c, a| {
-                    if (c == .true and a == .false) {
-                        return false;
-                    }
-                }
-                return true;
-            }
-
-            fn hasFeatures2(comptime T: type, check: *const T, ptr: *const vk.BaseOutStructure) bool {
-                const fields = @typeInfo(T).@"struct".fields;
-                const feats_count = (@sizeOf(T) - @sizeOf(vk.BaseOutStructure)) / 4;
-
-                const feats_ptr: *const T = @ptrCast(ptr);
-
-                const feats_bools: [*]const vk.Bool32 = @ptrCast(&@field(feats_ptr, fields[2].name));
-                const check_bools: [*]const vk.Bool32 = @ptrCast(&@field(check, fields[2].name));
-
-                return hasFeatures(check_bools[0..feats_count], feats_bools[0..feats_count]);
-            }
+    fn doxGpuInfo(self: *App) void {
+        var driver_props: vk.PhysicalDeviceDriverProperties = .{
+            .driver_id = undefined,
+            .driver_name = undefined,
+            .driver_info = undefined,
+            .conformance_version = undefined,
         };
+        var props2: vk.PhysicalDeviceProperties2 = .{
+            .p_next = &driver_props,
+            .properties = undefined,
+        };
+        self.vki.getPhysicalDeviceProperties2(self.device.pdev, &props2);
+        const props = &props2.properties;
+        const apiver: vk.Version = @bitCast(props.api_version);
+        const dver: vk.Version = @bitCast(props.driver_version);
+        logger.info(
+            \\Chose GPU#{d} "{s}":
+            \\ - api version: {d}.{d}.{d}.{d}
+            \\ - driver version: {d}.{d}.{d}.{d}
+            \\ - type: {t}
+            \\ - vendor id: {X}
+            \\ - device id: {X}
+            \\ - pipeline cache uuid: {f}
+            \\ - driver id: {t}
+            \\ - driver name: {s}
+            \\ - driver info: {s}{s}
+            \\ - driver conformance version: {d}.{d}.{d}.{d}
+        , .{
+            self.chosen_pdev,                            stringFromBuffer(&props.device_name),
 
-        var highest_rating: u32 = 0;
-        var best_index: ?u8 = null;
-        dev_rating: for (self.phys_devs, 0..) |pdev, i| {
-            var rating: u32 = 0;
-            var feats: vk.PhysicalDeviceFeatures2 = .{ .features = undefined };
-            self.vki.getPhysicalDeviceFeatures2(pdev, &feats);
-            const props = self.vki.getPhysicalDeviceProperties(pdev);
-            rating += switch (props.device_type) {
-                // I guess this should be fine for now...
-                .discrete_gpu => 3,
-                .virtual_gpu => 2,
-                .integrated_gpu => 1,
-                else => 0,
-            };
+            apiver.variant,                              apiver.major,
+            apiver.minor,                                apiver.patch,
 
-            {
-                var current: ?*const vk.BaseOutStructure = @ptrCast(@alignCast(&feats));
-                while (current) |curr| {
-                    current = curr.p_next;
-                    // break :dev_rating; on mismatched features
-                    switch (curr.s_type) {
-                        .physical_device_features_2 => if (!Inner.hasFeatures2(
-                            vk.PhysicalDeviceFeatures2,
-                            &create_device_chain,
-                            curr,
-                        )) continue :dev_rating,
-                        .physical_device_vulkan_1_1_features => if (!Inner.hasFeatures2(
-                            vk.PhysicalDeviceVulkan11Features,
-                            &vulkan_11_features,
-                            curr,
-                        )) continue :dev_rating,
-                        .physical_device_vulkan_1_3_features => if (!Inner.hasFeatures2(
-                            vk.PhysicalDeviceVulkan13Features,
-                            &vulkan_13_features,
-                            curr,
-                        )) continue :dev_rating,
-                        .physical_device_extended_dynamic_state_features_ext => if (!Inner.hasFeatures2(
-                            vk.PhysicalDeviceExtendedDynamicStateFeaturesEXT,
-                            &extended_dynamic_state_features,
-                            curr,
-                        )) continue :dev_rating,
-                        else => {},
-                    }
-                }
-            }
-            if (highest_rating < rating) {
-                highest_rating = rating;
-                best_index = @intCast(i);
-            }
-        }
+            dver.variant,                                dver.major,
+            dver.minor,                                  dver.patch,
 
-        return best_index;
+            props.device_type,                           props.vendor_id,
+            props.device_id,                             utils.UUID.from(@bitCast(props.pipeline_cache_uuid)),
+
+            driver_props.driver_id,                      stringFromBuffer(&driver_props.driver_name),
+            stringFromBuffer(&driver_props.driver_info), "",
+
+            driver_props.conformance_version.major,      driver_props.conformance_version.minor,
+            driver_props.conformance_version.subminor,   driver_props.conformance_version.patch,
+        });
     }
 
-    fn createLogicalDevice(self: *App) !void {
-        const pdev = self.phys_devs[self.chosen_pdev];
-        const qfps = try self.vki.getPhysicalDeviceQueueFamilyPropertiesAlloc(pdev, self.gpa);
-        defer self.gpa.free(qfps);
-
-        var family_indices: QueueFamilyIndices = undefined;
-        var queue_indices: QueueFamilyIndices = undefined;
-
-        family_indices.init(self, pdev, qfps) catch |e| {
-            logger.err("Couldn't get all queue family indices", .{});
-            return e;
-        };
-
-        var qci_buffer: [QueueFamilyIndices.fields.len]vk.DeviceQueueCreateInfo = undefined;
-        const q_create_infos = family_indices.calculateQueuCreateInfos(&queue_indices, &qci_buffer);
-
-        const extensions = [_][*:0]const u8{
-            vk.extensions.khr_swapchain.name.ptr,
-        };
-
-        self.device = try self.vki.createDevice(pdev, &vk.DeviceCreateInfo{
-            .p_next = &create_device_chain,
-            .queue_create_info_count = @intCast(q_create_infos.len),
-            .p_queue_create_infos = q_create_infos.ptr,
-            .enabled_extension_count = extensions.len,
-            .pp_enabled_extension_names = &extensions,
-        }, null);
-        self.vkd.load(self.device, self.vki.dispatch.vkGetDeviceProcAddr.?);
-        errdefer self.vkd.destroyDevice(self.device, null);
-
-        inline for (QueueFamilyIndices.fields) |f| {
-            @field(self.queues, f.name) = self.vkd.getDeviceQueue(
-                self.device,
-                @field(family_indices, f.name),
-                @field(queue_indices, f.name),
-            );
-        }
-    }
-
-    fn recreateSwapchain(self: *App) !void {
-        var win_pxw: u32 = undefined;
-        var win_pxh: u32 = undefined;
-        assert(sdl.SDL_GetWindowSizeInPixels(self.window, @ptrCast(&win_pxw), @ptrCast(&win_pxh)));
-
-        const capabilities = try self.vki.getPhysicalDeviceSurfaceCapabilitiesKHR(
-            self.phys_devs[self.chosen_pdev],
-            self.surface,
-        );
-
-        const formats = try self.vki.getPhysicalDeviceSurfaceFormatsAllocKHR(
-            self.phys_devs[self.chosen_pdev],
-            self.surface,
-            self.gpa,
-        );
-        defer self.gpa.free(formats);
-        const format = for (formats) |fmt| {
-            if (fmt.color_space == .srgb_nonlinear_khr and fmt.format == .b8g8r8a8_srgb) {
-                break fmt;
-            }
-        } else {
-            @branchHint(.cold);
-            logger.err("Couldn't find surface format", .{});
-            return error.Vulkan;
-        };
-        self.swapchain.surface_format = format;
-
-        const present_modes = try self.vki.getPhysicalDeviceSurfacePresentModesAllocKHR(
-            self.phys_devs[self.chosen_pdev],
-            self.surface,
-            self.gpa,
-        );
-        defer self.gpa.free(present_modes);
-        var has_fifo = false;
-        const pm: vk.PresentModeKHR = for (present_modes) |pm| {
-            if (pm == .fifo_khr) {
-                has_fifo = true;
-            } else if (pm == .mailbox_khr) {
-                break pm;
-            }
-        } else if (has_fifo) .fifo_khr else {
-            @branchHint(.cold);
-            logger.err("FIFO Present mode should always be present. Bug in the vulkan driver ?", .{});
-            return error.Vulkan;
-        };
-        self.swapchain.present_mode = pm;
-
-        const extent = blk: {
-            if (capabilities.current_extent.width != std.math.maxInt(u32)) {
-                break :blk capabilities.current_extent;
-            }
-            break :blk vk.Extent2D{
-                .width = std.math.clamp(
-                    win_pxw,
-                    capabilities.min_image_extent.width,
-                    capabilities.max_image_extent.width,
-                ),
-                .height = std.math.clamp(
-                    win_pxh,
-                    capabilities.min_image_extent.height,
-                    capabilities.max_image_extent.height,
-                ),
-            };
-        };
-
-        var min_image_count = @max(3, capabilities.min_image_count);
-        if (0 < capabilities.max_image_count and capabilities.max_image_count < min_image_count) {
-            min_image_count = capabilities.min_image_count;
-        }
-        self.swapchain.handle = try self.vkd.createSwapchainKHR(self.device, &vk.SwapchainCreateInfoKHR{
-            .surface = self.surface,
-            .min_image_count = min_image_count,
-            .image_format = format.format,
-            .image_color_space = format.color_space,
-            .image_extent = extent,
-            .image_array_layers = 1,
-            .image_usage = .{ .color_attachment_bit = true },
-            .image_sharing_mode = .exclusive,
-            .pre_transform = capabilities.current_transform,
-            .composite_alpha = .{ .opaque_bit_khr = true },
-            .present_mode = pm,
-            .clipped = true,
-            .old_swapchain = self.swapchain.handle,
-        }, null);
-
-        self.swapchain.image_count = 0;
-        var image_count: u32 = undefined;
-        _ = try self.vkd.getSwapchainImagesKHR(
-            self.device,
-            self.swapchain.handle,
-            &image_count,
-            null,
-        );
-        const images = try self.gpa.realloc(self.swapchain.getImages(), image_count);
-        self.swapchain.images = images.ptr;
-        errdefer self.gpa.free(images);
-        _ = try self.vkd.getSwapchainImagesKHR(
-            self.device,
-            self.swapchain.handle,
-            &image_count,
-            @constCast(self.swapchain.images.?),
-        );
-
-        const views = try self.gpa.realloc(self.swapchain.getImageViews(), image_count);
-        self.swapchain.img_views = views.ptr;
-        errdefer self.gpa.free(views);
-
-        var iv_ci = vk.ImageViewCreateInfo{
-            .image = undefined,
-            .view_type = .@"2d",
-            .format = format.format,
-            .components = .{
-                .r = .identity,
-                .g = .identity,
-                .b = .identity,
-                .a = .identity,
-            },
-            .subresource_range = .{
-                .aspect_mask = .{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            },
-        };
-        for (images, views, 0..) |img, *iv, i| {
-            errdefer for (views[0..i]) |iv2| {
-                self.vkd.destroyImageView(self.device, iv2, null);
-            };
-            iv_ci.image = img;
-            @constCast(iv).* = try self.vkd.createImageView(self.device, &iv_ci, null);
-        }
-
-        errdefer for (views) |iv| { // prob not needed
-            self.vkd.destroyImageView(self.device, iv, null);
-        };
-
-        self.swapchain.image_count = @intCast(images.len);
-    }
-
-    inline fn createShader(self: *App, code: []const u32) !vk.ShaderModule {
-        return self.vkd.createShaderModule(self.device, &vk.ShaderModuleCreateInfo{
-            .code_size = code.len * 4,
-            .p_code = code.ptr,
-        }, null);
-    }
-
-    inline fn destroyShader(self: *App, sh: vk.ShaderModule) void {
-        assert(sh != .null_handle);
-        return self.vkd.destroyShaderModule(self.device, sh, null);
-    }
-
-    inline fn createPipelineLayout(self: *App, info: PipelineLayoutCreateInfo) !vk.PipelineLayout {
-        assert(info.set_layouts.len <= std.math.maxInt(u32));
-        assert(info.push_constant_ranges.len <= std.math.maxInt(u32));
-
-        const set_layouts = try self.gpa.alloc(vk.DescriptorSetLayout, info.set_layouts.len);
-        defer self.gpa.free(set_layouts);
-
-        for (set_layouts, info.set_layouts, 0..) |*out, *dsl_info, i| {
-            errdefer for (set_layouts[0..i]) |dsl| {
-                self.vkd.destroyDescriptorSetLayout(self.device, dsl, null);
-            };
-            out.* = try self.vkd.createDescriptorSetLayout(self.device, dsl_info, null);
-        }
-        defer for (set_layouts) |dsl| {
-            self.vkd.destroyDescriptorSetLayout(self.device, dsl, null);
-        };
-
-        return self.vkd.createPipelineLayout(self.device, &vk.PipelineLayoutCreateInfo{
-            .flags = info.flags,
-            .set_layout_count = @intCast(set_layouts.len),
-            .p_set_layouts = set_layouts.ptr,
-            .push_constant_range_count = @intCast(info.push_constant_ranges.len),
-            .p_push_constant_ranges = info.push_constant_ranges.ptr,
-        }, null);
-    }
-
-    inline fn destroyPipelineLayout(self: *App, ppl: vk.PipelineLayout) void {
-        return self.vkd.destroyPipelineLayout(self.device, ppl, null);
-    }
-
-    fn createGraphicsPipeline(self: *App, info: GraphicsPipelineCreateInfo) !vk.Pipeline {
-        var out: vk.Pipeline = undefined;
-
-        _ = try self.vkd.createGraphicsPipelines(
-            self.device,
-            .null_handle,
-            (&vk.GraphicsPipelineCreateInfo{
-                .p_next = info.p_next,
-                .flags = info.flags,
-                .stage_count = @intCast(info.stages.len),
-                .p_stages = info.stages.ptr,
-                .p_vertex_input_state = if (info.vertex_input_state) |*ptr| ptr else null,
-                .p_input_assembly_state = if (info.input_assembly_state) |*ptr| ptr else null,
-                .p_tessellation_state = if (info.tessellation_state) |*ptr| ptr else null,
-                .p_viewport_state = if (info.viewport_state) |*ptr| ptr else null,
-                .p_rasterization_state = if (info.rasterization_state) |*ptr| ptr else null,
-                .p_multisample_state = if (info.multisample_state) |*ptr| ptr else null,
-                .p_depth_stencil_state = if (info.depth_stencil_state) |*ptr| ptr else null,
-                .p_color_blend_state = if (info.color_blend_state) |*ptr| ptr else null,
-                .p_dynamic_state = if (info.dynamic_state) |*ptr| ptr else null,
-                .layout = info.layout,
-                .render_pass = info.render_pass,
-                .subpass = info.subpass,
-                .base_pipeline_handle = info.base_pipeline_handle,
-                .base_pipeline_index = info.base_pipeline_index,
-            })[0..1],
-            null,
-            (&out)[0..1],
-        );
-
-        return out;
-    }
-
-    inline fn destroyPipeline(self: *App, pl: vk.Pipeline) void {
-        return self.vkd.destroyPipeline(self.device, pl, null);
-    }
-
-    gpa: Allocator,
-    arena: *std.heap.ArenaAllocator,
-    io: Io,
-    args: process.Args,
-    envmap: *const process.Environ.Map,
-
-    window: *sdl.SDL_Window,
-
-    extensions_properties: []const vk.ExtensionProperties,
-    layers_properties: []const vk.LayerProperties,
-
-    vkb: vk.BaseWrapper,
-    vki: vk.InstanceWrapper,
-    vkd: vk.DeviceWrapper,
-
-    debug_messenger: if (builtin.mode == .Debug) vk.DebugUtilsMessengerEXT else void,
-
-    phys_devs: []const vk.PhysicalDevice,
-    // More than 256 is not happening soon LMAO
-    /// Index into `phys_devs`
-    chosen_pdev: u8,
-
-    instance: vk.Instance,
-    surface: vk.SurfaceKHR,
-    device: vk.Device,
-    queues: QueueFamilyIndices.Queues,
-
-    swapchain: struct {
-        handle: vk.SwapchainKHR = .null_handle,
-        image_count: u8 = 0,
-        surface_format: vk.SurfaceFormatKHR = .{
-            .format = .undefined,
-            .color_space = .srgb_nonlinear_khr,
-        },
-        present_mode: vk.PresentModeKHR = .immediate_khr,
-        images: ?[*]const vk.Image = null,
-        img_views: ?[*]const vk.ImageView = null,
-
-        fn getImages(self: @This()) []const vk.Image {
-            return if (self.images) |imgs| imgs[0..self.image_count] else &.{};
-        }
-
-        fn getImageViews(self: @This()) []const vk.ImageView {
-            return if (self.img_views) |imgs| imgs[0..self.image_count] else &.{};
-        }
-    },
-
-    pipeline_layout: vk.PipelineLayout,
-    pipeline: vk.Pipeline,
-
-    pub fn create(
-        init: process.Init,
+    fn createInstance(
+        self: *App,
         vk_loader: vk.PfnGetInstanceProcAddr,
         sdl_vk_exts: []const [*:0]const u8,
-    ) !*App {
-        const self = try init.gpa.create(App);
-        errdefer init.gpa.destroy(self);
-        self.gpa = init.gpa;
-        self.arena = init.arena;
-        self.io = init.io;
-        self.args = init.minimal.args;
-        self.envmap = init.environ_map;
+    ) !void {
+        const max_version: vk.Version = @bitCast(try self.vkb.enumerateInstanceVersion());
+        if (max_version.variant != 0 or max_version.major != 1 or max_version.minor < 3) {
+            logger.err("Vulkan drivers outdated, please use/install vulkan 0.1.3.0" ++
+                "(it came out in 2022 bro, come on). Got {d}.{d}.{d}.{d}", .{
+                max_version.variant, max_version.major,
+                max_version.minor,   max_version.patch,
+            });
+            return error.Vulkan;
+        }
 
-        self.window = sdl.SDL_CreateWindow(
-            "Bare Blocks | IN-DEV",
-            800,
-            600,
-            sdl.SDL_WINDOW_VULKAN | sdl.SDL_WINDOW_HIDDEN,
-        ) orelse {
-            logger.err("Failed to create window", .{});
-            return error.SDL;
-        };
-        errdefer sdl.SDL_DestroyWindow(self.window);
-
-        self.vkb.load(vk_loader);
-
-        //#region VkInstance
         const all_required_extensions = try std.mem.concat(
             self.gpa,
             [*:0]const u8,
@@ -793,7 +418,7 @@ const App = struct {
                 .application_version = vk_version,
                 .p_engine_name = "BareBlocks",
                 .engine_version = vk_version,
-                .api_version = vk.API_VERSION_1_4.toU32(),
+                .api_version = vk.API_VERSION_1_3.toU32(),
             },
             .enabled_layer_count = @intCast(all_required_layers.len),
             .pp_enabled_layer_names = all_required_layers.ptr,
@@ -830,23 +455,139 @@ const App = struct {
         errdefer if (builtin.mode == .Debug) {
             self.vki.destroyDebugUtilsMessengerEXT(self.instance, self.debug_messenger, null);
         };
-        //#endregion VkInstance
+    }
 
-        //#region VkSurfaceKHR
-        if (!sdl.SDL_Vulkan_CreateSurface(
-            self.window,
-            @ptrCast(self.instance),
-            null,
-            @ptrCast(&self.surface),
-        )) {
-            logger.err("Couldn't create VkSurfaceKHR from SDL_Window", .{});
+    fn getCacheFilePath(self: *App) ![]const u8 {
+        if (self.cache_file_path) |path| return path;
+
+        const path = sw: switch (builtin.os.tag) {
+            .linux => {
+                const home_dir = self.envmap.get("HOME") orelse @panic("Why don't you have your HOME set ._.");
+                break :sw try std.fs.path.join(self.gpa, (&[_][]const u8{ home_dir, ".cache" }) ++ cache_file_path);
+            },
+            .windows => {
+                const lad = self.envmap.get("LOCALAPPDATA") orelse @panic("Uh oh");
+                break :sw try std.fs.path.join(self.gpa, (&[_][]const u8{lad}) ++ cache_file_path);
+            },
+            else => @compileError("OS Not Supported"),
+        };
+        self.cache_file_path = path;
+        return path;
+    }
+
+    fn fetchPipelineCacheData(self: *App) ![]u8 {
+        const cache_path = try self.getCacheFilePath();
+
+        const cache_file = try std.Io.Dir.openFileAbsolute(self.io, cache_path, .{
+            .lock = .exclusive,
+        });
+        defer cache_file.close(self.io);
+
+        var reader = cache_file.reader(self.io, &.{});
+        const len = try cache_file.length(self.io);
+
+        const buf = try reader.interface.readAlloc(self.gpa, len);
+        logger.info("Loaded {Bi} of pipeline cache data", .{buf.len});
+        return buf;
+    }
+
+    fn savePipelineCache(self: *App) !void {
+        const file_path = self.cache_file_path.?;
+        const global_cache_dir = try std.Io.Dir.openDirAbsolute(
+            self.io,
+            file_path[0 .. file_path.len - cache_file_path_len],
+            .{},
+        );
+        defer global_cache_dir.close(self.io);
+
+        try global_cache_dir.createDirPath(self.io, file_path[0 .. file_path.len - cache_file_path[cache_file_path.len - 1].len]);
+
+        const cache_file = try std.Io.Dir.createFileAbsolute(self.io, self.cache_file_path.?, .{
+            .lock = .exclusive,
+        });
+
+        const data = try self.device.getPipelineCacheData(self.gpa, self.pipeline_cache);
+        defer self.gpa.free(data);
+
+        try cache_file.writePositionalAll(self.io, data, 0);
+
+        logger.info("Saved {Bi} of pipeline cache data", .{data.len});
+    }
+
+    gpa: Allocator,
+    arena: *std.heap.ArenaAllocator,
+    io: Io,
+    args: process.Args,
+    envmap: *const process.Environ.Map,
+
+    window: *sdl.SDL_Window,
+
+    extensions_properties: []const vk.ExtensionProperties,
+    layers_properties: []const vk.LayerProperties,
+
+    vkb: vk.BaseWrapper,
+    vki: vk.InstanceWrapper,
+    vkd: vk.DeviceWrapper,
+
+    debug_messenger: if (builtin.mode == .Debug) vk.DebugUtilsMessengerEXT else void,
+
+    phys_devs: []const vk.PhysicalDevice,
+    // More than 256 is not happening soon LMAO
+    /// Index into `phys_devs`
+    chosen_pdev: u8,
+
+    instance: vk.Instance,
+    surface: vk.SurfaceKHR,
+    device: Device,
+    swapchain: Swapchain,
+
+    cache_file_path: ?[]const u8,
+    pipeline_cache: vk.PipelineCache,
+    pipeline: vk.Pipeline,
+    pipeline_layout: vk.PipelineLayout,
+
+    pub fn create(
+        init: process.Init,
+        vk_loader: vk.PfnGetInstanceProcAddr,
+        sdl_vk_exts: []const [*:0]const u8,
+    ) !*App {
+        const self = try init.gpa.create(App);
+        errdefer init.gpa.destroy(self);
+        self.gpa = init.gpa;
+        self.arena = init.arena;
+        self.io = init.io;
+        self.args = init.minimal.args;
+        self.envmap = init.environ_map;
+        self.cache_file_path = null;
+
+        self.window = sdl.SDL_CreateWindow(
+            "Bare Blocks | IN-DEV",
+            800,
+            600,
+            sdl.SDL_WINDOW_VULKAN | sdl.SDL_WINDOW_HIDDEN,
+        ) orelse {
+            logger.err("Failed to create window", .{});
             return error.SDL;
-        }
-        errdefer self.vki.destroySurfaceKHR(self.instance, self.surface, null);
-        //#endregion VkSurfaceKHR
+        };
+        errdefer sdl.SDL_DestroyWindow(self.window);
 
-        //#region VkPhysicalDevice
-        {
+        self.vkb.load(vk_loader);
+
+        try self.createInstance(vk_loader, sdl_vk_exts);
+        errdefer {
+            self.gpa.free(self.extensions_properties);
+            self.gpa.free(self.layers_properties);
+            if (builtin.mode == .Debug) {
+                self.vki.destroyDebugUtilsMessengerEXT(self.instance, self.debug_messenger, null);
+            }
+            self.vki.destroyInstance(self.instance, null);
+        }
+        const instp = vk.InstanceProxy.init(self.instance, &self.vki);
+
+        try self.swapchain.createSurface(self.instance, self.window);
+        errdefer instp.destroySurfaceKHR(self.swapchain.surface, null);
+
+        { // Allocating physical devices array, for future dynamic device switching
             var count: u32 = undefined;
             _ = try self.vki.enumeratePhysicalDevices(self.instance, &count, null);
             if (count > 255) {
@@ -859,62 +600,51 @@ const App = struct {
         }
         errdefer self.gpa.free(self.phys_devs);
 
-        self.chosen_pdev = self.chosePhysicalDevice() orelse {
-            logger.err("Couldn't choose physical device", .{});
-            return error.Vulkan;
+        try self.device.init(.{
+            .gpa = self.gpa,
+            .instance = instp,
+            .wrapper = &self.vkd,
+            .physical_devices = self.phys_devs,
+            .surface = self.swapchain.surface,
+
+            .pdev_index_out = &self.chosen_pdev,
+        });
+        errdefer self.device.deinit();
+
+        self.doxGpuInfo();
+
+        try self.swapchain.init(.{
+            .gpa = self.gpa,
+            .window = self.window,
+            .instance = instp,
+            .device = &self.device,
+        });
+        errdefer self.swapchain.deinit(self.gpa, instp);
+
+        const ppc_data: ?[]const u8 = self.fetchPipelineCacheData() catch |e| err: {
+            logger.warn("Couldn't get pipeline cache data: {t}", .{e});
+            break :err null;
         };
+        errdefer if (self.cache_file_path) |path| self.gpa.free(path);
+        defer if (ppc_data) |data| self.gpa.free(data);
 
-        {
-            const props = self.vki.getPhysicalDeviceProperties(self.phys_devs[self.chosen_pdev]);
-            const apiver: vk.Version = @bitCast(props.api_version);
-            const dver: vk.Version = @bitCast(props.driver_version);
-            logger.info(
-                \\Chose GPU#{d} "{s}":
-                \\ - api version: {d}.{d}.{d}.{d}
-                \\ - driver version: {d}.{d}.{d}.{d}
-                \\ - type: {t}
-                \\ - vendor id: {X}
-                \\ - device id: {X}
-                \\ - pipeline cache uuid: {f}
-            , .{
-                self.chosen_pdev,  stringFromBuffer(&props.device_name),
+        self.pipeline_cache = try self.device.createPipelineCache(ppc_data);
+        errdefer self.device.destroyPipelineCache(self.pipeline_cache);
 
-                apiver.variant,    apiver.major,
-                apiver.minor,      apiver.patch,
+        { // Graphics Pipeline
+            const vertex_module = try self.device.createShader(@ptrCast(&default_shader_code));
+            defer self.device.destroyShader(vertex_module);
+            const fragment_module = try self.device.createShader(@ptrCast(&default_shader_code));
+            defer self.device.destroyShader(fragment_module);
 
-                dver.variant,      dver.major,
-                dver.minor,        dver.patch,
-
-                props.device_type, props.vendor_id,
-                props.device_id,   utils.UUID.from(@bitCast(props.pipeline_cache_uuid)),
-            });
-        }
-        //#endregion VkPhysicalDevice
-
-        //#region VkDevice
-        try self.createLogicalDevice();
-        errdefer self.vkd.destroyDevice(self.device, null);
-        //#endregion VkDevice
-
-        //#region VkSwapchainKHR
-        self.swapchain = .{};
-        try self.recreateSwapchain();
-        errdefer self.vkd.destroySwapchainKHR(self.device, self.swapchain.handle, null);
-        //#endregion VkSwapchainKHR
-
-        //#region GraphicsPipline
-        {
-            const vertex_module = try self.createShader(@ptrCast(&default_shader_code));
-            defer self.destroyShader(vertex_module);
-            const fragment_module = try self.createShader(@ptrCast(&default_shader_code));
-            defer self.destroyShader(fragment_module);
-
-            self.pipeline_layout = try self.createPipelineLayout(.{});
-            errdefer self.destroyPipelineLayout(self.pipeline_layout);
+            self.pipeline_layout = try self.device.createPipelineLayout(self.gpa, .{});
+            errdefer self.device.destroyPipelineLayout(self.pipeline_layout);
 
             const dynamic_states = [_]vk.DynamicState{ .viewport, .scissor };
 
-            self.pipeline = try self.createGraphicsPipeline(GraphicsPipelineCreateInfo{
+            self.pipeline = try self.device.createGraphicsPipeline(Device.GraphicsPipelineCreateInfo{
+                .cache = self.pipeline_cache,
+
                 .p_next = &vk.PipelineRenderingCreateInfo{
                     .view_mask = 0,
                     .color_attachment_count = 1,
@@ -937,19 +667,19 @@ const App = struct {
                 .vertex_input_state = .{},
                 .input_assembly_state = .{
                     .topology = .triangle_list,
-                    .primitive_restart_enable = false,
+                    .primitive_restart_enable = .false,
                 },
                 .viewport_state = .{
                     .viewport_count = 1,
                     .scissor_count = 1,
                 },
                 .rasterization_state = .{
-                    .depth_clamp_enable = false,
-                    .rasterizer_discard_enable = false,
+                    .depth_clamp_enable = .false,
+                    .rasterizer_discard_enable = .false,
                     .polygon_mode = .fill,
-                    .cull_mode = .{ .back_bit = true },
+                    .cull_mode = .{ .back_bit = false },
                     .front_face = .counter_clockwise,
-                    .depth_bias_enable = false,
+                    .depth_bias_enable = .false,
                     .depth_bias_constant_factor = 0,
                     .depth_bias_clamp = 0,
                     .depth_bias_slope_factor = 0,
@@ -957,28 +687,28 @@ const App = struct {
                 },
                 .multisample_state = .{
                     .rasterization_samples = .{ .@"1_bit" = true },
-                    .sample_shading_enable = false,
+                    .sample_shading_enable = .false,
                     .min_sample_shading = 0,
-                    .alpha_to_coverage_enable = false,
-                    .alpha_to_one_enable = false,
+                    .alpha_to_coverage_enable = .false,
+                    .alpha_to_one_enable = .false,
                 },
                 .depth_stencil_state = .{
-                    .depth_test_enable = false,
-                    .depth_write_enable = false,
+                    .depth_test_enable = .false,
+                    .depth_write_enable = .false,
                     .depth_compare_op = .less,
-                    .depth_bounds_test_enable = false,
-                    .stencil_test_enable = false,
+                    .depth_bounds_test_enable = .false,
+                    .stencil_test_enable = .false,
                     .front = undefined,
                     .back = undefined,
                     .min_depth_bounds = 0,
                     .max_depth_bounds = 0,
                 },
                 .color_blend_state = .{
-                    .logic_op_enable = true,
+                    .logic_op_enable = .true,
                     .logic_op = .copy,
                     .attachment_count = 1,
                     .p_attachments = &[_]vk.PipelineColorBlendAttachmentState{.{
-                        .blend_enable = true,
+                        .blend_enable = .true,
                         .src_color_blend_factor = .src_alpha,
                         .dst_color_blend_factor = .one_minus_src_alpha,
                         .color_blend_op = .add,
@@ -1000,38 +730,45 @@ const App = struct {
                 },
                 .layout = self.pipeline_layout,
             });
-        }
-        errdefer self.destroyPipeline(self.pipeline);
-        //#endregion GraphicsPipline
+        } // Graphics Pipeline
+        errdefer self.device.destroyPipeline(self.pipeline);
 
         _ = sdl.SDL_ShowWindow(self.window);
         return self;
     }
 
     pub fn destroy(self: *App) void {
-        self.destroyPipeline(self.pipeline);
-        self.destroyPipelineLayout(self.pipeline_layout);
-        for (self.swapchain.getImageViews()) |iv| {
-            self.vkd.destroyImageView(self.device, iv, null);
-        }
-        self.gpa.free(self.swapchain.getImageViews());
-        self.gpa.free(self.swapchain.getImages());
-        self.vkd.destroySwapchainKHR(self.device, self.swapchain.handle, null);
-        self.vkd.destroyDevice(self.device, null);
-        self.gpa.free(self.phys_devs);
-        self.vki.destroySurfaceKHR(self.instance, self.surface, null);
+        const instp = vk.InstanceProxy.init(self.instance, &self.vki);
+
+        self.device.getQueue(.graphics).waitIdle() catch |e| logger.warn("Error while waiting for graphics queue: {t}", .{e});
+        self.device.getQueue(.present).waitIdle() catch |e| logger.warn("Error while waiting for present queue: {t}", .{e});
+        self.device.destroyPipeline(self.pipeline);
+        self.device.destroyPipelineLayout(self.pipeline_layout);
+        self.savePipelineCache() catch |e| {
+            logger.err("Failed to save pipeline cache: {t}", .{e});
+        };
+        self.device.destroyPipelineCache(self.pipeline_cache);
+        self.swapchain.deinit(self.gpa, instp);
+        self.device.deinit();
         if (builtin.mode == .Debug) {
             self.vki.destroyDebugUtilsMessengerEXT(self.instance, self.debug_messenger, null);
         }
-        self.vki.destroyInstance(self.instance, null);
+        instp.destroyInstance(null);
+        sdl.SDL_DestroyWindow(self.window);
+
+        if (self.cache_file_path) |path| self.gpa.free(path);
+        self.gpa.free(self.phys_devs);
         self.gpa.free(self.layers_properties);
         self.gpa.free(self.extensions_properties);
-        sdl.SDL_DestroyWindow(self.window);
         self.gpa.destroy(self);
     }
 
     pub fn tick(self: *App) !void {
-        _ = self;
+        const cmd = try self.swapchain.beginDraw();
+        cmd.bindPipeline(.graphics, self.pipeline);
+        cmd.draw(3, 1, 0, 0);
+        try self.swapchain.endDraw();
+        // logger.debug("tick", .{});
     }
 
     pub fn onEvent(self: *App, ev: *sdl.SDL_Event) !enum { @"continue", success } {
@@ -1084,6 +821,9 @@ const Wrapper = struct {
             vk_loader.?,
             @ptrCast(exts[0..ext_count]),
         ) catch |e| {
+            if (@errorReturnTrace()) |ert| {
+                std.debug.dumpErrorReturnTrace(ert);
+            }
             w.err = e;
             logger.err("Couldn't create application: {t}", .{e});
             return sdl.SDL_APP_FAILURE;
@@ -1095,6 +835,9 @@ const Wrapper = struct {
     fn sdlAppIter(ud: ?*anyopaque) callconv(.c) sdl.SDL_AppResult {
         const w: *Wrapper = @ptrCast(@alignCast(ud));
         w.app.?.tick() catch |e| {
+            if (@errorReturnTrace()) |ert| {
+                std.debug.dumpErrorReturnTrace(ert);
+            }
             w.err = e;
             logger.err("Error while ticking: {t}", .{e});
             return sdl.SDL_APP_FAILURE;
@@ -1105,6 +848,9 @@ const Wrapper = struct {
     fn sdlAppEvent(ud: ?*anyopaque, ev: [*c]sdl.SDL_Event) callconv(.c) sdl.SDL_AppResult {
         const w: *Wrapper = @ptrCast(@alignCast(ud));
         const res = w.app.?.onEvent(@ptrCast(ev)) catch |e| {
+            if (@errorReturnTrace()) |ert| {
+                std.debug.dumpErrorReturnTrace(ert);
+            }
             w.err = e;
             logger.err("Error while handling event: {t}", .{e});
             return sdl.SDL_APP_FAILURE;

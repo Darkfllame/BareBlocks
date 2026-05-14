@@ -7,8 +7,9 @@
     .dependencies = .{
         .coroutines = .{ .path = "./coroutines" },
         .vulkan = .{
-            .url = "git+https://github.com/Darkfllame/vulkan-zig#f068766052e237f3a47be5ed4ace47efef08738d",
-            .hash = "vulkan-0.0.0-r7Ytx0CIAwDUqanSGLozkJ06AxR1yfoQHe58AGVQDxM9",
+            // .url = "git+https://github.com/Darkfllame/vulkan-zig.git#66157f47bff0def392c6ee80c6804d2a1e515b26",
+            // .hash = "vulkan-0.0.0-r7YtxzyDAwDDfjqWbKsnAojKxTA79_BdhYhVfDqy6UlI",
+            .path = "../vulkan-zig"
         },
         .vulkan_headers = .{
             .url = "git+https://github.com/KhronosGroup/Vulkan-Headers#8cfaaa1d4deedc865e52a42e654c5ec0d7d75eb0",
