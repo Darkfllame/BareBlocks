@@ -249,7 +249,7 @@ command_pool: vk.CommandPool,
 
 pub const PipelineLayoutCreateInfo = struct {
     flags: vk.PipelineLayoutCreateFlags = .{},
-    set_layouts: []const vk.DescriptorSetLayoutCreateInfo = &.{},
+    set_layouts: []const vk.DescriptorSetLayout = &.{},
     push_constant_ranges: []const vk.PushConstantRange = &.{},
 };
 pub const GraphicsPipelineCreateInfo = struct {
@@ -316,6 +316,10 @@ pub fn getQueue(self: *const Device, comptime queue_name: QueueFamilyIndices.Fie
     return .init(@field(self.queues, @tagName(queue_name)), self.proxy.wrapper);
 }
 
+pub fn queueWaitIdle(self: *const Device, comptime queue_name: QueueFamilyIndices.FieldsEnum) !void {
+    return self.getQueue(queue_name).waitIdle();
+}
+
 pub inline fn createShader(self: *Device, code: []const u32) !vk.ShaderModule {
     return self.proxy.createShaderModule(&vk.ShaderModuleCreateInfo{
         .code_size = code.len * 4,
@@ -347,27 +351,14 @@ pub inline fn destroyPipelineCache(self: *Device, ppc: vk.PipelineCache) void {
     return self.proxy.destroyPipelineCache(ppc, null);
 }
 
-pub fn createPipelineLayout(self: *Device, gpa: Allocator, info: PipelineLayoutCreateInfo) !vk.PipelineLayout {
+pub fn createPipelineLayout(self: *Device, info: PipelineLayoutCreateInfo) !vk.PipelineLayout {
     assert(info.set_layouts.len <= std.math.maxInt(u32));
     assert(info.push_constant_ranges.len <= std.math.maxInt(u32));
 
-    const set_layouts = try gpa.alloc(vk.DescriptorSetLayout, info.set_layouts.len);
-    defer gpa.free(set_layouts);
-
-    for (set_layouts, info.set_layouts, 0..) |*out, *dsl_info, i| {
-        errdefer for (set_layouts[0..i]) |dsl| {
-            self.proxy.destroyDescriptorSetLayout(dsl, null);
-        };
-        out.* = try self.proxy.createDescriptorSetLayout(dsl_info, null);
-    }
-    defer for (set_layouts) |dsl| {
-        self.proxy.destroyDescriptorSetLayout(dsl, null);
-    };
-
     return self.proxy.createPipelineLayout(&vk.PipelineLayoutCreateInfo{
         .flags = info.flags,
-        .set_layout_count = @intCast(set_layouts.len),
-        .p_set_layouts = set_layouts.ptr,
+        .set_layout_count = @intCast(info.set_layouts.len),
+        .p_set_layouts = info.set_layouts.ptr,
         .push_constant_range_count = @intCast(info.push_constant_ranges.len),
         .p_push_constant_ranges = info.push_constant_ranges.ptr,
     }, null);

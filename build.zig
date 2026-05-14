@@ -97,11 +97,13 @@ pub fn build(b: *std.Build) !void {
         .use_llvm = true,
         .use_lld = true,
     });
+    const shader_path = compileShader(b, b.path("assets/shaders/default.slang"));
     main_exe.root_module.addAnonymousImport("default_shader_code", .{
-        .root_source_file = compileShader(b, b.path("assets/shaders/default.slang")),
+        .root_source_file = shader_path,
     });
 
     b.installArtifact(main_exe);
+    b.getInstallStep().dependOn(&b.addInstallBinFile(shader_path, "default.spv").step);
 
     // const download_jar_exe = b.addExecutable(.{
     //     .name = "download_mcjar",

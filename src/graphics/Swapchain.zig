@@ -292,9 +292,11 @@ pub fn recreate(
         .clipped = .true,
         .old_swapchain = self.handle,
     };
+    const old_handle = self.handle;
     self.handle = try self.vk_device.createSwapchainKHR(&create_info, null);
+    errdefer self.vk_device.destroySwapchainKHR(self.handle, null);
 
-    const old_img_count = self.image_count * self.max_frames_in_flight;
+    const old_img_count = self.image_count;
     self.image_count = 0;
     var image_count: u32 = undefined;
     _ = try self.vk_device.getSwapchainImagesKHR(
@@ -306,6 +308,12 @@ pub fn recreate(
     const images = try gpa.realloc(self.images[0..old_img_count], image_count);
     self.images = images.ptr;
     errdefer gpa.free(images);
+    for (self.img_views[0..old_img_count]) |iv| {
+        self.vk_device.destroyImageView(iv, null);
+    }
+    if (old_handle != .null_handle) {
+        self.vk_device.destroySwapchainKHR(old_handle, null);
+    }
     _ = try self.vk_device.getSwapchainImagesKHR(
         self.handle,
         &image_count,
@@ -362,7 +370,7 @@ pub fn beginDraw(self: *Swapchain) !vk.CommandBufferProxy {
     );
     switch (next.result) {
         .success => {},
-        .timeout => unreachable,
+        .timeout => return error.Timeout,
         .suboptimal_khr => {},
         .not_ready => {},
         else => unreachable,
@@ -415,11 +423,6 @@ pub fn beginDraw(self: *Swapchain) !vk.CommandBufferProxy {
     }});
 
     return cmd;
-}
-
-pub fn cancelDraw(self: *Swapchain) void {
-    const cmd = self.getCommandBuffer();
-    cmd.resetCommandBuffer(.{}) catch unreachable;
 }
 
 pub fn endDraw(self: *Swapchain) !void {

@@ -514,6 +514,42 @@ const App = struct {
         logger.info("Saved {Bi} of pipeline cache data", .{data.len});
     }
 
+    fn hsv2rgb(h: f32, s: f32, v: f32) [3]f32 {
+        const i = @floor(h * 6);
+        const f = h * 6 - i;
+        const p = v * (1 - s);
+        const q = v * (1 - f * s);
+        const t = v * (1 - (1 - f) * s);
+        return switch (@as(u8, @intFromFloat(@mod(i, 6)))) {
+            0 => .{ v, t, p },
+            1 => .{ q, v, p },
+            2 => .{ p, v, t },
+            3 => .{ p, q, v },
+            4 => .{ t, p, v },
+            5 => .{ v, p, q },
+            else => unreachable,
+        };
+    }
+
+    fn render(self: *App, cmd: vk.CommandBufferProxy) !void {
+        cmd.bindPipeline(.graphics, self.pipeline);
+        const millis = @as(i64, @intCast(@divTrunc(self.start_time.untilNow(self.io, .boot).nanoseconds, std.time.ns_per_ms)));
+        const seconds = @as(f64, @floatFromInt(millis)) / std.time.ms_per_s;
+        const values: [3][4]f32 = .{
+            hsv2rgb(@floatCast(@sin(seconds * std.math.rad_per_deg * 10)), 1, 1) ++ .{0},
+            hsv2rgb(@floatCast(@sin((seconds + 40) * std.math.rad_per_deg * 10)), 1, 1) ++ .{0},
+            hsv2rgb(@floatCast(@sin((seconds + 80) * std.math.rad_per_deg * 10)), 1, 1) ++ .{0},
+        };
+        cmd.pushConstants(
+            self.pipeline_layout,
+            .{ .vertex_bit = true },
+            0,
+            @sizeOf(@TypeOf(values)),
+            &values,
+        );
+        cmd.draw(3, 1, 0, 0);
+    }
+
     gpa: Allocator,
     arena: *std.heap.ArenaAllocator,
     io: Io,
@@ -541,10 +577,14 @@ const App = struct {
     device: Device,
     swapchain: Swapchain,
 
+    do_rendering: bool = false,
+
     cache_file_path: ?[]const u8,
     pipeline_cache: vk.PipelineCache,
     pipeline: vk.Pipeline,
     pipeline_layout: vk.PipelineLayout,
+
+    start_time: Io.Timestamp,
 
     pub fn create(
         init: process.Init,
@@ -559,12 +599,14 @@ const App = struct {
         self.args = init.minimal.args;
         self.envmap = init.environ_map;
         self.cache_file_path = null;
+        self.do_rendering = false;
 
         self.window = sdl.SDL_CreateWindow(
             "Bare Blocks | IN-DEV",
             800,
             600,
-            sdl.SDL_WINDOW_VULKAN | sdl.SDL_WINDOW_HIDDEN,
+            sdl.SDL_WINDOW_VULKAN | sdl.SDL_WINDOW_HIDDEN |
+                sdl.SDL_WINDOW_RESIZABLE,
         ) orelse {
             logger.err("Failed to create window", .{});
             return error.SDL;
@@ -637,7 +679,15 @@ const App = struct {
             const fragment_module = try self.device.createShader(@ptrCast(&default_shader_code));
             defer self.device.destroyShader(fragment_module);
 
-            self.pipeline_layout = try self.device.createPipelineLayout(self.gpa, .{});
+            self.pipeline_layout = try self.device.createPipelineLayout(Device.PipelineLayoutCreateInfo{
+                .push_constant_ranges = &.{
+                    vk.PushConstantRange{
+                        .offset = 0,
+                        .size = @sizeOf(f32) * 4 * 3,
+                        .stage_flags = .{ .vertex_bit = true },
+                    },
+                },
+            });
             errdefer self.device.destroyPipelineLayout(self.pipeline_layout);
 
             const dynamic_states = [_]vk.DynamicState{ .viewport, .scissor };
@@ -734,14 +784,15 @@ const App = struct {
         errdefer self.device.destroyPipeline(self.pipeline);
 
         _ = sdl.SDL_ShowWindow(self.window);
+        self.start_time = .now(self.io, .boot);
         return self;
     }
 
     pub fn destroy(self: *App) void {
         const instp = vk.InstanceProxy.init(self.instance, &self.vki);
 
-        self.device.getQueue(.graphics).waitIdle() catch |e| logger.warn("Error while waiting for graphics queue: {t}", .{e});
-        self.device.getQueue(.present).waitIdle() catch |e| logger.warn("Error while waiting for present queue: {t}", .{e});
+        self.device.queueWaitIdle(.graphics) catch |e| logger.warn("Error while waiting for graphics queue: {t}", .{e});
+        self.device.queueWaitIdle(.present) catch |e| logger.warn("Error while waiting for present queue: {t}", .{e});
         self.device.destroyPipeline(self.pipeline);
         self.device.destroyPipelineLayout(self.pipeline_layout);
         self.savePipelineCache() catch |e| {
@@ -764,18 +815,45 @@ const App = struct {
     }
 
     pub fn tick(self: *App) !void {
-        const cmd = try self.swapchain.beginDraw();
-        cmd.bindPipeline(.graphics, self.pipeline);
-        cmd.draw(3, 1, 0, 0);
-        try self.swapchain.endDraw();
-        // logger.debug("tick", .{});
+        if (self.do_rendering) {
+            const cmd = try self.swapchain.beginDraw();
+            self.render(cmd) catch |e| {
+                logger.err("Rendering error: {t}", .{e});
+            };
+            try self.swapchain.endDraw();
+        }
     }
 
     pub fn onEvent(self: *App, ev: *sdl.SDL_Event) !enum { @"continue", success } {
-        _ = self;
-        if (ev.type == sdl.SDL_EVENT_QUIT) {
-            // .success ends the application
-            return .success;
+        const windowID = sdl.SDL_GetWindowID(self.window);
+        switch (ev.type) {
+            sdl.SDL_EVENT_QUIT => return .success,
+            sdl.SDL_EVENT_WINDOW_RESIZED, sdl.SDL_EVENT_WINDOW_DISPLAY_CHANGED => if (ev.window.windowID == windowID) {
+                try self.device.queueWaitIdle(.graphics);
+                try self.device.queueWaitIdle(.present);
+                try self.swapchain.recreate(
+                    self.gpa,
+                    .init(self.instance, &self.vki),
+                    self.window,
+                    self.device.pdev,
+                );
+            },
+
+            sdl.SDL_EVENT_WINDOW_MINIMIZED, sdl.SDL_EVENT_WINDOW_HIDDEN => if (ev.window.windowID == windowID) {
+                self.do_rendering = false;
+            },
+            sdl.SDL_EVENT_WINDOW_RESTORED, sdl.SDL_EVENT_WINDOW_MAXIMIZED, sdl.SDL_EVENT_WINDOW_SHOWN => if (ev.window.windowID == windowID) {
+                self.do_rendering = true;
+            },
+            sdl.SDL_EVENT_KEY_DOWN => {
+                if (ev.key.scancode == sdl.SDL_SCANCODE_F1) {
+                    const old_pipeline = self.pipeline_cache;
+                    self.pipeline_cache = try self.device.proxy.createPipelineCache(&.{}, null);
+                    self.device.proxy.destroyPipelineCache(old_pipeline, null);
+                    logger.info("Cleared pipeline cache!", .{});
+                }
+            },
+            else => {},
         }
         return .@"continue";
     }
