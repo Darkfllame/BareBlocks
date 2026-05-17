@@ -321,8 +321,13 @@ const App = struct {
             .driver_info = undefined,
             .conformance_version = undefined,
         };
-        var props2: vk.PhysicalDeviceProperties2 = .{
+        var maint3: vk.PhysicalDeviceMaintenance3Properties = .{
             .p_next = &driver_props,
+            .max_memory_allocation_size = undefined,
+            .max_per_set_descriptors = undefined,
+        };
+        var props2: vk.PhysicalDeviceProperties2 = .{
+            .p_next = &maint3,
             .properties = undefined,
         };
         self.vki.getPhysicalDeviceProperties2(self.device.pdev, &props2);
@@ -403,12 +408,12 @@ const App = struct {
             return error.LayerNotFound;
         }
 
-        const vk_version = vk.makeApiVersion(
+        const vk_version = vk.Version.of(
             0,
             config.version.major,
             config.version.minor,
             config.version.patch,
-        ).toU32();
+        );
 
         // Ideally, this will not be in the final executable except in debug mode
         var msg_cinfo: vk.DebugUtilsMessengerCreateInfoEXT = undefined;
@@ -418,7 +423,7 @@ const App = struct {
                 .application_version = vk_version,
                 .p_engine_name = "BareBlocks",
                 .engine_version = vk_version,
-                .api_version = vk.API_VERSION_1_3.toU32(),
+                .api_version = vk.API_VERSION_1_3,
             },
             .enabled_layer_count = @intCast(all_required_layers.len),
             .pp_enabled_layer_names = all_required_layers.ptr,
@@ -585,6 +590,12 @@ const App = struct {
     pipeline_layout: vk.PipelineLayout,
 
     start_time: Io.Timestamp,
+
+    vbuffer: Device.Buffer,
+    ibuffer: Device.Buffer,
+    tbuffer: Device.Buffer,
+    ubuffer: Device.Buffer,
+    sbuffer: Device.Buffer,
 
     pub fn create(
         init: process.Init,
@@ -783,6 +794,17 @@ const App = struct {
         } // Graphics Pipeline
         errdefer self.device.destroyPipeline(self.pipeline);
 
+        self.vbuffer = try self.device.mman.allocBuffer(.vertex, 128, .best);
+        errdefer self.device.mman.freeBuffer(self.vbuffer);
+        self.ibuffer = try self.device.mman.allocBuffer(.index, 128, .best);
+        errdefer self.device.mman.freeBuffer(self.ibuffer);
+        self.tbuffer = try self.device.mman.allocBuffer(.transfer, 128, .best);
+        errdefer self.device.mman.freeBuffer(self.tbuffer);
+        self.ubuffer = try self.device.mman.allocBuffer(.uniform, 128, .best);
+        errdefer self.device.mman.freeBuffer(self.ubuffer);
+        self.sbuffer = try self.device.mman.allocBuffer(.storage, 128, .best);
+        errdefer self.device.mman.freeBuffer(self.sbuffer);
+
         _ = sdl.SDL_ShowWindow(self.window);
         self.start_time = .now(self.io, .boot);
         return self;
@@ -792,7 +814,13 @@ const App = struct {
         const instp = vk.InstanceProxy.init(self.instance, &self.vki);
 
         self.device.queueWaitIdle(.graphics) catch |e| logger.warn("Error while waiting for graphics queue: {t}", .{e});
+        self.device.queueWaitIdle(.transfer) catch |e| logger.warn("Error while waiting for transfer queue: {t}", .{e});
         self.device.queueWaitIdle(.present) catch |e| logger.warn("Error while waiting for present queue: {t}", .{e});
+        self.device.mman.freeBuffer(self.tbuffer);
+        self.device.mman.freeBuffer(self.ubuffer);
+        self.device.mman.freeBuffer(self.ibuffer);
+        self.device.mman.freeBuffer(self.sbuffer);
+        self.device.mman.freeBuffer(self.vbuffer);
         self.device.destroyPipeline(self.pipeline);
         self.device.destroyPipelineLayout(self.pipeline_layout);
         self.savePipelineCache() catch |e| {

@@ -1,6 +1,7 @@
 const Device = @This();
 const std = @import("std");
 const vk = @import("vulkan");
+const MemoryManager = @import("MemoryManager.zig");
 
 const assert = std.debug.assert;
 
@@ -51,8 +52,8 @@ const QueueFamilyIndices = struct {
         }
         break :blk @Struct(.auto, null, &names, &types, &attribs);
     };
+    const TagInt = std.math.Log2Int(@Int(.unsigned, fields.len));
     const FieldsEnum = blk: {
-        const TagInt = std.math.Log2Int(@Int(.unsigned, fields.len));
         var names: [fields.len][]const u8 = undefined;
         var values: [fields.len]TagInt = undefined;
         for (fields, 0..) |f, i| {
@@ -213,6 +214,10 @@ fn createLogicalDevice(self: *Device, gpa: Allocator, wrapper: *vk.DeviceWrapper
 
     var qci_buffer: [QueueFamilyIndices.fields.len]vk.DeviceQueueCreateInfo = undefined;
     const q_create_infos = self.queue_family_indices.calculateQueuCreateInfos(&queue_indices, &qci_buffer);
+    for (q_create_infos, 0..) |info, i| {
+        self.concurrent_queues[i] = info.queue_family_index;
+    }
+    self.concurrent_queues_count = @intCast(q_create_infos.len);
 
     const extensions = [_][*:0]const u8{
         vk.extensions.khr_swapchain.name.ptr,
@@ -245,7 +250,10 @@ pdev: vk.PhysicalDevice,
 proxy: vk.DeviceProxy,
 queue_family_indices: QueueFamilyIndices,
 queues: QueueFamilyIndices.Queues,
+concurrent_queues_count: QueueFamilyIndices.TagInt,
+concurrent_queues: [QueueFamilyIndices.fields.len]u32,
 command_pool: vk.CommandPool,
+mman: MemoryManager,
 
 pub const PipelineLayoutCreateInfo = struct {
     flags: vk.PipelineLayoutCreateFlags = .{},
@@ -284,6 +292,7 @@ pub const InitInfo = struct {
 
     pdev_index_out: ?*u8 = null,
 };
+pub const Buffer = MemoryManager.Buffer;
 
 pub fn init(self: *Device, info: InitInfo) !void {
     const pdev_index = chosePhysicalDevice(info.instance, info.physical_devices) orelse {
@@ -302,12 +311,21 @@ pub fn init(self: *Device, info: InitInfo) !void {
     }, null);
     errdefer self.proxy.destroyCommandPool(self.command_pool, null);
 
+    try self.mman.init(.{
+        .gpa = info.gpa,
+        .instance = info.instance,
+        .device = self,
+        .pdev = self.pdev,
+    });
+    errdefer self.mman.deinit(info.gpa);
+
     if (info.pdev_index_out) |pdo| {
         pdo.* = pdev_index;
     }
 }
 
 pub fn deinit(self: *Device) void {
+    self.mman.deinit();
     self.proxy.destroyCommandPool(self.command_pool, null);
     self.proxy.destroyDevice(null);
 }
