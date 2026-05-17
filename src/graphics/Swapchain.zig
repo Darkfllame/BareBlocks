@@ -70,15 +70,18 @@ fn transitionImageLayout(
     });
 }
 
+max_frames_in_flight: u8,
+vsync_mode: VsyncMode,
+
 vk_device: vk.DeviceProxy,
+window: *sdl.SDL_Window,
 device: *const Device,
 handle: vk.SwapchainKHR,
 surface: vk.SurfaceKHR,
 extent: vk.Extent2D,
-max_frames_in_flight: u8,
+
 image_count: u8,
 surface_format: vk.SurfaceFormatKHR,
-present_mode: vk.PresentModeKHR,
 images: [*]vk.Image,
 img_views: [*]vk.ImageView,
 
@@ -89,12 +92,15 @@ presentation_fences: [*]vk.Fence,
 image_index: u32,
 current_frame: u8,
 
+pub const VsyncMode = enum { disabled, enabled, adaptive };
 pub const InitInfo = struct {
     gpa: Allocator,
     window: *sdl.SDL_Window,
     instance: vk.InstanceProxy,
     device: *const Device,
+
     max_frames_in_flight: u8 = 2,
+    vsync: VsyncMode = .enabled,
 };
 
 pub fn createSurface(self: *Swapchain, instance: vk.Instance, window: *sdl.SDL_Window) !void {
@@ -113,13 +119,16 @@ pub fn createSurface(self: *Swapchain, instance: vk.Instance, window: *sdl.SDL_W
 pub fn init(self: *Swapchain, info: InitInfo) !void {
     assert(self.surface != .null_handle);
 
+    self.max_frames_in_flight = info.max_frames_in_flight;
+    self.vsync_mode = info.vsync;
+
     self.vk_device = info.device.proxy;
+    self.window = info.window;
     self.device = info.device;
     self.handle = .null_handle;
-    self.max_frames_in_flight = info.max_frames_in_flight;
     self.current_frame = 0;
     self.image_count = 0;
-    try self.recreate(info.gpa, info.instance, info.window, info.device.pdev);
+    try self.recreate(info.gpa, info.instance);
     errdefer self.deinitSwapchain(info.gpa);
 
     const cmd_buffers = try info.gpa.alloc(vk.CommandBuffer, self.image_count * self.max_frames_in_flight);
@@ -201,28 +210,31 @@ pub fn deinit(self: *Swapchain, allocator: Allocator, instance: vk.InstanceProxy
     allocator.free(self.presentation_fences[0..self.max_frames_in_flight]);
 }
 
+pub fn setVsync(self: *Swapchain, allocator: Allocator, instance: vk.InstanceProxy, mode: VsyncMode) !void {
+    self.vsync_mode = mode;
+    return self.recreate(allocator, instance);
+}
+
 pub fn recreate(
     self: *Swapchain,
-    gpa: Allocator,
+    allocator: Allocator,
     instance: vk.InstanceProxy,
-    window: *sdl.SDL_Window,
-    pdev: vk.PhysicalDevice,
 ) !void {
     var win_pxw: u32 = undefined;
     var win_pxh: u32 = undefined;
-    assert(sdl.SDL_GetWindowSizeInPixels(window, @ptrCast(&win_pxw), @ptrCast(&win_pxh)));
+    assert(sdl.SDL_GetWindowSizeInPixels(self.window, @ptrCast(&win_pxw), @ptrCast(&win_pxh)));
 
     const capabilities = try instance.getPhysicalDeviceSurfaceCapabilitiesKHR(
-        pdev,
+        self.device.pdev,
         self.surface,
     );
 
     const formats = try instance.getPhysicalDeviceSurfaceFormatsAllocKHR(
-        pdev,
+        self.device.pdev,
         self.surface,
-        gpa,
+        allocator,
     );
-    defer gpa.free(formats);
+    defer allocator.free(formats);
     const format = for (formats) |fmt| {
         if (fmt.color_space == .srgb_nonlinear_khr and fmt.format == .b8g8r8a8_srgb) {
             break fmt;
@@ -235,24 +247,32 @@ pub fn recreate(
     self.surface_format = format;
 
     const present_modes = try instance.getPhysicalDeviceSurfacePresentModesAllocKHR(
-        pdev,
+        self.device.pdev,
         self.surface,
-        gpa,
+        allocator,
     );
-    defer gpa.free(present_modes);
-    var has_fifo = false;
-    const pm: vk.PresentModeKHR = for (present_modes) |pm| {
-        if (pm == .fifo_khr) {
-            has_fifo = true;
-        } else if (pm == .mailbox_khr) {
-            break pm;
+    defer allocator.free(present_modes);
+    var pm = vk.PresentModeKHR.fifo_khr;
+    if (self.vsync_mode == .disabled) {
+        loop: for (present_modes) |available| switch (available) {
+            .mailbox_khr => {
+                pm = available;
+                break :loop;
+            },
+            .immediate_khr => pm = available,
+            .fifo_relaxed_khr => if (pm != .immediate_khr) {
+                pm = available;
+            },
+            else => continue,
+        };
+    } else if (self.vsync_mode == .adaptive) {
+        for (present_modes) |available| {
+            if (available == .fifo_relaxed_khr) {
+                pm = .fifo_relaxed_khr;
+                break;
+            }
         }
-    } else if (has_fifo) .fifo_khr else {
-        @branchHint(.cold);
-        logger.err("FIFO Present mode should always be present. Bug in the vulkan driver ?", .{});
-        return error.Vulkan;
-    };
-    self.present_mode = pm;
+    }
 
     const extent = blk: {
         if (capabilities.current_extent.width != std.math.maxInt(u32)) {
@@ -305,9 +325,9 @@ pub fn recreate(
         null,
     );
 
-    const images = try gpa.realloc(self.images[0..old_img_count], image_count);
+    const images = try allocator.realloc(self.images[0..old_img_count], image_count);
     self.images = images.ptr;
-    errdefer gpa.free(images);
+    errdefer allocator.free(images);
     for (self.img_views[0..old_img_count]) |iv| {
         self.vk_device.destroyImageView(iv, null);
     }
@@ -320,9 +340,9 @@ pub fn recreate(
         self.images,
     );
 
-    const views = try gpa.realloc(self.img_views[0..old_img_count], image_count);
+    const views = try allocator.realloc(self.img_views[0..old_img_count], image_count);
     self.img_views = views.ptr;
-    errdefer gpa.free(views);
+    errdefer allocator.free(views);
 
     var iv_ci = vk.ImageViewCreateInfo{
         .image = undefined,
@@ -437,7 +457,10 @@ pub fn endDraw(self: *Swapchain) !void {
         .{ .color_attachment_output_bit = true },
         .{ .bottom_of_pipe_bit = true },
     );
-    try cmd.endCommandBuffer();
+    cmd.endCommandBuffer() catch |e| {
+        cmd.resetCommandBuffer(.{}) catch unreachable;
+        return e;
+    };
     const gqueue = self.device.getQueue(.graphics);
     const pqueue = self.device.getQueue(.present);
 
