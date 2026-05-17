@@ -590,6 +590,8 @@ const App = struct {
     pipeline_layout: vk.PipelineLayout,
 
     start_time: Io.Timestamp,
+    frame_delta: i96,
+    frames: u32,
 
     vbuffer: Device.Buffer,
     ibuffer: Device.Buffer,
@@ -611,6 +613,8 @@ const App = struct {
         self.envmap = init.environ_map;
         self.cache_file_path = null;
         self.do_rendering = false;
+        self.frame_delta = 0;
+        self.frames = 0;
 
         self.window = sdl.SDL_CreateWindow(
             "Bare Blocks | IN-DEV",
@@ -843,12 +847,29 @@ const App = struct {
     }
 
     pub fn tick(self: *App) !void {
+        const frame_start = Io.Timestamp.now(self.io, .boot);
         if (self.do_rendering) {
             const cmd = try self.swapchain.beginDraw();
+            {
+                errdefer cmd.resetCommandBuffer(.{}) catch unreachable;
+
             self.render(cmd) catch |e| {
                 logger.err("Rendering error: {t}", .{e});
             };
+            }
             try self.swapchain.endDraw();
+        }
+        const frame_time = frame_start.untilNow(self.io, .boot);
+        self.frame_delta += frame_time.nanoseconds;
+        self.frames += 1;
+        if (self.frame_delta >= std.time.ns_per_s) {
+            const vram_budget = self.device.mman.getBudget();
+            logger.debug("[FPS: {d} ({f})] [VRAM: {Bi}/{Bi}]", .{
+                self.frames,    frame_time,
+                vram_budget[0], vram_budget[1],
+            });
+            self.frame_delta = 0;
+            self.frames = 0;
         }
     }
 
@@ -862,8 +883,6 @@ const App = struct {
                 try self.swapchain.recreate(
                     self.gpa,
                     .init(self.instance, &self.vki),
-                    self.window,
-                    self.device.pdev,
                 );
             },
 
