@@ -368,7 +368,14 @@ pub fn init(self: *MemoryManager, info: InitInfo) error{Vulkan}!void {
     self.blocks = .{};
     self.num_blocks = 0;
 
-    var props = vk.PhysicalDeviceMemoryProperties2{ .memory_properties = undefined };
+    var mem_budget = vk.PhysicalDeviceMemoryBudgetPropertiesEXT{
+        .heap_budget = undefined,
+        .heap_usage = undefined,
+    };
+    var props = vk.PhysicalDeviceMemoryProperties2{
+        .p_next = &mem_budget,
+        .memory_properties = undefined,
+    };
     var maint3 = vk.PhysicalDeviceMaintenance3Properties{
         .max_per_set_descriptors = undefined,
         .max_memory_allocation_size = undefined,
@@ -386,6 +393,16 @@ pub fn init(self: *MemoryManager, info: InitInfo) error{Vulkan}!void {
 
     const mem_types = props.memory_properties.memory_types[0..props.memory_properties.memory_type_count];
     const mem_heaps = props.memory_properties.memory_heaps[0..props.memory_properties.memory_heap_count];
+
+    for (mem_heaps, 0..) |heap, i| {
+        logger.debug("Heap #{d} {Bi}/{Bi}: {f}, budget: {Bi}", .{
+            i,
+            mem_budget.heap_usage[i],
+            heap.size,
+            heap.flags,
+            mem_budget.heap_budget[i],
+        });
+    }
 
     var transfer_mem_rater: Rater(u32) = .init;
     var buffer_mem_rater: Rater(u32) = .init;
@@ -468,6 +485,21 @@ pub fn deinit(self: *MemoryManager) void {
         self.vk_device.freeMemory(block.devm, null);
         self.gpa.destroy(block);
     }
+}
+
+/// Returns total used/available GPU memory (in bytes)
+pub fn getBudget(self: *MemoryManager) [2]vk.DeviceSize {
+    var budget = vk.PhysicalDeviceMemoryBudgetPropertiesEXT{
+        .heap_budget = undefined,
+        .heap_usage = undefined,
+    };
+    var mem_props = vk.PhysicalDeviceMemoryProperties2{
+        .p_next = &budget,
+        .memory_properties = undefined,
+    };
+    self.device.instance.getPhysicalDeviceMemoryProperties2(self.device.pdev, &mem_props);
+    const heap_index = mem_props.memory_properties.memory_types[self.buffer_mtype.type_index].heap_index;
+    return .{ budget.heap_usage[heap_index], budget.heap_budget[heap_index] };
 }
 
 pub fn allocBuffer(self: *MemoryManager, kind: Buffer.Kind, size: vk.DeviceSize, fit: AllocationFitMode) AllocError!Buffer {
