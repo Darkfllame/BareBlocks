@@ -853,9 +853,9 @@ const App = struct {
             {
                 errdefer cmd.resetCommandBuffer(.{}) catch unreachable;
 
-            self.render(cmd) catch |e| {
-                logger.err("Rendering error: {t}", .{e});
-            };
+                self.render(cmd) catch |e| {
+                    logger.err("Rendering error: {t}", .{e});
+                };
             }
             try self.swapchain.endDraw();
         }
@@ -898,6 +898,16 @@ const App = struct {
                     self.pipeline_cache = try self.device.proxy.createPipelineCache(&.{}, null);
                     self.device.proxy.destroyPipelineCache(old_pipeline, null);
                     logger.info("Cleared pipeline cache!", .{});
+                } else if (ev.key.scancode == sdl.SDL_SCANCODE_F2) {
+                    _ = sdl.SDL_SetWindowSize(self.window, 800, 600);
+                    logger.info("Reset window size!", .{});
+                } else if (ev.key.scancode == sdl.SDL_SCANCODE_F3) {
+                    self.do_rendering = !self.do_rendering;
+                    if (self.do_rendering) {
+                        logger.info("Rendering toggled on!", .{});
+                    } else {
+                        logger.info("Rendering toggled off!", .{});
+                    }
                 }
             },
             else => {},
