@@ -809,6 +809,8 @@ const App = struct {
         self.sbuffer = try self.device.mman.allocBuffer(.storage, 128, .best);
         errdefer self.device.mman.freeBuffer(self.sbuffer);
 
+        logger.debug("{f}", .{self.device.mman});
+
         _ = sdl.SDL_ShowWindow(self.window);
         self.start_time = .now(self.io, .boot);
         return self;

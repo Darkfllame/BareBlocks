@@ -77,7 +77,7 @@ const ChunkIterator = struct {
                     const chunk: *MemoryBlock.Chunk = @fieldParentPtr("node", curr);
                     assert(chunk.block == block);
 
-                    if (chunk.used) continue;
+                    if (chunk.type != .free) continue;
 
                     const chunk_end_offset = if (chunk.node.next) |node|
                         @as(*MemoryBlock.Chunk, @fieldParentPtr("node", node)).offset
@@ -132,7 +132,21 @@ const MemoryBlock = struct {
 
         block: *MemoryBlock,
         offset: vk.DeviceSize,
-        used: bool,
+        type: Type = .free,
+
+        pub const Type = enum {
+            // Don't move these please :pray: things may break
+            vertex_buffer,
+            index_buffer,
+            transfer_buffer,
+            uniform_buffer,
+            storage_buffer,
+
+            free,
+            /// Unkown type, but used
+            used,
+            image,
+        };
     };
 };
 
@@ -184,7 +198,7 @@ fn allocateMemory(
     const chunk = chosen_chunk orelse alloc_new_block: {
         if (self.num_blocks == self.max_alloc_count) return error.OutOfDeviceMemory;
 
-        const alloc_size = self.alloc_alignment.forward(size);
+        const alloc_size = @max(self.min_alloc_size, size);
 
         const block = try self.gpa.create(MemoryBlock);
         errdefer self.gpa.destroy(block);
@@ -206,7 +220,7 @@ fn allocateMemory(
             .node = .{},
             .block = block,
             .offset = 0,
-            .used = true,
+            .type = .used,
         };
 
         block.devm = self.vk_device.allocateMemory(&vk.MemoryAllocateInfo{
@@ -244,7 +258,7 @@ fn allocateMemory(
             .node = undefined,
             .block = block,
             .offset = chunk.offset,
-            .used = false,
+            .type = .free,
         };
         chunk.offset = alignment.forward(chunk.offset);
     }
@@ -258,12 +272,12 @@ fn allocateMemory(
             .node = undefined,
             .block = block,
             .offset = chunk.offset + size,
-            .used = false,
+            .type = .free,
         };
     }
     errdefer if (next_chunk) |ch| self.gpa.destroy(ch);
 
-    chunk.used = true;
+    chunk.type = .used;
     block.used += size;
     if (prev_chunk) |ch| block.chunks.insertBefore(&chunk.node, &ch.node);
     if (next_chunk) |ch| block.chunks.insertAfter(&chunk.node, &ch.node);
@@ -298,9 +312,9 @@ pub fn format(self: *const MemoryManager, writer: *std.Io.Writer) std.Io.Writer.
             else
                 block.size;
 
-            try writer.print("   - {d}..{d}: {s}", .{
-                chunk.offset,                       chunk_end_offset,
-                if (chunk.used) "used" else "free",
+            try writer.print("   - {d}..{d}: {t}", .{
+                chunk.offset, chunk_end_offset,
+                chunk.type,
             });
             if (current_chunk != null) {
                 try writer.writeByte('\n');
@@ -319,8 +333,8 @@ num_blocks: u32,
 buffer_mtype: MemTypePair,
 transfer_mtype: MemTypePair,
 
-alloc_alignment: std.mem.Alignment,
 max_alloc_count: u32,
+min_alloc_size: vk.DeviceSize,
 max_alloc_size: vk.DeviceSize,
 
 pub const AllocError = error{ OutOfMemory, OutOfDeviceMemory };
@@ -368,6 +382,8 @@ pub fn init(self: *MemoryManager, info: InitInfo) error{Vulkan}!void {
     self.blocks = .{};
     self.num_blocks = 0;
 
+    const page_size: vk.DeviceSize = std.heap.pageSize();
+
     var mem_budget = vk.PhysicalDeviceMemoryBudgetPropertiesEXT{
         .heap_budget = undefined,
         .heap_usage = undefined,
@@ -387,9 +403,14 @@ pub fn init(self: *MemoryManager, info: InitInfo) error{Vulkan}!void {
     info.instance.getPhysicalDeviceMemoryProperties2(info.pdev, &props);
     info.instance.getPhysicalDeviceProperties2(info.pdev, &props2);
 
-    self.alloc_alignment = .fromByteUnits(@truncate(props2.properties.limits.buffer_image_granularity));
+    self.min_alloc_size = std.mem.alignForward(
+        vk.DeviceSize,
+        page_size,
+        props2.properties.limits.buffer_image_granularity,
+    );
     self.max_alloc_count = props2.properties.limits.max_memory_allocation_count;
     self.max_alloc_size = maint3.max_memory_allocation_size;
+    self.min_alloc_size = @min(self.max_alloc_size, self.min_alloc_size);
 
     const mem_types = props.memory_properties.memory_types[0..props.memory_properties.memory_type_count];
     const mem_heaps = props.memory_properties.memory_heaps[0..props.memory_properties.memory_heap_count];
@@ -443,10 +464,11 @@ pub fn init(self: *MemoryManager, info: InitInfo) error{Vulkan}!void {
             return error.Vulkan;
         };
         const mt = mem_types[idx];
+        const mh = mem_heaps[mt.heap_index];
         break :blk .{
             .type_index = idx,
             .flags = mt.property_flags,
-            .heap = mem_heaps[mt.heap_index],
+            .heap = mh,
         };
     };
 }
@@ -465,7 +487,7 @@ pub fn deinit(self: *MemoryManager) void {
             const chunk: *MemoryBlock.Chunk = @fieldParentPtr("node", curr_ch);
             assert(chunk.block == block);
 
-            if (is_debug and chunk.used) {
+            if (is_debug and chunk.type != .free) {
                 const chunk_end_offset = if (chunk.node.next) |node|
                     @as(*MemoryBlock.Chunk, @fieldParentPtr("node", node)).offset
                 else
@@ -541,6 +563,7 @@ pub fn allocBuffer(self: *MemoryManager, kind: Buffer.Kind, size: vk.DeviceSize,
         fit,
         .fromByteUnits(@intCast(req.alignment)),
     );
+    rval.chunk.type = @enumFromInt(@intFromEnum(kind));
 
     return rval;
 }
@@ -552,7 +575,7 @@ pub fn freeBuffer(self: *MemoryManager, buffer: Buffer) void {
     if (chunk.node.next) |next_node| fix_next_node: {
         const next_chunk: *MemoryBlock.Chunk = @fieldParentPtr("node", next_node);
         assert(next_chunk.block == block);
-        if (next_chunk.used) break :fix_next_node;
+        if (next_chunk.type != .free) break :fix_next_node;
 
         block.chunks.remove(&next_chunk.node);
         self.gpa.destroy(next_chunk);
@@ -560,14 +583,14 @@ pub fn freeBuffer(self: *MemoryManager, buffer: Buffer) void {
     if (chunk.node.prev) |prev_node| fix_prev_node: {
         const prev_chunk: *MemoryBlock.Chunk = @fieldParentPtr("node", prev_node);
         assert(prev_chunk.block == block);
-        if (prev_chunk.used) {
-            chunk.used = false;
+        if (prev_chunk.type != .free) {
+            chunk.type = .free;
             break :fix_prev_node;
         }
 
         block.chunks.remove(&chunk.node);
         self.gpa.destroy(chunk);
-    } else chunk.used = false;
+    } else chunk.type = .free;
 
     block.used -= buffer.size;
     self.vk_device.destroyBuffer(buffer.handle, null);
