@@ -1,0 +1,12 @@
+.{
+    .name = .coroutine,
+    .fingerprint = 0x5cb61c7041020f7e,
+    .version = "0.0.1",
+    .dependencies = .{},
+    .minimum_zig_version = "0.16.0-dev.2637+6a9510c0e",
+    .paths = .{
+        "src/",
+        "build.zig",
+        "build.zig.zon",
+    },
+}
