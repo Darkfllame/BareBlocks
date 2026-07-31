@@ -16,10 +16,38 @@ const assert = std.debug.assert;
 
 const LMType = enum { vector, matrix, quaternion };
 
-pub inline fn supportsArithmetics(comptime T: type) bool {
-    return switch (@typeInfo(T)) {
-        .int, .float, .comptime_int, .comptime_float => true,
-        else => false,
+fn _nonPtrTypeInfo(comptime T: type) std.builtin.Type {
+    const info = @typeInfo(T);
+    const ptrInfo = if (info == .pointer)
+        @typeInfo(info.pointer.child)
+    else
+        info;
+    return ptrInfo;
+}
+
+inline fn _castArithType(comptime T: type, comptime NT: type, v: T) NT {
+    if (comptime !(supportsArithmetics(T) and supportsArithmetics(NT))) {
+        @compileError(ctPrint("Both T ({s}) and NT ({s}) must be arithmetics types (ints or floats)", .{
+            @typeName(T), @typeName(NT),
+        }));
+    }
+
+    const tinfo = @typeInfo(T);
+    const ntinfo = @typeInfo(NT);
+    if (tinfo == .comptime_int or tinfo == .comptime_float or
+        ntinfo == .comptime_int or ntinfo == .comptime_float) return v;
+    return switch (ntinfo) {
+        .int => switch (tinfo) {
+            .int => @intCast(v),
+            .float => @intFromFloat(v),
+            else => unreachable,
+        },
+        .float => switch (tinfo) {
+            .int => @floatFromInt(v),
+            .float => @floatCast(v),
+            else => unreachable,
+        },
+        else => unreachable,
     };
 }
 
@@ -39,22 +67,25 @@ pub fn Vec(comptime T: type, comptime DIM: comptime_int) type {
     if (comptime !supportsArithmetics(T)) {
         @compileError("Vec subtype must support arithmetics (ints or floats)");
     }
-    return extern struct {
-        /// The array containing the data
-        /// of the vector.
-        fields: [DIM]T = [1]T{0} ** DIM,
-
+    return extern union {
         const Self = @This();
         const VecSelf = @Vector(DIM, T);
+
+        const CrossProductResult = switch (DIM) {
+            2 => T,
+            3 => Self,
+            4 => @compileError("Cannot get the cross product of a 4D vector"),
+            else => unreachable,
+        };
 
         fn Field(comptime i: comptime_int) type {
             return struct {
                 pub inline fn get(self: Self) T {
-                    return self.fields[i];
+                    return self.vec[i];
                 }
 
                 pub inline fn set(self: *Self, v: T) void {
-                    self.fields[i] = v;
+                    self.vec[i] = v;
                 }
             };
         }
@@ -65,20 +96,100 @@ pub fn Vec(comptime T: type, comptime DIM: comptime_int) type {
                 else => @compileError("Swizzle string length must be at least 1 and max 4"),
             };
         }
+
         fn newCropped(_x: T, _y: T, _z: T, _w: T) Self {
-            var arr: [DIM]T = undefined;
-            arr[0] = _x;
-            arr[1] = _y;
-            if (DIM >= 3) arr[2] = _z;
-            if (DIM >= 4) arr[3] = _w;
-            return new(arr);
+            var res: Self = undefined;
+            res.vec[0] = _x;
+            res.vec[1] = _y;
+            if (DIM >= 3) res.vec[2] = _z;
+            if (DIM >= 4) res.vec[3] = _w;
+            return res;
         }
-        const CrossProductResult = switch (DIM) {
-            2 => T,
-            3 => Self,
-            4 => @compileError("Cannot get the cross product of a 4D vector"),
-            else => unreachable,
-        };
+        fn new2(_x: T, _y: T) Self {
+            return .{ .vec = .{ _x, _y } };
+        }
+        fn new3(_x: T, _y: T, _z: T) Self {
+            return .{ .vec = .{ _x, _y, _z } };
+        }
+        fn new4(_x: T, _y: T, _z: T, _w: T) Self {
+            return .{ .vec = .{ _x, _y, _z, _w } };
+        }
+
+        fn convert(v: anytype, comptime get_value: bool) if (get_value) Self else bool {
+            const V = @TypeOf(v);
+            if (isVec(V)) {
+                const vDIM = comptime @as(V, undefined).data.len;
+                if (get_value) {
+                    return if (vDIM >= DIM)
+                        v.swizzle("xyzw"[0..DIM]).cast(T)
+                    else
+                        @compileError("Unable to convert \"" ++ @typeName(V) ++ "\" to " ++ @typeName(Self));
+                } else return vDIM >= DIM;
+            }
+
+            const info = @typeInfo(V);
+            if (info == .pointer) {
+                return convert(if (get_value) v.* else @as(@TypeOf(v.*), undefined), get_value);
+            } else if (info == .array or info == .vector) {
+                const subinfo = if (info == .array)
+                    info.array
+                else
+                    info.vector;
+                if (subinfo.len != DIM or !supportsArithmetics(subinfo.child)) {
+                    return if (get_value)
+                        @compileError(ctPrint("Given array type \"{s}\" isn't right length (\"{d}\")" ++
+                            " and/or doesn't support arithmetics (isn't int or float)", .{
+                            @typeName(V),
+                            v.len,
+                        }))
+                    else
+                        false;
+                }
+                if (get_value) {
+                    if (subinfo.child == T) {
+                        return .{ .vec = v };
+                    }
+                    var res: Self = undefined;
+                    for (0..DIM) |i| {
+                        res.vec[i] = _castArithType(subinfo.child, T, v[i]);
+                    }
+                    return res;
+                } else return true;
+            } else if (info == .@"struct") {
+                const sinfo = info.@"struct";
+                const fields = sinfo.fields;
+                var res: Self = zero;
+                inline for (fields, 0..) |f, i| {
+                    const BAD_FIELD_NAME = ctPrint(
+                        "Bad field name: {s}",
+                        .{f.name},
+                    );
+                    const resFI = if (sinfo.is_tuple)
+                        i
+                    else if (f.name.len == 1) switch (f.name[0]) {
+                        inline 'x'...'x' + DIM => |c| c - 'x',
+                        'w' => if (DIM == 4)
+                            3
+                        else
+                            return if (get_value) @compileError(BAD_FIELD_NAME) else false,
+                        else => return if (get_value) @compileError(BAD_FIELD_NAME) else false,
+                    } else return if (get_value) @compileError(BAD_FIELD_NAME) else false;
+                    if (get_value)
+                        res.vec[resFI] = _castArithType(f.type, T, @field(v, f.name))
+                    else if (!supportsArithmetics(f.type))
+                        return false;
+                }
+                return if (get_value) res else true;
+            } else if (supportsArithmetics(V)) {
+                return if (get_value) newUniform(_castArithType(V, T, v)) else true;
+            }
+            return if (get_value) @compileError("Cannot convert \"" ++ @typeName(V) ++ "\" to " ++ @typeName(Self)) else false;
+        }
+
+        /// The data of this vector as a SIMD type.
+        vec: @Vector(DIM, T),
+        /// The data of this vector as a simple array type.
+        array: [DIM]T,
 
         pub const LM_TYPE = LMType.vector;
 
@@ -98,37 +209,27 @@ pub fn Vec(comptime T: type, comptime DIM: comptime_int) type {
         pub const unitW = newCropped(0, 0, 0, 1);
 
         /// Used for `std.fmt.format`
-        pub fn format(self: Self, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-            const realFmt = if (fmt.len == 0)
-                "d"
-            else
-                fmt;
-            try writer.print("(", .{});
-            inline for (self.fields, 0..) |v, i| {
-                try std.fmt.formatType(v, realFmt, .{
-                    .alignment = options.alignment,
-                    .fill = options.fill,
-                    .precision = options.precision,
-                    .width = options.width,
-                }, writer, math.maxInt(usize));
-                if (i != DIM - 1)
-                    try writer.print(",", .{});
+        pub fn format(self: Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+            try writer.writeByte('(');
+            inline for (0..DIM) |i| {
+                try writer.print("{d}", .{self.array[i]});
+                if (i != (DIM - 1)) {
+                    try writer.writeAll(", ");
+                }
             }
-            try writer.print(")", .{});
+            try writer.writeByte(')');
         }
 
-        /// **Parameters**:
-        /// - `args`: An array containing the vector data.
-        /// **Returns**: A new vector from the given values.
-        ///
-        /// **Note**:
-        /// - `args`'s fields have a default value of 0.
-        pub fn new(args: [DIM]T) Self {
-            return .{ .fields = args };
-        }
+        pub const new = switch (DIM) {
+            2 => new2,
+            3 => new3,
+            4 => new4,
+            else => unreachable,
+        };
+
         /// **Returns**: A new uniformely-scaled vector
         pub fn newUniform(s: T) Self {
-            return new([1]T{s} ** DIM);
+            return .{ .vec = @splat(s) };
         }
 
         /// The horizontal component of the vector.
@@ -170,7 +271,7 @@ pub fn Vec(comptime T: type, comptime DIM: comptime_int) type {
                 @compileError("Swizzle string length must be at least 2 and max 4");
             const field_swizzle: []const u8 = ("xyzw"[0..@min(DIM, targetDim)]);
             const zero_swizzle_size = targetDim - field_swizzle.len;
-            const val = field_swizzle ++ ([1]u8{'0' + @as(u8, default)} ** zero_swizzle_size);
+            const val = field_swizzle ++ @as([zero_swizzle_size]u8, @splat('0' + @as(u8, default)));
             // @compileLog(targetDim, DIM, field_swizzle, zero_swizzle_size, val);
             comptime return val;
         }
@@ -196,7 +297,7 @@ pub fn Vec(comptime T: type, comptime DIM: comptime_int) type {
                 self
             else ret: {
                 const mask: @Vector(s.len, i32) = comptime shuffle_mask: {
-                    var mask = [1]i32{0} ** s.len;
+                    var mask: [s.len]i32 = @splat(0);
                     for (s, &mask) |c, *m| {
                         m.* = switch (c) {
                             inline '0', '1' => |v| ~@as(i32, v - '0'),
@@ -211,7 +312,7 @@ pub fn Vec(comptime T: type, comptime DIM: comptime_int) type {
                     }
                     break :shuffle_mask mask;
                 };
-                break :ret .{ .fields = @shuffle(T, self.toVector(), @Vector(2, T){ 0, 1 }, mask) };
+                break :ret .{ .vec = @shuffle(T, self.vec, @Vector(2, T){ 0, 1 }, mask) };
             };
         }
 
@@ -228,81 +329,10 @@ pub fn Vec(comptime T: type, comptime DIM: comptime_int) type {
         pub fn cast(self: Self, comptime NewType: type) Vec(NewType, DIM) {
             if (NewType == T) return self;
             var result: Vec(NewType, DIM) = undefined;
-            inline for (&result.fields, 0..) |*f, i| {
-                f.* = _castArithType(T, NewType, self.fields[i]);
+            inline for (&result.array, 0..) |*f, i| {
+                f.* = _castArithType(T, NewType, self.vec[i]);
             }
             return result;
-        }
-
-        fn convert(v: anytype, comptime get_value: bool) if (get_value) Self else bool {
-            const V = @TypeOf(v);
-            if (isVec(V)) {
-                const vDIM = comptime @as(V, undefined).fields.len;
-                if (get_value) {
-                    return if (vDIM >= DIM)
-                        v.swizzle("xyzw"[0..DIM]).cast(T)
-                    else
-                        @compileError("Unable to convert \"" ++ @typeName(V) ++ "\" to " ++ @typeName(Self));
-                } else return vDIM >= DIM;
-            }
-
-            const info = @typeInfo(V);
-            if (info == .pointer) {
-                return convert(if (get_value) v.* else @as(@TypeOf(v.*), undefined), get_value);
-            } else if (info == .array or info == .vector) {
-                const subinfo = if (info == .array)
-                    info.array
-                else
-                    info.vector;
-                if (subinfo.len != DIM or !supportsArithmetics(subinfo.child)) {
-                    return if (get_value)
-                        @compileError(ctPrint("Given array type \"{s}\" isn't right length (\"{d}\")" ++
-                            " and/or doesn't support arithmetics (isn't int or float)", .{
-                            @typeName(V),
-                            v.len,
-                        }))
-                    else
-                        false;
-                }
-                if (get_value) {
-                    if (subinfo.child == T) {
-                        return .{ .fields = v };
-                    }
-                    var res: Self = undefined;
-                    for (0..DIM) |i| {
-                        res.fields[i] = _castArithType(subinfo.child, T, v[i]);
-                    }
-                    return res;
-                } else return true;
-            } else if (info == .@"struct") {
-                const sinfo = info.@"struct";
-                const fields = sinfo.fields;
-                var res: Self = zero;
-                inline for (fields, 0..) |f, i| {
-                    const BAD_FIELD_NAME = ctPrint(
-                        "Bad field name: {s}",
-                        .{f.name},
-                    );
-                    const resFI = if (sinfo.is_tuple)
-                        i
-                    else if (f.name.len == 1) switch (f.name[0]) {
-                        inline 'x'...'x' + DIM => |c| c - 'x',
-                        'w' => if (DIM == 4)
-                            3
-                        else
-                            return if (get_value) @compileError(BAD_FIELD_NAME) else false,
-                        else => return if (get_value) @compileError(BAD_FIELD_NAME) else false,
-                    } else return if (get_value) @compileError(BAD_FIELD_NAME) else false;
-                    if (get_value)
-                        res.fields[resFI] = _castArithType(f.type, T, @field(v, f.name))
-                    else if (!supportsArithmetics(f.type))
-                        return false;
-                }
-                return if (get_value) res else true;
-            } else if (supportsArithmetics(V)) {
-                return if (get_value) newUniform(_castArithType(V, T, v)) else true;
-            }
-            return if (get_value) @compileError("Cannot convert \"" ++ @typeName(V) ++ "\" to " ++ @typeName(Self)) else false;
         }
 
         /// **Returns**: Whether the given type could be converted
@@ -334,7 +364,7 @@ pub fn Vec(comptime T: type, comptime DIM: comptime_int) type {
         /// - This functions uses `from` to convert
         ///   `b` to `Self`.
         pub fn dot(self: Self, b: Self) T {
-            return @reduce(.Add, self.toVector() * b.toVector());
+            return @reduce(.Add, self.vec * b.vec);
         }
         /// **Returns**: The cross product for the given vectors.
         ///
@@ -404,74 +434,74 @@ pub fn Vec(comptime T: type, comptime DIM: comptime_int) type {
             result.setW(1);
             return result;
         }
-        pub inline fn toVector(self: Self) VecSelf {
-            return self.fields;
-        }
 
         /// **Note**:
         /// - Uses `from` to convert `b` to `Self`.
         pub fn add(self: Self, b: Self) Self {
-            return from(self.toVector() + b.toVector());
+            return from(self.vec + b.vec);
         }
         /// **Note**:
         /// - Uses `from` to convert `b` to `Self`.
         pub fn sub(self: Self, b: Self) Self {
-            return from(self.toVector() - b.toVector());
+            return from(self.vec - b.vec);
         }
         pub fn neg(self: Self) Self {
-            return from(-self.toVector());
+            return from(-self.vec);
         }
         /// **Note**:
         /// - Uses `from` to convert `b` to `Self`.
         pub fn mul(self: Self, b: Self) Self {
-            return from(self.toVector() * b.toVector());
+            return .{ .vec = self.vec * b.vec };
         }
         /// **Note**:
         /// - Uses `from` to convert `b` to `Self`.
         pub fn div(self: Self, b: Self) Self {
-            return from(self.toVector() / b.toVector());
+            return from(self.vec / b.vec);
         }
         pub fn mod(self: Self, b: Self) Self {
-            return from(@mod(self.toVector(), b.toVector()));
+            return from(@mod(self.vec, b.vec));
         }
         pub fn rem(self: Self, b: Self) Self {
-            return from(@rem(self.toVector(), b.toVector()));
+            return from(@rem(self.vec, b.vec));
         }
         pub fn min(self: Self, b: Self) Self {
-            return from(@min(self.toVector(), b.toVector()));
+            return from(@min(self.vec, b.vec));
         }
         pub fn max(self: Self, b: Self) Self {
-            return from(@max(self.toVector(), from(b).toVector()));
+            return from(@max(self.vec, from(b).vec));
         }
         pub fn componentMin(self: Self) T {
-            return @reduce(.Min, self.toVector());
+            return @reduce(.Min, self.vec);
         }
         pub fn componentMax(self: Self) T {
-            return @reduce(.Max, self.toVector());
+            return @reduce(.Max, self.vec);
         }
         pub fn abs(self: Self) Self {
-            return from(@abs(self.toVector()));
+            return from(@abs(self.vec));
         }
         pub fn round(self: Self) Self {
-            return from(@round(self.toVector()));
+            return from(@round(self.vec));
         }
         pub fn floor(self: Self) Self {
-            return from(@floor(self.toVector()));
+            return from(@floor(self.vec));
         }
         pub fn ceil(self: Self) Self {
-            return from(@ceil(self.toVector()));
+            return from(@ceil(self.vec));
         }
 
         /// Checks raw equality (no threshold for floats).
         pub fn eql(self: Self, b: Self) bool {
-            inline for (self.fields, 0..) |v, i| {
-                if (v != b.fields[i]) return false;
+            return @reduce(.And, self.vec == b.vec);
+        }
+        pub fn approxEqAbs(self: Self, b: Self, tolerance: T) bool {
+            inline for (self.array, 0..) |v, i| {
+                if (!math.approxEqAbs(T, v, b.array[i], tolerance)) return false;
             }
             return true;
         }
-        pub fn approxEqAbs(self: Self, b: Self, tolerance: T) bool {
-            inline for (self.fields, 0..) |v, i| {
-                if (!math.approxEqAbs(T, v, b.fields[i], tolerance)) return false;
+        pub fn approxEqRel(self: Self, b: Self, tolerance: T) bool {
+            inline for (self.array, 0..) |v, i| {
+                if (!math.approxEqRel(T, v, b.array[i], tolerance)) return false;
             }
             return true;
         }
@@ -510,9 +540,8 @@ pub fn Mat(comptime T: type, comptime DIM: comptime_int) type {
     if (comptime !supportsArithmetics(T)) {
         @compileError("Mat subtype must support arithmetics (ints or floats)");
     }
-    return extern struct {
-        /// column-major list of matrix elements.
-        fields: [DIM * DIM]T = [1]T{0} ** (DIM * DIM),
+    return extern union {
+        //! Column-major matrix.
 
         const Self = @This();
         const VecDIMT = Vec(T, DIM);
@@ -531,66 +560,148 @@ pub fn Mat(comptime T: type, comptime DIM: comptime_int) type {
                 @compileError("Unsupported arithmetic type: " ++ @typeName(Rhs));
         }
 
+        fn convert(v: anytype, comptime get_value: bool) if (get_value) Self else bool {
+            const V = @TypeOf(v);
+            const tinfo = @typeInfo(V);
+            var result: Self = zero;
+            if (isMat(V)) {
+                if (!get_value) return true;
+                const vDim = comptime sqrt(@as(V, undefined).fields.len);
+                const minDim = @min(DIM, vDim);
+                result = identity;
+                inline for (0..minDim) |x| {
+                    inline for (0..minDim) |y| {
+                        result.arrays[y * DIM + x] = _castArithType(
+                            @TypeOf(v.fields[0]),
+                            T,
+                            v.fields[y * vDim + x],
+                        );
+                    }
+                }
+            } else if (tinfo == .pointer) {
+                return convert(if (get_value) v.* else @as(@TypeOf(v.*), undefined), get_value);
+            } else if (tinfo == .array) {
+                const array = tinfo.array;
+                if (!supportsArithmetics(array.child)) {
+                    return if (get_value) @compileError(ctPrint("Given array type \"{s}\"" ++
+                        " doesn't support arithmetics (isn't int or float)", .{
+                        @typeName(V),
+                        array.len,
+                    })) else false;
+                }
+                if (array.len != DIM * DIM or !supportsArithmetics(V)) {
+                    return if (get_value) @compileError(ctPrint(
+                        "Given array type \"{s}\" has bad sub-array type \"{s}\"",
+                        .{ @typeName(V), @typeName(array.child) },
+                    )) else false;
+                }
+                if (!get_value) return true;
+                for (0..DIM) |x| {
+                    for (0..DIM) |y| {
+                        result.arrays[x * DIM + y] = _castArithType(
+                            array.child,
+                            T,
+                            v[y * DIM + x],
+                        );
+                    }
+                }
+            } else if (tinfo == .@"struct") {
+                const sInfo = tinfo.@"struct";
+                if (!sInfo.is_tuple) {
+                    return if (get_value) @compileError(ctPrint(
+                        "Given struct type \"{s}\" has to be a tuple, has .{s} layout",
+                        .{ @typeName(V), @tagName(sInfo.layout) },
+                    )) else false;
+                }
+                if (sInfo.fields.len != DIM * DIM) {
+                    return if (get_value) @compileError(ctPrint(
+                        "Given struct type \"{s}\" has to have {d} fields, got {d}",
+                        .{ @typeName(V), DIM * DIM, sInfo.fields.len },
+                    )) else false;
+                }
+                if (!get_value) return true;
+                inline for (0..DIM) |x| {
+                    inline for (0..DIM) |y| {
+                        result.arrays[x * DIM + y] = _castArithType(
+                            @TypeOf(v[y * DIM + x]),
+                            T,
+                            v[y * DIM + x],
+                        );
+                    }
+                }
+            } else {
+                return if (get_value)
+                    @compileError("Cannot cast \"" ++ @typeName(V) ++ "\" to " ++ @typeName(Self))
+                else
+                    false;
+            }
+            if (get_value) return result;
+            unreachable;
+        }
+
+        /// The matrix as a DIM x DIM array of T.
+        array: [DIM * DIM]T,
+        /// The matrix as a DIM x DIM vector of T.
+        vec: @Vector(DIM * DIM, T),
+        /// The matrix as an array of array of T.
+        arrays: [DIM][DIM]T,
+        /// The matrix as an array of vector of T.
+        vecs: [DIM]@Vector(DIM, T),
+
         pub const LM_TYPE = LMType.matrix;
 
-        pub const zero = Self{};
+        pub const zero = Self{ .array = @splat(0) };
         pub const identity = newScaleUniform(1);
 
         pub fn getElement(self: Self, x: u2, y: u2) T {
-            return self.fields[@as(u8, x) * DIM + @as(u8, y)];
+            return self.arrays[x][y];
         }
         pub fn setElement(self: *Self, x: u2, y: u2, v: T) void {
-            self.fields[@as(u8, x) * DIM + @as(u8, y)] = v;
+            self.arrays[x][y] = v;
         }
-        pub fn getRow(self: Self, r: u2) [DIM]T {
-            var res: [DIM]T = undefined;
+        pub fn getRow(self: Self, r: u2) VecDIMT {
+            var res: VecDIMT = undefined;
             inline for (0..DIM) |i| {
-                res[i] = self.fields[(r + i) * DIM];
+                res.array[i] = self.arrays[i][r];
             }
             return res;
         }
-        pub fn getRowVec(self: Self, c: u2) VecDIMT {
-            return .{ .fields = self.getRow(c) };
-        }
         pub fn setRow(self: *Self, r: u2, v: [DIM]T) void {
             inline for (0..DIM) |i| {
-                self.fields[(r + i) * DIM] = v[i];
+                self.arrays[i][r] = v[i];
             }
         }
-        pub fn getColumn(self: Self, c: u2) [DIM]T {
-            return @as(*const [DIM]T, @ptrCast(self.fields[@as(u8, c) * DIM .. @as(u8, c) * DIM + DIM])).*;
+        pub fn getColumn(self: Self, c: u2) VecDIMT {
+            return .{ .array = self.arrays[c] };
         }
-        pub fn getColumnVec(self: Self, c: u2) VecDIMT {
-            return .{ .fields = self.getColumn(c) };
-        }
-        pub fn setColumn(self: *Self, c: u2, v: [DIM]T) void {
-            @as(*[DIM]T, @ptrCast(self.fields[@as(u8, c) * DIM .. @as(u8, c) * DIM + DIM])).* = v;
+        pub fn setColumn(self: *Self, c: u2, v: VecDIMT) void {
+            self.arrays[c] = v.array;
         }
 
-        pub fn format(self: Self, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-            try writer.print("(", .{});
+        pub fn format(self: Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+            try writer.writeByte('(');
             inline for (0..DIM) |col| {
-                try self.getColumnVec(col).format(fmt, options, writer);
+                try self.getColumn(col).format(writer);
                 if (col != DIM - 1)
-                    try writer.print(",", .{});
+                    try writer.writeAll(", ");
             }
-            try writer.print(")", .{});
+            try writer.writeByte(')');
         }
 
         /// The args written in code are row-major,
         /// in the memory however, they are column-major.
         pub fn new(args: [DIM * DIM]T) Self {
-            return (Self{ .fields = args }).transpose();
+            return (Self{ .array = args }).transpose();
         }
         pub fn newScale(args: [DIM]T) Self {
             var res: Self = zero;
             inline for (0..DIM) |i| {
-                res.fields[i * (DIM + 1)] = args[i];
+                res.arrays[i][i] = args[i];
             }
             return res;
         }
         pub fn newScaleUniform(s: T) Self {
-            return newScale([1]T{s} ** DIM);
+            return newScale(@splat(s));
         }
 
         pub fn newTranslation(xyz: Vec3T) Mat4T {
@@ -675,88 +786,9 @@ pub fn Mat(comptime T: type, comptime DIM: comptime_int) type {
         pub fn cast(self: Self, comptime NT: type) Mat(NT, DIM) {
             var result: Mat(NT, DIM) = undefined;
             inline for (0..DIM * DIM) |i| {
-                result.fields[i] = _castArithType(T, NT, self.fields[i]);
+                result.arrays[i] = _castArithType(T, NT, self.arrays[i]);
             }
             return result;
-        }
-
-        fn convert(v: anytype, comptime get_value: bool) if (get_value) Self else bool {
-            const V = @TypeOf(v);
-            const tinfo = @typeInfo(V);
-            var result: Self = zero;
-            if (isMat(V)) {
-                if (!get_value) return true;
-                const vDim = comptime sqrt(@as(V, undefined).fields.len);
-                const minDim = @min(DIM, vDim);
-                result = identity;
-                inline for (0..minDim) |x| {
-                    inline for (0..minDim) |y| {
-                        result.fields[y * DIM + x] = _castArithType(
-                            @TypeOf(v.fields[0]),
-                            T,
-                            v.fields[y * vDim + x],
-                        );
-                    }
-                }
-            } else if (tinfo == .pointer) {
-                return convert(if (get_value) v.* else @as(@TypeOf(v.*), undefined), get_value);
-            } else if (tinfo == .array) {
-                const array = tinfo.array;
-                if (!supportsArithmetics(array.child)) {
-                    return if (get_value) @compileError(ctPrint("Given array type \"{s}\"" ++
-                        " doesn't support arithmetics (isn't int or float)", .{
-                        @typeName(V),
-                        array.len,
-                    })) else false;
-                }
-                if (array.len != DIM * DIM or !supportsArithmetics(V)) {
-                    return if (get_value) @compileError(ctPrint(
-                        "Given array type \"{s}\" has bad sub-array type \"{s}\"",
-                        .{ @typeName(V), @typeName(array.child) },
-                    )) else false;
-                }
-                if (!get_value) return true;
-                for (0..DIM) |x| {
-                    for (0..DIM) |y| {
-                        result.fields[x * DIM + y] = _castArithType(
-                            array.child,
-                            T,
-                            v[y * DIM + x],
-                        );
-                    }
-                }
-            } else if (tinfo == .@"struct") {
-                const sInfo = tinfo.@"struct";
-                if (!sInfo.is_tuple) {
-                    return if (get_value) @compileError(ctPrint(
-                        "Given struct type \"{s}\" has to be a tuple, has .{s} layout",
-                        .{ @typeName(V), @tagName(sInfo.layout) },
-                    )) else false;
-                }
-                if (sInfo.fields.len != DIM * DIM) {
-                    return if (get_value) @compileError(ctPrint(
-                        "Given struct type \"{s}\" has to have {d} fields, got {d}",
-                        .{ @typeName(V), DIM * DIM, sInfo.fields.len },
-                    )) else false;
-                }
-                if (!get_value) return true;
-                inline for (0..DIM) |x| {
-                    inline for (0..DIM) |y| {
-                        result.fields[x * DIM + y] = _castArithType(
-                            @TypeOf(v[y * DIM + x]),
-                            T,
-                            v[y * DIM + x],
-                        );
-                    }
-                }
-            } else {
-                return if (get_value)
-                    @compileError("Cannot cast \"" ++ @typeName(V) ++ "\" to " ++ @typeName(Self))
-                else
-                    false;
-            }
-            if (get_value) return result;
-            unreachable;
         }
 
         pub inline fn couldConvert(comptime V: type) bool {
@@ -770,7 +802,7 @@ pub fn Mat(comptime T: type, comptime DIM: comptime_int) type {
             var res: Self = undefined;
             inline for (0..DIM) |i| {
                 inline for (0..DIM) |j| {
-                    res.fields[j * DIM + i] = self.fields[i * DIM + j];
+                    res.arrays[j][i] = self.arrays[i][j];
                 }
             }
             return res;
@@ -792,8 +824,8 @@ pub fn Mat(comptime T: type, comptime DIM: comptime_int) type {
                 if (col != major_col) {
                     inline for (0..DIM) |row| {
                         if (row != major_row) {
-                            const v = self.fields[row * DIM + col];
-                            result.fields[x * (DIM - 1) + y] = v;
+                            const v = self.arrays[row][col];
+                            result.arrays[x][y] = v;
                             y += 1;
                         }
                     }
@@ -808,7 +840,7 @@ pub fn Mat(comptime T: type, comptime DIM: comptime_int) type {
             inline for (0..DIM) |i| {
                 inline for (0..DIM) |j| {
                     const sign = -((i + j) % 2 * 2 - 1);
-                    result.fields[i * DIM + j] = sign * self.minor(i, j).det();
+                    result.arrays[i * DIM + j] = sign * self.minor(i, j).det();
                 }
             }
             return result;
@@ -832,7 +864,7 @@ pub fn Mat(comptime T: type, comptime DIM: comptime_int) type {
             // a compile error because Mat(<type>, 0)
             // is invalid due to this type's first
             // line.
-            if (DIM == 1) return self.fields[0];
+            if (DIM == 1) return self.array[0];
 
             var result: T = 0;
             inline for (0..DIM) |major_col| {
@@ -846,7 +878,10 @@ pub fn Mat(comptime T: type, comptime DIM: comptime_int) type {
                 // to know why this. basically you multiply the x component of the current
                 // matrix column (major_col) by the determinant of the rest of the matrix excluding
                 // the first row and current column.
-                result += sign * self.fields[major_col * DIM] * sub_matrix.det();
+
+                // Also yes inline det() call. Removes function call overhead
+                result += sign * self.arrays[major_col][0] *
+                    @call(.always_inline, @TypeOf(sub_matrix).det, .{sub_matrix});
             }
 
             return result;
@@ -854,7 +889,7 @@ pub fn Mat(comptime T: type, comptime DIM: comptime_int) type {
 
         pub fn neg(self: Self) Self {
             var result: Self = undefined;
-            inline for (self.fields, &result.fields) |v, *f| {
+            inline for (self.arrays, &result.arrays) |v, *f| {
                 f.* = -v;
             }
             return result;
@@ -862,14 +897,14 @@ pub fn Mat(comptime T: type, comptime DIM: comptime_int) type {
         pub fn mul(self: Self, b: Self) Self {
             var result: Self = undefined;
             inline for (0..DIM) |i| {
-                result.setColumn(i, self.transform(b.getColumnVec(i)).fields);
+                result.setColumn(i, self.transform(b.getColumn(i)));
             }
             return result;
         }
         pub fn transform(self: Self, v: VecDIMT) VecDIMT {
             var result: VecDIMT = .zero;
             inline for (0..DIM) |i| {
-                result = result.add(self.getColumnVec(i).mul(.from(v.fields[i])));
+                result = result.add(self.getColumn(i).mul(.newUniform(v.array[i])));
             }
             return result;
         }
@@ -889,14 +924,14 @@ pub fn Mat(comptime T: type, comptime DIM: comptime_int) type {
         }
 
         pub fn eql(self: Self, b: Self) bool {
-            inline for (self.fields, 0..) |v, i| {
-                if (v != b.fields[i]) return false;
+            inline for (self.arrays, 0..) |v, i| {
+                if (v != b.arrays[i]) return false;
             }
             return true;
         }
         pub fn approxEqAbs(self: Self, b: Self, tolerance: T) bool {
-            inline for (self.fields, 0..) |v, i| {
-                if (!math.approxEqAbs(T, v, b.fields[i], tolerance)) return false;
+            inline for (self.arrays, 0..) |v, i| {
+                if (!math.approxEqAbs(T, v, b.arrays[i], tolerance)) return false;
             }
             return true;
         }
@@ -943,41 +978,6 @@ pub fn Quat(comptime T: type) type {
                     self.fields[i] = v;
                 }
             };
-        }
-
-        /// `w`, `x`, `y`, `z` values.
-        fields: [4]T = [1]T{0} ** 4,
-
-        pub const LM_TYPE = LMType.quaternion;
-
-        pub const identity = Self{ .fields = .{ 1, 0, 0, 0 } };
-
-        pub const w = Field(0).get;
-        pub const x = Field(1).get;
-        pub const y = Field(2).get;
-        pub const z = Field(3).get;
-        pub const setW = Field(0).set;
-        pub const setX = Field(1).set;
-        pub const setY = Field(2).set;
-        pub const setZ = Field(3).set;
-
-        pub fn format(self: Self, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-            const realFmt = if (fmt.len == 0)
-                "d"
-            else
-                fmt;
-            try writer.print("(", .{});
-            inline for (self.fields, 0..) |v, i| {
-                try std.fmt.formatType(v, realFmt, .{
-                    .alignment = options.alignment,
-                    .fill = options.fill,
-                    .precision = options.precision orelse 0,
-                    .width = options.width,
-                }, writer, math.maxInt(usize));
-                if (i != 3)
-                    try writer.print(",", .{});
-            }
-            try writer.print(")", .{});
         }
 
         fn convert(v: anytype, comptime get_value: bool) if (get_value) Self else bool {
@@ -1052,6 +1052,32 @@ pub fn Quat(comptime T: type) type {
                 false;
         }
 
+        /// `w`, `x`, `y`, `z` values.
+        fields: [4]T = @splat(0),
+
+        pub const LM_TYPE = LMType.quaternion;
+
+        pub const identity = Self{ .fields = .{ 1, 0, 0, 0 } };
+
+        pub const w = Field(0).get;
+        pub const x = Field(1).get;
+        pub const y = Field(2).get;
+        pub const z = Field(3).get;
+        pub const setW = Field(0).set;
+        pub const setX = Field(1).set;
+        pub const setY = Field(2).set;
+        pub const setZ = Field(3).set;
+
+        pub fn format(self: Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+            try writer.writeByte('(');
+            inline for (self.fields, 0..) |v, i| {
+                try writer.print("{d}", .{v});
+                if (i != (self.fields.len - 1))
+                    try writer.writeAll(", ");
+            }
+            try writer.writeByte(')');
+        }
+
         pub fn cast(self: Self, comptime NT: type) Quat(NT) {
             if (T == NT) return self;
             var result: Quat(NT) = undefined;
@@ -1123,7 +1149,7 @@ pub fn Quat(comptime T: type) type {
                 2 * (self.x() * self.y() + self.w() * self.z()),
                 self.w() * self.w() + self.x() * self.x() - self.y() * self.y() - self.z() * self.z(),
             );
-            return Vec3T.new(.{ yaw, pitch, roll });
+            return Vec3T.new(yaw, pitch, roll);
         }
 
         pub fn neg(a: Self) Self {
@@ -1144,14 +1170,15 @@ pub fn Quat(comptime T: type) type {
         }
 
         pub fn mul(a: Self, b: Self) Self {
-            const use_vector = true; // i can't figure which one is faster bruh
+            const use_vector = false; // i can't figure which one is faster bruh
             if (comptime use_vector) {
-                const vec_a = Vec(T, 4){ .fields = .{ a.x(), a.y(), a.z(), a.w() } };
-                const vec_b = Vec(T, 4){ .fields = .{ b.x(), b.y(), b.z(), b.w() } };
-                const _w = vec_a.mul(vec_b.swizzle("xyzw")).mul(.new(.{ -1, -1, -1, 1 })).dot(.one);
-                const _x = vec_a.mul(vec_b.swizzle("wzyx")).mul(.new(.{ 1, 1, -1, 1 })).dot(.one);
-                const _y = vec_a.mul(vec_b.swizzle("zwxy")).mul(.new(.{ -1, 1, 1, 1 })).dot(.one);
-                const _z = vec_a.mul(vec_b.swizzle("yxwz")).mul(.new(.{ 1, -1, 1, 1 })).dot(.one);
+                // I lowkenuinely cannot understand this shit :sob:
+                const vec_a = Vec(T, 4){ .array = a.fields };
+                const vec_b = Vec(T, 4){ .array = b.fields };
+                const _w = vec_a.mul(vec_b.swizzle("xyzw")).mul(.new(-1, -1, -1, 1)).dot(.one);
+                const _x = vec_a.mul(vec_b.swizzle("wzyx")).mul(.new(1, 1, -1, 1)).dot(.one);
+                const _y = vec_a.mul(vec_b.swizzle("zwxy")).mul(.new(-1, 1, 1, 1)).dot(.one);
+                const _z = vec_a.mul(vec_b.swizzle("yxwz")).mul(.new(1, -1, 1, 1)).dot(.one);
                 return new(_w, _x, _y, _z);
             } else {
                 const _w =
@@ -1209,7 +1236,7 @@ pub fn Quat(comptime T: type) type {
 
         pub fn inverse(self: Self) Self {
             const res = new(self.w(), -self.x(), -self.y(), -self.z());
-            return res.scale(1 / @reduce(.Add, self.toVector() * self.toVector()));
+            return res.scale(1 / @reduce(.Add, self.data * self.data));
         }
 
         pub fn lerp(a: Self, b: Self, t: T) Self {
@@ -1223,7 +1250,7 @@ pub fn Quat(comptime T: type) type {
 
         pub fn slerp(a: Self, b: Self, t: T) Self {
             const parallel_threshold = 0.9995;
-            var cos_theta = @reduce(.Add, a.toVector() * b.toVector());
+            var cos_theta = @reduce(.Add, a.data * b.data);
             var right1 = b;
 
             // We need the absolute value of the dot product to take the shortest path
@@ -1297,6 +1324,12 @@ pub fn Quat(comptime T: type) type {
             }
             return true;
         }
+        pub fn approxEqRel(self: Self, b: Self, tolerance: T) bool {
+            inline for (self.fields, 0..) |v, i| {
+                if (!math.approxEqAbs(T, v, b.fields[i], tolerance)) return false;
+            }
+            return true;
+        }
     };
 }
 pub const Quatf = Quat(f32);
@@ -1353,14 +1386,21 @@ pub inline fn isQuat(comptime T: type) bool {
     }
 }
 
+pub inline fn supportsArithmetics(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .int, .float, .comptime_int, .comptime_float => true,
+        else => false,
+    };
+}
+
 test "Vec.cast, Vec.eql and Vec.add" {
     const expect = testing.expect;
 
-    const v2f_0_5 = Vec2f.new(.{ 0, 5 });
+    const v2f_0_5: Vec2f = .new(0, 5);
     const v2u_0_5 = v2f_0_5.cast(i32).cast(f32);
 
     try expect(v2f_0_5.eql(v2u_0_5));
-    try expect(v2f_0_5.add(v2u_0_5).eql(Vec2f.new(.{ 0, 10 })));
+    try expect(v2f_0_5.add(v2u_0_5).eql(.new(0, 10)));
 }
 
 test "Mat.det" {
@@ -1377,13 +1417,15 @@ test "Mat.mul" {
     try expect(Mat2f.identity.transform(Vec2f.one).eql(Vec2f.one));
 
     const scale = Mat2f.newScaleUniform(2);
-    try expect(scale.transform(Vec2f.one).eql(.from(.{ 2, 2 })));
+    try expect(scale.transform(Vec2f.one).eql(.new(2, 2)));
 
     const shear = Mat2f.new(.{
         1, 1,
         0, 1,
     });
-    try expect(shear.mul(scale).transform(.from(.{ 0, 1 })).eql(.from(.{ 2, 2 })));
+    const transformed = scale.mul(shear).transform(.new(0, 1));
+    try testing.expectEqual(2, transformed.x());
+    try testing.expectEqual(2, transformed.y());
 
     const transform = Mat4f.new(.{
         1, 0, 0, 10,
@@ -1391,7 +1433,7 @@ test "Mat.mul" {
         0, 0, 1, 0,
         0, 0, 0, 1,
     });
-    try expect(transform.transform(.from(.{ 0, 0, 0, 1 })).eql(.from(.{ 10, 0, 0, 1 })));
+    try expect(transform.transform(.new(0, 0, 0, 1)).eql(.new(10, 0, 0, 1)));
 }
 
 test "Quat.new" {
@@ -1416,55 +1458,31 @@ test "Quat.eql" {
 
 test "Quat.normalize" {
     const expectEqual = testing.expectEqual;
-    const a = Quat(f32).fromVec(1, Vec3f.new(.{ 2, 2, 2 }));
-    const b = Quat(f32).fromVec(0.2773500978946686, Vec3f.new(.{ 0.5547001957893372, 0.5547001957893372, 0.5547001957893372 }));
+    const a = Quat(f32).fromVec(1, Vec3f.new(2, 2, 2));
+    const b = Quat(f32).fromVec(0.2773500978946686, Vec3f.new(0.5547001957893372, 0.5547001957893372, 0.5547001957893372));
 
     try expectEqual(a.normalize(), b);
 }
 
 test "Quat.fromEuler" {
-    const expectEqual = testing.expectEqual;
-    const a = Quat(f32).fromEuler(Vec3f.new(.{ 10, 5, 45 }).mul(.from(math.rad_per_deg)));
+    const a = Quat(f32).fromEuler(Vec3f.new(10, 5, 45).mul(.from(math.rad_per_deg)));
     const a_res = a.toEuler();
 
-    const b = Quat(f32).fromEuler(Vec3f.new(.{ 0, 55, 22 }).mul(.from(math.rad_per_deg)));
+    const b = Quat(f32).fromEuler(Vec3f.new(0, 55, 22).mul(.from(math.rad_per_deg)));
     const b_res = b.toEuler();
 
-    try expectEqual(Vec3f.new(.{ 10, 5.0000005, 45.000004 }), a_res.mul(.from(math.deg_per_rad)));
-    try expectEqual(Vec3f.new(.{ 0, 54.999992, 22.000004 }), b_res.mul(.from(math.deg_per_rad)));
+    try testing.expect(Vec3f.approxEqRel(
+        .new(10, 5, 45),
+        a_res.mul(.newUniform(math.deg_per_rad)),
+        0.001,
+    ));
+    try testing.expect(Vec3f.approxEqRel(
+        .new(0, 55, 22),
+        b_res.mul(.newUniform(math.deg_per_rad)),
+        0.001,
+    ));
 }
 
-fn _nonPtrTypeInfo(comptime T: type) std.builtin.Type {
-    const info = @typeInfo(T);
-    const ptrInfo = if (info == .pointer)
-        @typeInfo(info.pointer.child)
-    else
-        info;
-    return ptrInfo;
-}
-
-inline fn _castArithType(comptime T: type, comptime NT: type, v: T) NT {
-    if (comptime !(supportsArithmetics(T) and supportsArithmetics(NT))) {
-        @compileError(ctPrint("Both T ({s}) and NT ({s}) must be arithmetics types (ints or floats)", .{
-            @typeName(T), @typeName(NT),
-        }));
-    }
-
-    const tinfo = @typeInfo(T);
-    const ntinfo = @typeInfo(NT);
-    if (tinfo == .comptime_int or tinfo == .comptime_float or
-        ntinfo == .comptime_int or ntinfo == .comptime_float) return v;
-    return switch (ntinfo) {
-        .int => switch (tinfo) {
-            .int => @intCast(v),
-            .float => @intFromFloat(v),
-            else => unreachable,
-        },
-        .float => switch (tinfo) {
-            .int => @floatFromInt(v),
-            .float => @floatCast(v),
-            else => unreachable,
-        },
-        else => unreachable,
-    };
+test {
+    std.testing.refAllDecls(@This());
 }
