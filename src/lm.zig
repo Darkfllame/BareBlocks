@@ -1,8 +1,6 @@
 //! SIMD Oriented linear math
 //! library.
 
-// TODO: Quaternions
-
 const LM = @This();
 
 const std = @import("std");
