@@ -3,6 +3,10 @@ const utils = @import("utils");
 const StructuredPacket = @import("StructuredPacket.zig");
 const PacketType = StructuredPacket.Type;
 
+test {
+    std.testing.refAllDecls(@This());
+}
+
 pub const HandshakeIntent = enum(u2) { status = 1, login, transfer };
 pub const ServerLinkLabel = enum(u4) { bug_report, community_guidelines, support, statuts, feedback, community, website, forums, news, announcements };
 pub const ChatMode = enum { enabled, commands_only, hidden };
@@ -180,8 +184,6 @@ pub const server_links_s2c = PacketType.prefixedArray(StructuredPacket.getType(.
     },
 }));
 pub const clear_dialog_s2c = StructuredPacket.named("ClearDialogS2C");
-/// TODO: Implement Dialog struct
-pub const show_dialog_s2c: PacketType = @compileError("Not Yet Implemented");
 
 pub const cookie_response_c2s = StructuredPacket.getType(.{
     .name = "CookieResponseC2S",
@@ -205,7 +207,7 @@ pub const resource_pack_response_c2s = StructuredPacket.getType(.{
     .name = "ResourcePackResponseC2S",
     .fields = &.{
         .{ .name = "uuid", .type = .uuid },
-        .{ .result = "result", .type = .{ .@"enum" = .of(ResourcePackResponseResult, .var_int) } },
+        .{ .name = "result", .type = .{ .@"enum" = .of(ResourcePackResponseResult, .var_int) } },
     },
 });
 pub const custom_click_action_c2s = StructuredPacket.getType(.{
@@ -307,6 +309,7 @@ pub const registry_data_s2c = StructuredPacket.getType(.{
     },
 });
 pub const feature_flags_s2c = PacketType.prefixedArray(.identifier);
+pub const configuration_show_dialog_s2c = PacketType{ .nbt = null };
 pub const code_of_conduct_s2c = PacketType.max_string;
 
 pub const ack_finish_configuration_c2s = StructuredPacket.named("AcknownledgeFinishConfigurationC2S");

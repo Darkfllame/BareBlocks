@@ -1,14 +1,16 @@
 const std = @import("std");
 
-pub const Color = @import("color.zig").Color;
+pub const BitStack = @import("BitStack.zig");
 pub const BlockChain = @import("block_chain.zig").BlockChain;
+pub const Color = @import("color.zig").Color;
 pub const GameProfile = @import("GameProfile.zig");
 pub const Identifier = @import("Identifier.zig");
 pub const Keybind = @import("keybinds.zig").Keybind;
 pub const NBT = @import("NBT.zig");
 pub const Selector = @import("Selector.zig");
 pub const TextComponent = @import("TextComponent.zig");
-pub const UUID = @import("UUID.zig");
+pub const translation = @import("translation.zig");
+pub const UUID = @import("uuid.zig").UUID;
 
 pub fn compileError(comptime fmt: []const u8, args: anytype) noreturn {
     @compileError(std.fmt.comptimePrint(fmt, args));
@@ -51,4 +53,8 @@ pub fn validateMethod(comptime Base: type, comptime name: []const u8, comptime p
     }
     // TODO: Make a 'canBeCastedTo' funtion
     if (info.return_type.? != ReturnType) @compileError(bad_fn_msg);
+}
+
+test {
+    std.testing.refAllDecls(@This());
 }

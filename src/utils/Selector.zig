@@ -100,7 +100,7 @@ pub const Arguments = struct {
         many: []const Arguments.ExcludableString,
 
         fn dupe(self: ExcludableSet, allocator: Allocator) Allocator.Error!ExcludableSet {
-            return switch (self.tags) {
+            return switch (self) {
                 inline .any, .zero, .not_zero => |_, tag| tag,
                 .many => |es| many: {
                     const strings = try allocator.alloc(Arguments.ExcludableString, es.len);
@@ -178,7 +178,7 @@ pub fn cloneLeaky(self: Selector, allocator: Allocator) Allocator.Error!Selector
     res.type = if (self.type) |t| try allocator.dupe(u8, t) else null;
     res.scores = try allocator.alloc(Arguments.Score, res.scores.len);
     for (res.scores, self.scores) |*out, in| {
-        out.* = .{
+        @constCast(out).* = .{
             .name = try allocator.dupe(u8, in.name),
             .range = in.range,
         };
@@ -189,7 +189,7 @@ pub fn cloneLeaky(self: Selector, allocator: Allocator) Allocator.Error!Selector
         .any => .any,
         .equal => |str| .{ .equal = try allocator.dupe(u8, str) },
         .exclude => |exc| exclude: {
-            const list = try allocator.alloc([]const u8, u8);
+            const list = try allocator.alloc([]const u8, exc.len);
             for (list, exc) |*out, in| {
                 out.* = try allocator.dupe(u8, in);
             }
@@ -198,14 +198,14 @@ pub fn cloneLeaky(self: Selector, allocator: Allocator) Allocator.Error!Selector
     };
     res.family = try allocator.alloc(Arguments.ExcludableString, self.family.len);
     for (res.family, self.family) |*out, in| {
-        out.* = .{
+        @constCast(out).* = .{
             .exclude = in.exclude,
             .name = try allocator.dupe(u8, in.name),
         };
     }
     res.predicates = try allocator.alloc(Arguments.Predicate, self.predicates.len);
     for (res.predicates, self.predicates) |*out, in| {
-        out.* = .{
+        @constCast(out).* = .{
             .exclude = in.exclude,
             .id = try in.id.dupe(allocator),
         };
@@ -214,4 +214,8 @@ pub fn cloneLeaky(self: Selector, allocator: Allocator) Allocator.Error!Selector
     res.sort = self.sort;
 
     return res;
+}
+
+test {
+    std.testing.refAllDecls(@This());
 }

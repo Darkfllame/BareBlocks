@@ -60,7 +60,7 @@ pub const chat_decoration = StructuredPacket{
         .{ .name = "parameters", .type = .{ .array = .prefixed(.{
             .@"enum" = .of(ChatDecorationParameter, .var_int),
         }) } },
-        .{ .name = "style", .type = .nbt },
+        .{ .name = "style", .type = .{ .nbt = null } },
     },
 };
 
@@ -1175,4 +1175,8 @@ pub fn writeString(writer: *Writer, s: []const u8) (Writer.Error || error{Invali
     const cps = std.unicode.utf8CountCodepoints(s) catch return error.InvalidUTF8;
     try writeVarInt(writer, cps);
     try writer.writeAll(s);
+}
+
+test {
+    std.testing.refAllDecls(@This());
 }

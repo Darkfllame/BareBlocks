@@ -113,3 +113,7 @@ pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.jso
         error.InvalidCharacter => error.InvalidCharacter,
     };
 }
+
+test {
+    std.testing.refAllDecls(@This());
+}

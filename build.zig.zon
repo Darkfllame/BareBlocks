@@ -2,7 +2,7 @@
     .name = .bare_blocks,
     .fingerprint = 0xb1f619523bcf4010,
     .version = "0.0.1",
-    .minimum_zig_version = "0.15.1",
+    .minimum_zig_version = "0.16.0",
 
     .dependencies = .{
         .coroutines = .{ .path = "./coroutines" },

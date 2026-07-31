@@ -99,7 +99,7 @@ pub const Value = union(ValueTag) {
 pub const List = struct {
     type: ValueTag = .void,
     elems: u31 = 0,
-    data: [*]align(@alignOf(Value)) u8 = undefined,
+    data: [*]align(8) u8 = undefined,
 
     pub fn from(comptime @"type": ValueTag, data: []@FieldType(Value, @tagName(@"type"))) List {
         return .{
@@ -252,7 +252,7 @@ pub fn readValue(reader: *Reader, allocator: Allocator) ReadError!NBT {
     var aa = ArenaAllocator.init(allocator);
     errdefer aa.deinit();
     const arena = aa.allocator();
-    const res = try readValueLeaky(reader, arena);
+    var res = try readValueLeaky(reader, arena);
     res.arena_state = aa.state;
     return res;
 }
@@ -329,4 +329,8 @@ pub fn writeTo(self: NBT, writer: *Writer) WriteError!void {
     try writer.writeByte(@intFromEnum(self.root));
     try writeJavaString(writer, self.name);
     try writeValueRaw(writer, self.root);
+}
+
+test {
+    std.testing.refAllDecls(@This());
 }

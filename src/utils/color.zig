@@ -84,3 +84,9 @@ pub const Color = enum(u24) {
         );
     }
 };
+
+test {
+    std.testing.refAllDecls(@This());
+    std.testing.refAllDecls(Color);
+    std.testing.refAllDecls(Color.ARGB);
+}

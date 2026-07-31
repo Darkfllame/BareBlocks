@@ -70,3 +70,7 @@ pub const Keybind = enum {
     @"debug.fpsChart",
     @"debug.networkCharts",
 };
+
+test {
+    _ = Keybind;
+}

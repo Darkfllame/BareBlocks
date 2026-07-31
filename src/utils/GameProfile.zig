@@ -1,6 +1,6 @@
 const GameProfile = @This();
 const std = @import("std");
-const UUID = @import("UUID.zig");
+const UUID = @import("uuid.zig").UUID;
 
 uuid: UUID,
 lengths: packed struct {
@@ -94,4 +94,8 @@ pub fn format(self: GameProfile, writer: *std.Io.Writer) std.Io.Writer.Error!voi
 pub fn eql(self: GameProfile, other: GameProfile) bool {
     return self.uuid.eql(other.uuid) or
         std.mem.eql(u8, self.username(), other.username());
+}
+
+test {
+    std.testing.refAllDecls(@This());
 }

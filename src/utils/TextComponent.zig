@@ -1,12 +1,13 @@
 const TextComponent = @This();
 const std = @import("std");
-const translation = @import("translation");
 const Color = @import("color.zig").Color;
 const Keybind = @import("keybinds.zig").Keybind;
 const Selector = @import("Selector.zig");
 const Identifier = @import("Identifier.zig");
 const NBT = @import("NBT.zig");
+const utils = @import("utils.zig");
 
+const translation = utils.translation;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const Writer = std.Io.Writer;
@@ -184,8 +185,8 @@ const FormatContext = struct {
                 writer.writeAll(translation.getKeybind(kb.key)),
             .score,
             .selector,
-            => @panic("Not Yet Implemented²"),
-            .nbt => |nbt| try nbt.format(writer),
+            .nbt,
+            => @panic("Not Yet Implemented"), // TODO: TextComponent::format<content.(score, selector, nbt)>
         }
 
         for (self.children) |*tc| {
@@ -558,12 +559,12 @@ pub fn cloneLeaky(self: TextComponent, allocator: Allocator) Allocator.Error!Tex
         .score => |sc| .{ .score = .{
             .name = switch (sc.name) {
                 .reader => .reader,
-                .selector => |sel| .{ .selector = try sel.dupeLeaky(allocator) },
+                .selector => |sel| .{ .selector = try sel.cloneLeaky(allocator) },
             },
             .objective = try allocator.dupe(u8, sc.objective),
         } },
         .selector => |sel| .{ .selector = .{
-            .value = try sel.value.dupeLeaky(allocator),
+            .value = try sel.value.cloneLeaky(allocator),
             .separator = sep: {
                 const tc = try allocator.create(TextComponent);
                 tc.* = try sel.separator.cloneLeaky(allocator);
@@ -571,8 +572,8 @@ pub fn cloneLeaky(self: TextComponent, allocator: Allocator) Allocator.Error!Tex
             },
         } },
         .keybind => |kb| .{ .keybind = .{
-            .kb = kb.key,
-            .translation = try allocator.dupe(u8, kb),
+            .key = kb.key,
+            .translation = try allocator.dupe(u8, kb.translation),
         } },
         .nbt => unreachable,
     };
@@ -587,7 +588,7 @@ pub fn cloneLeaky(self: TextComponent, allocator: Allocator) Allocator.Error!Tex
     };
     tc.formatting_mask = self.formatting_mask;
     tc.formatting = self.formatting;
-    if (self.formatting_mask.get(&self.formatting, .font)) |font| {
+    if (self.formatting_mask.get(self.formatting, .font)) |font| {
         tc.formatting.font = try font.dupe(allocator);
     }
     tc.insertion = try allocator.dupe(u8, self.insertion);
@@ -607,7 +608,7 @@ pub fn cloneLeaky(self: TextComponent, allocator: Allocator) Allocator.Error!Tex
             @tagName(tag),
             try allocator.dupe(u8, str),
         ),
-        .show_dialog => @panic("Not Yet Implemented"),
+        .show_dialog => @panic("Not Yet Implemented"), // TODO: TextComponent::cloneLeaky<click_event.show_dialog>
         .custom => |custom| .{ .custom = .{
             .id = try custom.id.dupe(allocator),
             .payload = try allocator.dupe(u8, custom.payload),
@@ -616,12 +617,12 @@ pub fn cloneLeaky(self: TextComponent, allocator: Allocator) Allocator.Error!Tex
     tc.hover_event = switch (tc.hover_event) {
         .none => .none,
         .show_text => |sht| txt: {
-            const tc2 = try allocator.create(Allocator);
+            const tc2 = try allocator.create(TextComponent);
             tc2.* = try sht.cloneLeaky(allocator);
-            break :txt tc2;
+            break :txt .{ .show_text = tc2 };
         },
-        .show_item => @panic("Not Yet Implemented"),
-        .show_entity => @panic("Not Yet Implemented"),
+        .show_item => @panic("Not Yet Implemented"), // TODO: TextComponent::cloneLeaky<hover_event.show_item>
+        .show_entity => @panic("Not Yet Implemented"), // TODO: TextComponent::cloneLeaky<hover_event.show_entity>
     };
 
     return tc;
@@ -724,7 +725,7 @@ pub fn jsonStringify(self: TextComponent, jw: *json.Stringify) json.Stringify.Er
                 try jw.writer.print("\"key.{t}\"", .{kb.key});
             }
         },
-        .nbt => @panic("Not Yet Implemented"),
+        .nbt => @panic("Not Yet Implemented"), // TODO: TextComponent::jsonStringify<content.nbt>
     }
 
     inline for (@typeInfo(Formatting).@"struct".fields) |f| {
@@ -796,13 +797,15 @@ pub fn jsonParseFromValue(allocator: Allocator, source: json.Value, options: jso
                 if (name != .string) return error.UnexpectedToken;
                 const objective = sc.get("objective") orelse return error.MissingField;
                 if (objective != .string) return error.UnexpectedToken;
-                out.content = .{ .score = .{
-                    .name = if (eql(u8, name.string, "*"))
-                        .reader
-                    else
-                        @panic("Selector parsing not yet implemented"),
-                    .objective = objective.string,
-                } };
+                out.content = .{
+                    .score = .{
+                        .name = if (eql(u8, name.string, "*"))
+                            .reader
+                        else
+                            @panic("Selector parsing not yet implemented"), // TODO: TextComponent::jsonParseFromValue<content.score.name.selector>
+                        .objective = objective.string,
+                    },
+                };
             } else if (obj.get("keybind")) |kb| {
                 if (kb != .string) return error.UnexpectedToken;
                 const key = if (kb.string.len > 4)
@@ -924,4 +927,8 @@ pub fn nbtWrite(self: TextComponent, writer: *Writer) NBT.WriteError!void {
 
 pub fn nbtWriteNamed(self: TextComponent, writer: *Writer, name: []const u8) NBT.WriteError!void {
     return nbtWriteInner(self, writer, name, false);
+}
+
+test {
+    std.testing.refAllDecls(@This());
 }
