@@ -10,8 +10,12 @@ const logger = std.log.scoped(.@"graphics/Device");
 const Allocator = std.mem.Allocator;
 
 const vulkan_11_features = vk.PhysicalDeviceVulkan11Features{
-    .p_next = @constCast(&vulkan_13_features),
+    .p_next = @constCast(&vulkan_12_features),
     .shader_draw_parameters = .true,
+};
+const vulkan_12_features = vk.PhysicalDeviceVulkan12Features{
+    .p_next = @constCast(&vulkan_13_features),
+    .timeline_semaphore = .true,
 };
 const vulkan_13_features = vk.PhysicalDeviceVulkan13Features{
     .p_next = @constCast(&extended_dynamic_state_features),
@@ -168,7 +172,8 @@ fn chosePhysicalDevice(instance: vk.InstanceProxy, phys_devs: []const vk.Physica
     var best_index: ?u8 = null;
     var edsfeats: vk.PhysicalDeviceExtendedDynamicStateFeaturesEXT = .{ .p_next = null };
     var vk13feats: vk.PhysicalDeviceVulkan13Features = .{ .p_next = &edsfeats };
-    var vk11feats: vk.PhysicalDeviceVulkan11Features = .{ .p_next = &vk13feats };
+    var vk12feats: vk.PhysicalDeviceVulkan12Features = .{ .p_next = &vk13feats };
+    var vk11feats: vk.PhysicalDeviceVulkan11Features = .{ .p_next = &vk12feats };
     var feats: vk.PhysicalDeviceFeatures2 = .{
         .p_next = &vk11feats,
         .features = .{},
@@ -188,7 +193,7 @@ fn chosePhysicalDevice(instance: vk.InstanceProxy, phys_devs: []const vk.Physica
 
         if (!hasFeatures(vk.PhysicalDeviceFeatures2, &create_device_chain, &feats)) continue;
         if (!hasFeatures(vk.PhysicalDeviceVulkan11Features, &vulkan_11_features, &vk11feats)) continue;
-        if (!hasFeatures(vk.PhysicalDeviceVulkan13Features, &vulkan_13_features, &vk13feats)) continue;
+        if (!hasFeatures(vk.PhysicalDeviceVulkan12Features, &vulkan_12_features, &vk12feats)) continue;
         if (!hasFeatures(vk.PhysicalDeviceVulkan13Features, &vulkan_13_features, &vk13feats)) continue;
         if (!hasFeatures(vk.PhysicalDeviceExtendedDynamicStateFeaturesEXT, &extended_dynamic_state_features, &edsfeats)) continue;
 
@@ -202,6 +207,18 @@ fn chosePhysicalDevice(instance: vk.InstanceProxy, phys_devs: []const vk.Physica
 }
 
 fn createLogicalDevice(self: *Device, gpa: Allocator, wrapper: *vk.DeviceWrapper, surface: vk.SurfaceKHR) !void {
+    self.mask = blk: {
+        const group_props = try self.instance.enumeratePhysicalDeviceGroupsAlloc(gpa);
+        defer gpa.free(group_props);
+        for (group_props) |gp| {
+            for (gp.physical_devices[0..gp.physical_device_count], 0..) |pdev, i| {
+                if (self.pdev == pdev) break :blk @as(u32, 1) << @intCast(i);
+            }
+        }
+
+        break :blk 1;
+    };
+
     const qfps = try self.instance.getPhysicalDeviceQueueFamilyPropertiesAlloc(self.pdev, gpa);
     defer gpa.free(qfps);
 
@@ -223,15 +240,27 @@ fn createLogicalDevice(self: *Device, gpa: Allocator, wrapper: *vk.DeviceWrapper
         vk.extensions.khr_swapchain.name.ptr,
         vk.extensions.khr_dynamic_rendering.name.ptr,
         vk.extensions.khr_maintenance_1.name.ptr,
+        vk.extensions.khr_timeline_semaphore.name.ptr,
     };
 
-    const device = try self.instance.createDevice(self.pdev, &vk.DeviceCreateInfo{
+    const device = self.instance.createDevice(self.pdev, &vk.DeviceCreateInfo{
         .p_next = &create_device_chain,
         .queue_create_info_count = @intCast(q_create_infos.len),
         .p_queue_create_infos = q_create_infos.ptr,
         .enabled_extension_count = extensions.len,
         .pp_enabled_extension_names = &extensions,
-    }, null);
+    }, null) catch |e| switch (e) {
+        error.OutOfHostMemory => return error.OutOfMemory,
+        error.OutOfDeviceMemory,
+        error.InitializationFailed,
+        error.ExtensionNotPresent,
+        error.FeatureNotPresent,
+        error.TooManyObjects,
+        => |err| return err,
+        error.DeviceLost => @panic("GPU Device Lost"),
+        error.ValidationFailed => unreachable,
+        error.Unknown => unreachable,
+    };
     wrapper.load(device, self.instance.wrapper.dispatch.vkGetDeviceProcAddr.?);
     errdefer wrapper.destroyDevice(device, null);
 
@@ -246,13 +275,18 @@ fn createLogicalDevice(self: *Device, gpa: Allocator, wrapper: *vk.DeviceWrapper
 }
 
 instance: vk.InstanceProxy,
+mask: u32,
 pdev: vk.PhysicalDevice,
 proxy: vk.DeviceProxy,
 queue_family_indices: QueueFamilyIndices,
 queues: QueueFamilyIndices.Queues,
 concurrent_queues_count: QueueFamilyIndices.TagInt,
 concurrent_queues: [QueueFamilyIndices.fields.len]u32,
+/// Command pool for command buffers to be used for rendering
 command_pool: vk.CommandPool,
+/// Command pool for command buffers to be used for transfering
+/// data. May be the same value as `command_pool`
+transfer_command_pool: vk.CommandPool,
 mman: MemoryManager,
 
 pub const PipelineLayoutCreateInfo = struct {
@@ -299,6 +333,7 @@ pub fn init(self: *Device, info: InitInfo) !void {
         logger.err("Couldn't choose physical device", .{});
         return error.Vulkan;
     };
+    self.mask = @as(u32, 1) << @truncate(pdev_index);
     self.instance = info.instance;
     self.pdev = info.physical_devices[pdev_index];
     // initializes .device and .queues
@@ -310,6 +345,14 @@ pub fn init(self: *Device, info: InitInfo) !void {
         .queue_family_index = self.queue_family_indices.graphics,
     }, null);
     errdefer self.proxy.destroyCommandPool(self.command_pool, null);
+
+    const same_pool = self.queue_family_indices.graphics == self.queue_family_indices.transfer;
+
+    self.transfer_command_pool = if (!same_pool) try self.proxy.createCommandPool(&vk.CommandPoolCreateInfo{
+        .flags = .{ .reset_command_buffer_bit = true },
+        .queue_family_index = self.queue_family_indices.transfer,
+    }, null) else self.command_pool;
+    errdefer if (!same_pool) self.proxy.destroyCommandPool(self.transfer_command_pool, null);
 
     try self.mman.init(.{
         .gpa = info.gpa,
@@ -326,6 +369,9 @@ pub fn init(self: *Device, info: InitInfo) !void {
 
 pub fn deinit(self: *Device) void {
     self.mman.deinit();
+    if (self.queue_family_indices.graphics != self.queue_family_indices.transfer) {
+        self.proxy.destroyCommandPool(self.transfer_command_pool, null);
+    }
     self.proxy.destroyCommandPool(self.command_pool, null);
     self.proxy.destroyDevice(null);
 }
@@ -334,8 +380,24 @@ pub fn getQueue(self: *const Device, comptime queue_name: QueueFamilyIndices.Fie
     return .init(@field(self.queues, @tagName(queue_name)), self.proxy.wrapper);
 }
 
-pub fn queueWaitIdle(self: *const Device, comptime queue_name: QueueFamilyIndices.FieldsEnum) !void {
-    return self.getQueue(queue_name).waitIdle();
+pub fn queueWaitIdle(self: *const Device, comptime queue_name: QueueFamilyIndices.FieldsEnum) void {
+    self.getQueue(queue_name).waitIdle() catch |e| switch (e) {
+        error.OutOfHostMemory => unreachable, // Why would you need memory for that ??????
+        error.OutOfDeviceMemory => unreachable, // Why would you need memory for that ??????
+        error.DeviceLost => @panic("GPU Device Lost"),
+        error.ValidationFailed => unreachable,
+        error.Unknown => unreachable,
+    };
+}
+
+pub fn waitIdle(self: *const Device) void {
+    self.proxy.deviceWaitIdle() catch |e| switch (e) {
+        error.OutOfHostMemory => unreachable, // Why would you need memory for that ??????
+        error.OutOfDeviceMemory => unreachable, // Why would you need memory for that ??????
+        error.DeviceLost => @panic("GPU Device Lost"),
+        error.ValidationFailed => unreachable,
+        error.Unknown => unreachable,
+    };
 }
 
 pub inline fn createShader(self: *Device, code: []const u32) !vk.ShaderModule {

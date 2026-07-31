@@ -539,7 +539,7 @@ pub fn allocBuffer(self: *MemoryManager, kind: Buffer.Kind, size: vk.DeviceSize,
             .vertex_buffer_bit = kind == .vertex,
             .index_buffer_bit = kind == .index,
             .transfer_src_bit = kind == .transfer,
-            .transfer_dst_bit = kind == .transfer,
+            .transfer_dst_bit = true,
             .uniform_buffer_bit = kind == .uniform,
             .storage_buffer_bit = kind == .storage,
         },
@@ -564,6 +564,14 @@ pub fn allocBuffer(self: *MemoryManager, kind: Buffer.Kind, size: vk.DeviceSize,
         .fromByteUnits(@intCast(req.alignment)),
     );
     rval.chunk.type = @enumFromInt(@intFromEnum(kind));
+
+    self.vk_device.bindBufferMemory(rval.handle, rval.chunk.block.devm, rval.chunk.offset) catch |e| switch (e) {
+        error.OutOfHostMemory => return error.OutOfMemory,
+        error.OutOfDeviceMemory => return error.OutOfDeviceMemory,
+        error.InvalidOpaqueCaptureAddressKHR => unreachable,
+        error.ValidationFailed => unreachable,
+        error.Unknown => unreachable,
+    };
 
     return rval;
 }
@@ -607,21 +615,23 @@ pub fn freeBuffer(self: *MemoryManager, buffer: Buffer) void {
 }
 
 /// Will copy up to `buffer.size` bytes from `reader`
-pub fn copyToTransferBuffer(self: *MemoryManager, buffer: Buffer, reader: *std.Io.Reader) std.Io.Reader.Error!void {
+pub fn copyToTransferBuffer(self: *MemoryManager, buffer: Buffer, reader: *std.Io.Reader) !void {
     const chunk = buffer.chunk;
     const ptr = (self.vk_device.mapMemory(chunk.block.devm, chunk.offset, buffer.size, .{}) catch |e| return switch (e) {
-        error.OutOfHostMemory, error.MemoryMapFailed => error.OutOfMemory,
-        error.OutOfDeviceMemory => error.OutOfDeviceMemory,
+        error.OutOfHostMemory, error.MemoryMapFailed => return error.OutOfMemory,
+        error.OutOfDeviceMemory => return error.OutOfDeviceMemory,
         error.ValidationFailed => unreachable,
         error.Unknown => unreachable,
     }).?;
     defer self.vk_device.unmapMemory(chunk.block.devm);
+    const bytes: [*]u8 = @ptrCast(ptr);
 
     var copy_buf: [512]u8 = undefined;
     var offset: usize = 0;
     while (offset < buffer.size) {
         const read = try reader.readSliceShort(copy_buf[0..@min(copy_buf.len, buffer.size - offset)]);
-        @memcpy(ptr[offset .. offset + read], copy_buf[0..read]);
+        if (read == 0) break;
+        @memcpy(bytes[offset..][0..read], copy_buf[0..read]);
         offset += read;
     }
 }

@@ -1,5 +1,6 @@
 const Swapchain = @This();
 const std = @import("std");
+const builtin = @import("builtin");
 const vk = @import("vulkan");
 const sdl = @import("sdl");
 const Device = @import("Device.zig");
@@ -8,6 +9,7 @@ const logger = std.log.scoped(.@"graphics/Swapchain");
 
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
+const is_debug = builtin.mode == .Debug;
 
 extern fn SDL_Vulkan_CreateSurface(
     window: *sdl.SDL_Window,
@@ -17,20 +19,19 @@ extern fn SDL_Vulkan_CreateSurface(
 ) callconv(.c) bool;
 
 fn deinitSwapchain(self: *Swapchain, allocator: Allocator) void {
-    allocator.free(self.images[0..self.image_count]);
-    {
-        const img_views = self.img_views[0..self.image_count];
-        for (img_views) |iv| {
-            self.vk_device.destroyImageView(iv, null);
-        }
-        allocator.free(img_views);
+    const img_views = self.img_views[0..self.image_count];
+    for (img_views) |iv| {
+        self.vk_device.destroyImageView(iv, null);
     }
     self.vk_device.destroySwapchainKHR(self.handle, null);
+
+    allocator.free(self.images[0..self.image_count]);
+    allocator.free(img_views);
 }
 
 fn getCommandBuffer(self: *Swapchain) vk.CommandBufferProxy {
-    return vk.CommandBufferProxy.init(
-        self.command_buffers[self.current_frame + self.image_index * self.max_frames_in_flight],
+    return .init(
+        self.command_buffers[self.current_frame + self.getImageIndex()],
         self.vk_device.wrapper,
     );
 }
@@ -70,92 +71,67 @@ fn transitionImageLayout(
     });
 }
 
-max_frames_in_flight: u8,
-vsync_mode: VsyncMode,
-
-vk_device: vk.DeviceProxy,
-window: *sdl.SDL_Window,
-device: *const Device,
-handle: vk.SwapchainKHR,
-surface: vk.SurfaceKHR,
-extent: vk.Extent2D,
-
-image_count: u8,
-surface_format: vk.SurfaceFormatKHR,
-images: [*]vk.Image,
-img_views: [*]vk.ImageView,
-
-command_buffers: [*]vk.CommandBuffer,
-render_semaphores: [*]vk.Semaphore,
-present_semaphores: [*]vk.Semaphore,
-presentation_fences: [*]vk.Fence,
-image_index: u32,
-current_frame: u8,
-
-pub const VsyncMode = enum { disabled, enabled, adaptive };
-pub const InitInfo = struct {
-    gpa: Allocator,
-    window: *sdl.SDL_Window,
-    instance: vk.InstanceProxy,
-    device: *const Device,
-
-    max_frames_in_flight: u8 = 2,
-    vsync: VsyncMode = .enabled,
+const SyncObjectsSet = struct {
+    cmd_buffers: [*]vk.CommandBuffer,
+    tcmd_buffers: [*]vk.CommandBuffer,
+    rsems: [*]vk.Semaphore,
+    psems: [*]vk.Semaphore,
+    pfences: [*]vk.Fence,
 };
 
-pub fn createSurface(self: *Swapchain, instance: vk.Instance, window: *sdl.SDL_Window) !void {
-    if (!SDL_Vulkan_CreateSurface(
-        window,
-        instance,
-        null,
-        &self.surface,
-    )) {
-        logger.err("Couldn't create VkSurfaceKHR from SDL_Window", .{});
-        return error.SDL;
-    }
+fn getSyncObjects(self: *Swapchain) SyncObjectsSet {
+    return .{
+        .cmd_buffers = self.command_buffers,
+        .tcmd_buffers = self.tcmd_buffers,
+        .rsems = self.render_semaphores,
+        .psems = self.present_semaphores,
+        .pfences = self.presentation_fences,
+    };
 }
 
-/// Assumes self.surface has already been created with `createSurface`.
-pub fn init(self: *Swapchain, info: InitInfo) !void {
-    assert(self.surface != .null_handle);
+fn setSyncObjectsSet(self: *Swapchain, set: SyncObjectsSet) void {
+    self.command_buffers = set.cmd_buffers;
+    self.tcmd_buffers = set.tcmd_buffers;
+    self.render_semaphores = set.rsems;
+    self.present_semaphores = set.psems;
+    self.presentation_fences = set.pfences;
+}
 
-    self.max_frames_in_flight = info.max_frames_in_flight;
-    self.vsync_mode = info.vsync;
+fn createSyncObjects(self: *Swapchain, allocator: Allocator) !SyncObjectsSet {
+    const cmd_buffers = try allocator.alloc(vk.CommandBuffer, self.getImageCount());
+    errdefer allocator.free(cmd_buffers);
 
-    self.vk_device = info.device.proxy;
-    self.window = info.window;
-    self.device = info.device;
-    self.handle = .null_handle;
-    self.current_frame = 0;
-    self.image_count = 0;
-    try self.recreate(info.gpa, info.instance);
-    errdefer self.deinitSwapchain(info.gpa);
+    const tcmd_buffers = try allocator.alloc(vk.CommandBuffer, self.getImageCount());
+    errdefer allocator.free(tcmd_buffers);
 
-    const cmd_buffers = try info.gpa.alloc(vk.CommandBuffer, self.image_count * self.max_frames_in_flight);
-    errdefer info.gpa.free(cmd_buffers);
-    self.command_buffers = cmd_buffers.ptr;
+    const rsems = try allocator.alloc(vk.Semaphore, self.getImageCount());
+    errdefer allocator.free(rsems);
 
-    const rsems = try info.gpa.alloc(vk.Semaphore, self.image_count * self.max_frames_in_flight);
-    errdefer info.gpa.free(rsems);
-    self.render_semaphores = rsems.ptr;
+    const psems = try allocator.alloc(vk.Semaphore, self.max_frames_in_flight);
+    errdefer allocator.free(psems);
 
-    const psems = try info.gpa.alloc(vk.Semaphore, self.max_frames_in_flight);
-    errdefer info.gpa.free(psems);
-    self.present_semaphores = psems.ptr;
-
-    const pfences = try info.gpa.alloc(vk.Fence, self.max_frames_in_flight);
-    errdefer info.gpa.free(pfences);
-    self.presentation_fences = pfences.ptr;
+    const pfences = try allocator.alloc(vk.Fence, self.max_frames_in_flight * 2);
+    errdefer allocator.free(pfences);
 
     try self.vk_device.allocateCommandBuffers(
         &vk.CommandBufferAllocateInfo{
             .level = .primary,
             .command_buffer_count = @intCast(cmd_buffers.len),
-            .command_pool = info.device.command_pool,
+            .command_pool = self.device.command_pool,
         },
         cmd_buffers.ptr,
     );
-    errdefer self.vk_device.freeCommandBuffers(info.device.command_pool, cmd_buffers);
+    errdefer self.vk_device.freeCommandBuffers(self.device.command_pool, cmd_buffers);
+
+    try self.vk_device.allocateCommandBuffers(
+        &vk.CommandBufferAllocateInfo{
+            .level = .primary,
+            .command_buffer_count = @intCast(tcmd_buffers.len),
+            .command_pool = self.device.transfer_command_pool,
+        },
+        tcmd_buffers.ptr,
+    );
+    errdefer self.vk_device.freeCommandBuffers(self.device.command_pool, tcmd_buffers);
 
     for (rsems, 0..) |*sem, i| {
         errdefer for (rsems[0..i]) |s| {
@@ -171,7 +147,7 @@ pub fn init(self: *Swapchain, info: InitInfo) !void {
         errdefer for (psems[0..i]) |s| {
             self.vk_device.destroySemaphore(s, null);
         };
-        sem.* = try self.vk_device.createSemaphore(&.{}, null);
+        sem.* = try self.vk_device.createSemaphore(&vk.SemaphoreCreateInfo{}, null);
     }
     errdefer for (psems) |s| {
         self.vk_device.destroySemaphore(s, null);
@@ -188,41 +164,41 @@ pub fn init(self: *Swapchain, info: InitInfo) !void {
     errdefer for (pfences) |f| {
         self.vk_device.destroyFence(f, null);
     };
+
+    return .{
+        .cmd_buffers = cmd_buffers.ptr,
+        .tcmd_buffers = tcmd_buffers.ptr,
+        .rsems = rsems.ptr,
+        .psems = psems.ptr,
+        .pfences = pfences.ptr,
+    };
 }
 
-pub fn deinit(self: *Swapchain, allocator: Allocator, instance: vk.InstanceProxy) void {
-    self.deinitSwapchain(allocator);
-    for (self.render_semaphores[0 .. self.image_count * self.max_frames_in_flight]) |sem| {
-        self.vk_device.destroySemaphore(sem, null);
+fn destroySyncObjects(self: *Swapchain, allocator: Allocator, set: SyncObjectsSet) void {
+    const img_count = self.getImageCount();
+    self.vk_device.freeCommandBuffers(self.device.command_pool, set.cmd_buffers[0..img_count]);
+    self.vk_device.freeCommandBuffers(self.device.transfer_command_pool, set.tcmd_buffers[0..img_count]);
+    for (set.rsems[0..img_count]) |s| {
+        self.vk_device.destroySemaphore(s, null);
     }
-    for (self.present_semaphores[0..self.max_frames_in_flight], self.presentation_fences[0..self.max_frames_in_flight]) |psem, pfence| {
-        self.vk_device.destroySemaphore(psem, null);
-        self.vk_device.destroyFence(pfence, null);
+    for (set.psems[0..self.max_frames_in_flight]) |s| {
+        self.vk_device.destroySemaphore(s, null);
     }
-    self.vk_device.freeCommandBuffers(self.device.command_pool, self.command_buffers[0..self.image_count]);
-    if (self.surface != .null_handle) {
-        instance.destroySurfaceKHR(self.surface, null);
+    for (set.pfences[0..self.max_frames_in_flight]) |f| {
+        self.vk_device.destroyFence(f, null);
     }
-
-    allocator.free(self.command_buffers[0 .. self.image_count * self.max_frames_in_flight]);
-    allocator.free(self.render_semaphores[0 .. self.image_count * self.max_frames_in_flight]);
-    allocator.free(self.present_semaphores[0..self.max_frames_in_flight]);
-    allocator.free(self.presentation_fences[0..self.max_frames_in_flight]);
+    allocator.free(set.cmd_buffers[0..img_count]);
+    allocator.free(set.tcmd_buffers[0..img_count]);
+    allocator.free(set.rsems[0..img_count]);
+    allocator.free(set.psems[0..self.max_frames_in_flight]);
+    allocator.free(set.pfences[0..self.max_frames_in_flight]);
 }
 
-pub fn setVsync(self: *Swapchain, allocator: Allocator, instance: vk.InstanceProxy, mode: VsyncMode) !void {
-    self.vsync_mode = mode;
-    return self.recreate(allocator, instance);
-}
-
-pub fn recreate(
-    self: *Swapchain,
-    allocator: Allocator,
-    instance: vk.InstanceProxy,
-) !void {
+fn recreateSwapchain(self: *Swapchain, allocator: Allocator, vsync: VsyncMode) !void {
     var win_pxw: u32 = undefined;
     var win_pxh: u32 = undefined;
     assert(sdl.SDL_GetWindowSizeInPixels(self.window, @ptrCast(&win_pxw), @ptrCast(&win_pxh)));
+    const instance = self.device.instance;
 
     const capabilities = try instance.getPhysicalDeviceSurfaceCapabilitiesKHR(
         self.device.pdev,
@@ -252,8 +228,9 @@ pub fn recreate(
         allocator,
     );
     defer allocator.free(present_modes);
+
     var pm = vk.PresentModeKHR.fifo_khr;
-    if (self.vsync_mode == .disabled) {
+    if (vsync == .disabled) {
         loop: for (present_modes) |available| switch (available) {
             .mailbox_khr => {
                 pm = available;
@@ -265,7 +242,7 @@ pub fn recreate(
             },
             else => continue,
         };
-    } else if (self.vsync_mode == .adaptive) {
+    } else if (vsync == .adaptive) {
         for (present_modes) |available| {
             if (available == .fifo_relaxed_khr) {
                 pm = .fifo_relaxed_khr;
@@ -313,7 +290,17 @@ pub fn recreate(
         .old_swapchain = self.handle,
     };
     const old_handle = self.handle;
-    self.handle = try self.vk_device.createSwapchainKHR(&create_info, null);
+    self.handle = self.vk_device.createSwapchainKHR(&create_info, null) catch |e| switch (e) {
+        error.OutOfHostMemory => return error.OutOfMemory,
+        error.OutOfDeviceMemory => return error.OutOfDeviceMemory,
+        error.DeviceLost => @panic("GPU Device Lost"),
+        error.SurfaceLostKHR => @panic("Surface Lost"),
+        error.NativeWindowInUseKHR => unreachable,
+        error.InitializationFailed => return error.InitializationFailed,
+        error.CompressionExhaustedEXT => unreachable,
+        error.ValidationFailed => unreachable,
+        error.Unknown => unreachable,
+    };
     errdefer self.vk_device.destroySwapchainKHR(self.handle, null);
 
     const old_img_count = self.image_count;
@@ -325,12 +312,16 @@ pub fn recreate(
         null,
     );
 
-    const images = try allocator.realloc(self.images[0..old_img_count], image_count);
-    self.images = images.ptr;
-    errdefer allocator.free(images);
     for (self.img_views[0..old_img_count]) |iv| {
         self.vk_device.destroyImageView(iv, null);
     }
+
+    const images = allocator.realloc(self.images[0..old_img_count], image_count) catch |e| {
+        allocator.free(self.images[0..old_img_count]);
+        return e;
+    };
+    self.images = images.ptr;
+    errdefer allocator.free(images);
     if (old_handle != .null_handle) {
         self.vk_device.destroySwapchainKHR(old_handle, null);
     }
@@ -340,7 +331,10 @@ pub fn recreate(
         self.images,
     );
 
-    const views = try allocator.realloc(self.img_views[0..old_img_count], image_count);
+    const views = allocator.realloc(self.img_views[0..old_img_count], image_count) catch |e| {
+        allocator.free(self.img_views[0..old_img_count]);
+        return e;
+    };
     self.img_views = views.ptr;
     errdefer allocator.free(views);
 
@@ -374,34 +368,232 @@ pub fn recreate(
         self.vk_device.destroyImageView(iv, null);
     };
 
-    self.image_count = @intCast(images.len);
+    self.image_count = @intCast(image_count);
 }
 
-pub fn beginDraw(self: *Swapchain) !vk.CommandBufferProxy {
-    const frame_fence = self.presentation_fences[self.current_frame..][0..1];
-    _ = try self.vk_device.waitForFences(frame_fence, .true, ~@as(u64, 0));
-    try self.vk_device.resetFences(frame_fence);
+max_frames_in_flight: u8,
+vsync_mode: VsyncMode,
 
-    const next = try self.vk_device.acquireNextImageKHR(
-        self.handle,
-        ~@as(u64, 0),
-        self.present_semaphores[self.current_frame],
-        .null_handle,
+vk_device: vk.DeviceProxy,
+window: *sdl.SDL_Window,
+device: *const Device,
+handle: vk.SwapchainKHR,
+surface: vk.SurfaceKHR,
+extent: vk.Extent2D,
+
+image_count: u8,
+surface_format: vk.SurfaceFormatKHR,
+images: [*]vk.Image,
+img_views: [*]vk.ImageView,
+
+/// `len = getImageCount()`
+command_buffers: [*]vk.CommandBuffer,
+/// Command buffers for transfer operations
+///
+/// `len = getImageCount()`
+tcmd_buffers: [*]vk.CommandBuffer,
+/// `len = getImageCount()`
+render_semaphores: [*]vk.Semaphore,
+/// `len = max_frames_in_flight`
+present_semaphores: [*]vk.Semaphore,
+/// `len = max_frames_in_flight`
+presentation_fences: [*]vk.Fence,
+image_index: u32,
+current_frame: u8,
+draw_began: if (is_debug) bool else void,
+
+pub const VsyncMode = enum { disabled, enabled, adaptive };
+pub const InitInfo = struct {
+    gpa: Allocator,
+    window: *sdl.SDL_Window,
+    instance: vk.InstanceProxy,
+    device: *const Device,
+
+    max_frames_in_flight: u8 = 2,
+    vsync: VsyncMode = .enabled,
+};
+pub const RecreateOptions = struct {
+    max_frames_in_flight: ?u8 = null,
+    vsync: ?VsyncMode = null,
+};
+
+pub fn createSurface(self: *Swapchain, instance: vk.Instance, window: *sdl.SDL_Window) !void {
+    if (!SDL_Vulkan_CreateSurface(
+        window,
+        instance,
+        null,
+        &self.surface,
+    )) {
+        logger.err("Couldn't create VkSurfaceKHR from SDL_Window", .{});
+        return error.SDL;
+    }
+}
+
+/// Assumes self.surface has already been created with `createSurface`.
+pub fn init(self: *Swapchain, info: InitInfo) !void {
+    assert(self.surface != .null_handle);
+
+    self.max_frames_in_flight = info.max_frames_in_flight;
+    self.vsync_mode = info.vsync;
+
+    self.vk_device = info.device.proxy;
+    self.window = info.window;
+    self.device = info.device;
+    self.handle = .null_handle;
+    self.current_frame = 0;
+    self.image_count = 0;
+    self.image_index = 0;
+    try self.recreateSwapchain(info.gpa, info.vsync);
+    errdefer self.deinitSwapchain(info.gpa);
+
+    const obj_set = try self.createSyncObjects(info.gpa);
+    errdefer self.destroySyncObjects(info.gpa, obj_set);
+    self.setSyncObjectsSet(obj_set);
+}
+
+pub fn deinit(self: *Swapchain, allocator: Allocator) void {
+    if (is_debug and self.draw_began) {
+        @panic("You must end rendering before deinitializing a swapchain");
+    }
+    self.device.queueWaitIdle(.present);
+    self.deinitSwapchain(allocator);
+    for (self.render_semaphores[0 .. self.image_count * self.max_frames_in_flight]) |sem| {
+        self.vk_device.destroySemaphore(sem, null);
+    }
+    for (0..self.max_frames_in_flight) |i| {
+        self.vk_device.destroySemaphore(self.present_semaphores[i], null);
+        self.vk_device.destroyFence(self.presentation_fences[i * 2], null);
+        self.vk_device.destroyFence(self.presentation_fences[i * 2 + 1], null);
+    }
+    self.vk_device.freeCommandBuffers(self.device.command_pool, self.command_buffers[0 .. self.image_count * self.max_frames_in_flight]);
+    if (self.surface != .null_handle) {
+        self.device.instance.destroySurfaceKHR(self.surface, null);
+    }
+
+    allocator.free(self.command_buffers[0 .. self.image_count * self.max_frames_in_flight]);
+    allocator.free(self.render_semaphores[0 .. self.image_count * self.max_frames_in_flight]);
+    allocator.free(self.present_semaphores[0..self.max_frames_in_flight]);
+    allocator.free(self.presentation_fences[0 .. self.max_frames_in_flight * 2]);
+}
+
+pub fn recreate(self: *Swapchain, allocator: Allocator, options: RecreateOptions) !void {
+    // This function ensures that, even if it fails, calling .deinit() on <self> will not
+    // crash in any way.
+
+    const vsync_mode = options.vsync orelse self.vsync_mode;
+    try self.recreateSwapchain(allocator, vsync_mode);
+    self.vsync_mode = vsync_mode;
+
+    if (options.max_frames_in_flight) |mfif| blk: {
+        if (mfif == self.max_frames_in_flight) break :blk;
+
+        const old_set = self.getSyncObjects();
+        const new_set = try self.createSyncObjects(allocator);
+        self.destroySyncObjects(allocator, old_set);
+        self.setSyncObjectsSet(new_set);
+
+        self.max_frames_in_flight = mfif;
+    }
+}
+
+pub inline fn getImageCount(self: *Swapchain) usize {
+    return self.image_count * self.max_frames_in_flight;
+}
+
+pub inline fn getImageIndex(self: *Swapchain) usize {
+    return self.image_index * self.max_frames_in_flight;
+}
+
+pub fn beginTransfer(self: *Swapchain) !vk.CommandBufferProxy {
+    const frame_fences = self.presentation_fences[self.current_frame * 2 ..][0..2];
+    _ = self.vk_device.waitForFences(frame_fences[1..], .true, ~@as(u64, 0)) catch unreachable;
+
+    const cmd = vk.CommandBufferProxy.init(
+        self.tcmd_buffers[self.current_frame + self.getImageIndex()],
+        self.vk_device.wrapper,
     );
+    try cmd.beginCommandBuffer(&vk.CommandBufferBeginInfo{});
+    return cmd;
+}
+
+pub fn endTransfer(self: *Swapchain) !void {
+    const frame_fences = self.presentation_fences[self.current_frame * 2 ..][0..2];
+    const cmd = vk.CommandBufferProxy.init(
+        self.tcmd_buffers[self.current_frame + self.getImageIndex()],
+        self.vk_device.wrapper,
+    );
+    try cmd.endCommandBuffer();
+    self.vk_device.resetFences(frame_fences[1..]) catch unreachable;
+    self.device.getQueue(.transfer).submit(&[_]vk.SubmitInfo{vk.SubmitInfo{
+        .command_buffer_count = 1,
+        .p_command_buffers = self.tcmd_buffers[self.current_frame + self.getImageIndex() ..],
+    }}, frame_fences[1]) catch |e| switch (e) {
+        error.OutOfHostMemory => return error.OutOfMemory,
+        error.OutOfDeviceMemory => return error.OutOfDeviceMemory,
+        error.DeviceLost => @panic("GPU Device Lost"),
+        error.ValidationFailed => unreachable,
+        error.Unknown => unreachable,
+    };
+    _ = self.vk_device.waitForFences(frame_fences[1..], .true, ~@as(u64, 0)) catch unreachable;
+}
+
+pub fn beginDraw(self: *Swapchain, gpa: Allocator) !vk.CommandBufferProxy {
+    if (is_debug) assert(!self.draw_began); // Frame already began
+
+    const frame_fences = self.presentation_fences[self.current_frame * 2 ..][0..2];
+    _ = self.vk_device.waitForFences(frame_fences[0..1], .true, ~@as(u64, 0)) catch unreachable;
+
+    const next = retry_loop: while (true) {
+        break :retry_loop self.vk_device.acquireNextImageKHR(
+            self.handle,
+            ~@as(u64, 0),
+            self.present_semaphores[self.current_frame],
+            .null_handle,
+        ) catch |e| esw: switch (e) {
+            error.OutOfHostMemory => return error.OutOfMemory,
+            error.OutOfDeviceMemory => return error.OutOfDeviceMemory,
+            error.DeviceLost => @panic("GPU Device Lost"),
+            error.SurfaceLostKHR => {
+                const old_surface = self.surface;
+                try self.createSurface(self.device.instance.handle, self.window);
+                self.device.instance.destroySurfaceKHR(old_surface, null);
+                continue :esw error.OutOfDateKHR;
+            },
+            error.OutOfDateKHR => {
+                try self.recreate(gpa, .{});
+                continue :retry_loop;
+            },
+            // Not using the extension related to this error code
+            error.FullScreenExclusiveModeLostEXT => unreachable,
+            error.ValidationFailed => unreachable,
+            error.Unknown => unreachable,
+        };
+    };
     switch (next.result) {
         .success => {},
-        .timeout => return error.Timeout,
-        .suboptimal_khr => {},
-        .not_ready => {},
+        .timeout => unreachable,
+        .suboptimal_khr => {
+            logger.debug("Sub-optimal swapchain", .{});
+        },
+        .not_ready => {
+            logger.debug("Swapchain not ready", .{});
+        },
         else => unreachable,
     }
     self.image_index = next.image_index;
     const cmd = self.getCommandBuffer();
     // cmd.resetCommandBuffer(.{}) catch unreachable;
-    try cmd.beginCommandBuffer(&.{});
+    cmd.beginCommandBuffer(&.{}) catch |e| switch (e) {
+        error.OutOfHostMemory => return error.OutOfMemory,
+        error.OutOfDeviceMemory => return error.OutOfDeviceMemory,
+        error.ValidationFailed => unreachable,
+        error.Unknown => unreachable,
+    };
+    if (is_debug) self.draw_began = true;
+    errdefer comptime unreachable; // May need to modify code
 
     self.transitionImageLayout(
-        next.image_index,
+        self.image_index,
         .undefined,
         .color_attachment_optimal,
         .{},
@@ -420,7 +612,7 @@ pub fn beginDraw(self: *Swapchain) !vk.CommandBufferProxy {
         .p_color_attachments = &[_]vk.RenderingAttachmentInfo{.{
             .resolve_mode = .{},
             .resolve_image_layout = .undefined,
-            .image_view = self.img_views[next.image_index],
+            .image_view = self.img_views[self.image_index],
             .image_layout = .color_attachment_optimal,
             .load_op = .clear,
             .store_op = .store,
@@ -445,7 +637,25 @@ pub fn beginDraw(self: *Swapchain) !vk.CommandBufferProxy {
     return cmd;
 }
 
-pub fn endDraw(self: *Swapchain) !void {
+pub fn cancelDraw(self: *Swapchain) void {
+    if (is_debug) {
+        assert(self.draw_began);
+        self.draw_began = false;
+    }
+
+    const cmd = self.getCommandBuffer();
+    cmd.resetCommandBuffer(.{}) catch unreachable;
+    // TODO: Gracefully cancel a frame on potential error, clearing any
+    // TODO: fences, semaphore and command buffers without triggering the
+    // TODO: validation layer.
+}
+
+pub fn endDraw(self: *Swapchain, allocator: Allocator) !void {
+    if (is_debug) {
+        assert(self.draw_began);
+        self.draw_began = false;
+    }
+
     const cmd = self.getCommandBuffer();
     cmd.endRendering();
     self.transitionImageLayout(
@@ -464,8 +674,11 @@ pub fn endDraw(self: *Swapchain) !void {
     const gqueue = self.device.getQueue(.graphics);
     const pqueue = self.device.getQueue(.present);
 
-    const frame_index = self.current_frame + self.image_index * self.max_frames_in_flight;
-    try gqueue.submit(&[_]vk.SubmitInfo{vk.SubmitInfo{
+    const frame_index = self.current_frame + self.getImageIndex();
+    const frame_fences = self.presentation_fences[self.current_frame * 2 ..][0..2];
+    self.vk_device.resetFences(frame_fences[0..1]) catch unreachable;
+
+    gqueue.submit(&[_]vk.SubmitInfo{vk.SubmitInfo{
         .wait_semaphore_count = 1,
         .p_wait_semaphores = self.present_semaphores[self.current_frame..],
         .p_wait_dst_stage_mask = &[_]vk.PipelineStageFlags{.{
@@ -475,13 +688,39 @@ pub fn endDraw(self: *Swapchain) !void {
         .p_command_buffers = self.command_buffers[frame_index..],
         .signal_semaphore_count = 1,
         .p_signal_semaphores = self.render_semaphores[frame_index..],
-    }}, self.presentation_fences[self.current_frame]);
-    _ = try pqueue.presentKHR(&vk.PresentInfoKHR{
-        .wait_semaphore_count = 1,
-        .p_wait_semaphores = self.render_semaphores[frame_index..],
-        .swapchain_count = 1,
-        .p_swapchains = (&self.handle)[0..1],
-        .p_image_indices = @ptrCast(&self.image_index),
-    });
+    }}, frame_fences[0]) catch |e| switch (e) {
+        error.OutOfHostMemory => return error.OutOfMemory,
+        error.OutOfDeviceMemory => return error.OutOfDeviceMemory,
+        error.DeviceLost => @panic("GPU Device Lost"),
+        error.ValidationFailed => unreachable,
+        error.Unknown => unreachable,
+    };
+    retry_loop: while (true) {
+        _ = pqueue.presentKHR(&vk.PresentInfoKHR{
+            .wait_semaphore_count = 1,
+            .p_wait_semaphores = self.render_semaphores[frame_index..],
+            .swapchain_count = 1,
+            .p_swapchains = (&self.handle)[0..1],
+            .p_image_indices = @ptrCast(&self.image_index),
+        }) catch |e| esw: switch (e) {
+            error.OutOfHostMemory => return error.OutOfMemory,
+            error.OutOfDeviceMemory => return error.OutOfDeviceMemory,
+            error.DeviceLost => @panic("GPU Device Lost"),
+            error.SurfaceLostKHR => {
+                const old_surface = self.surface;
+                try self.createSurface(self.device.instance.handle, self.window);
+                self.device.instance.destroySurfaceKHR(old_surface, null);
+                continue :esw error.OutOfDateKHR;
+            },
+            error.OutOfDateKHR => {
+                try self.recreate(allocator, .{});
+                continue :retry_loop;
+            },
+            error.FullScreenExclusiveModeLostEXT => unreachable,
+            error.ValidationFailed => unreachable,
+            error.PresentTimingQueueFullEXT => unreachable,
+            error.Unknown => unreachable,
+        };
+    }
     self.current_frame = (self.current_frame + 1) % self.max_frames_in_flight;
 }
