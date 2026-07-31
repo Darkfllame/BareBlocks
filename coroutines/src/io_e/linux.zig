@@ -793,7 +793,7 @@ fn netReceiveUnimplemented(
     _ = data_buffer;
     _ = flags;
     _ = timeout;
-    @panic("TODO: Implement netSend");
+    @panic("TODO: Implement netReceive");
 }
 
 fn netInterfaceNameResolve(_: ?*anyopaque, name: *const net.Interface.Name) net.Interface.Name.ResolveError!net.Interface {

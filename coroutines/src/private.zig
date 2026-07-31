@@ -274,7 +274,7 @@ pub fn unreachIoFunc(comptime name: []const u8) @FieldType(std.Io.VTable, name) 
                 unreachable;
             }
         }.inner,
-        else => @compileError("TODO: Implement more"),
+        else => @compileError("Not enough implementation"),
     };
 }
 
