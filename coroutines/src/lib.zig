@@ -264,3 +264,8 @@ pub fn Coroutine(comptime T: type) type {
         }
     };
 }
+
+test {
+    std.testing.refAllDecls(@This());
+    std.testing.refAllDecls(Coroutine(void));
+}

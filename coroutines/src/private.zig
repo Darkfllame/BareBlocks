@@ -41,10 +41,10 @@ pub const StackState = extern struct {
     rsp: *anyopaque,
     rbp: *anyopaque,
     rip: *const anyopaque,
-    top: if (is_windows) *anyopaque else void,
-    bottom: if (is_windows) *anyopaque else void,
+    top: *anyopaque,
+    bottom: *anyopaque,
 
-    inline fn switchStack(self: *StackState) void {
+    pub inline fn switchStack(self: *StackState) void {
         if (is_windows) {
             const tib = &std.os.windows.teb().NtTib;
             const old = tib.*;

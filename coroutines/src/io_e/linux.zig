@@ -171,12 +171,11 @@ fn openSocketPosix(family: posix.sa_family_t, options: IpAddress.BindOptions) !p
                 break fd;
             },
             .INTR => continue,
-            .AFNOSUPPORT => error.AddressFamilyUnsupported,
+            .AFNOSUPPORT, .PROTONOSUPPORT => error.AddressFamilyUnsupported,
             .INVAL => error.ProtocolUnsupportedBySystem,
             .MFILE => error.ProcessFdQuotaExceeded,
             .NFILE => error.SystemFdQuotaExceeded,
             .NOBUFS, .NOMEM => error.SystemResources,
-            .PROTONOSUPPORT => error.ProtocolUnsupportedByAddressFamily,
             .PROTOTYPE => error.SocketModeUnsupported,
             else => |err| posix.unexpectedErrno(err),
         };
@@ -388,8 +387,8 @@ fn addBuf(v: []posix.iovec_const, i: *@FieldType(posix.msghdr_const, "iovlen"), 
     i.* += 1;
 }
 
-fn netListenIp(_: ?*anyopaque, address: IpAddress, options: IpAddress.ListenOptions) IpAddress.ListenError!net.Server {
-    const family = posixAddressFamily(&address);
+fn netListenIp(_: ?*anyopaque, address: *const IpAddress, options: IpAddress.ListenOptions) IpAddress.ListenError!net.Socket {
+    const family = posixAddressFamily(address);
     const socket_fd = try openSocketPosix(family, .{
         .mode = options.mode,
         .protocol = options.protocol,
@@ -403,7 +402,7 @@ fn netListenIp(_: ?*anyopaque, address: IpAddress, options: IpAddress.ListenOpti
     }
 
     var storage: PosixAddress = undefined;
-    var addr_len = addressToPosix(&address, &storage);
+    var addr_len = addressToPosix(address, &storage);
     try bind(socket_fd, &storage.any, addr_len);
 
     while (true) {
@@ -417,10 +416,10 @@ fn netListenIp(_: ?*anyopaque, address: IpAddress, options: IpAddress.ListenOpti
     }
 
     try posixGetSockName(socket_fd, &storage.any, &addr_len);
-    return .{ .socket = .{
+    return .{
         .handle = socket_fd,
         .address = addressFromPosix(&storage),
-    } };
+    };
 }
 
 fn netListenUnix(_: ?*anyopaque, address: *const net.UnixAddress, options: net.UnixAddress.ListenOptions) net.UnixAddress.ListenError!net.Socket.Handle {
@@ -428,7 +427,6 @@ fn netListenUnix(_: ?*anyopaque, address: *const net.UnixAddress, options: net.U
 
     const socket_fd = openSocketPosix(posix.AF.UNIX, .{ .mode = .stream }) catch |err| switch (err) {
         error.ProtocolUnsupportedBySystem => return error.AddressFamilyUnsupported,
-        error.ProtocolUnsupportedByAddressFamily => return error.AddressFamilyUnsupported,
         error.SocketModeUnsupported => return error.AddressFamilyUnsupported,
         else => |e| return e,
     };
@@ -454,7 +452,7 @@ fn netListenUnix(_: ?*anyopaque, address: *const net.UnixAddress, options: net.U
     return socket_fd;
 }
 
-fn netAccept(userdata: ?*anyopaque, listen_fd: net.Socket.Handle) net.Server.AcceptError!net.Stream {
+fn netAccept(userdata: ?*anyopaque, listen_fd: net.Socket.Handle, _: net.Server.AcceptOptions) net.Server.AcceptError!net.Socket {
     const co: *AnyCoroutine = @ptrCast(@alignCast(userdata));
 
     var storage: PosixAddress = undefined;
@@ -501,10 +499,10 @@ fn netAccept(userdata: ?*anyopaque, listen_fd: net.Socket.Handle) net.Server.Acc
             else => |err| posix.unexpectedErrno(err),
         };
     };
-    return .{ .socket = .{
+    return .{
         .handle = fd,
         .address = addressFromPosix(&storage),
-    } };
+    };
 }
 
 fn netBindIp(_: ?*anyopaque, address: *const IpAddress, options: IpAddress.BindOptions) IpAddress.BindError!net.Socket {
@@ -523,7 +521,7 @@ fn netBindIp(_: ?*anyopaque, address: *const IpAddress, options: IpAddress.BindO
     };
 }
 
-fn netConnectIp(userdata: ?*anyopaque, address: *const IpAddress, options: IpAddress.ConnectOptions) IpAddress.ConnectError!net.Stream {
+fn netConnectIp(userdata: ?*anyopaque, address: *const IpAddress, options: IpAddress.ConnectOptions) IpAddress.ConnectError!net.Socket {
     const co: *AnyCoroutine = @ptrCast(@alignCast(userdata));
     const family = posixAddressFamily(address);
     const socket_fd = try openSocketPosix(family, .{
@@ -535,10 +533,10 @@ fn netConnectIp(userdata: ?*anyopaque, address: *const IpAddress, options: IpAdd
     var addr_len = addressToPosix(address, &storage);
     try connect(co, socket_fd, &storage.any, addr_len, options.timeout);
     try posixGetSockName(socket_fd, &storage.any, &addr_len);
-    return .{ .socket = .{
+    return .{
         .handle = socket_fd,
         .address = addressFromPosix(&storage),
-    } };
+    };
 }
 
 fn netConnectUnix(userdata: ?*anyopaque, address: *const net.UnixAddress) net.UnixAddress.ConnectError!net.Socket.Handle {
@@ -804,7 +802,6 @@ fn netInterfaceNameResolve(_: ?*anyopaque, name: *const net.Interface.Name) net.
         error.SystemFdQuotaExceeded => return error.SystemResources,
         error.AddressFamilyUnsupported => return error.Unexpected,
         error.ProtocolUnsupportedBySystem => return error.Unexpected,
-        error.ProtocolUnsupportedByAddressFamily => return error.Unexpected,
         error.SocketModeUnsupported => return error.Unexpected,
         else => |e| return e,
     };
@@ -942,6 +939,7 @@ pub const vtable = Io.VTable{
     .unlockStderr = private.unreachIoFunc("unlockStderr"),
     .processCurrentPath = private.unreachIoFunc("processCurrentPath"),
     .processSetCurrentDir = private.unreachIoFunc("processSetCurrentDir"),
+    .processSetCurrentPath = private.unreachIoFunc("processSetCurrentPath"),
     .processReplace = private.unreachIoFunc("processReplace"),
     .processReplacePath = private.unreachIoFunc("processReplacePath"),
     .processSpawn = private.unreachIoFunc("processSpawn"),

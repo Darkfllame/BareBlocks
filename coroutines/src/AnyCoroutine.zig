@@ -30,6 +30,7 @@ fn createLinux(
     const page_size = std.heap.pageSize();
 
     var guard_offset: usize = undefined;
+    var stack_top_offset: usize = undefined;
     var stack_offset: usize = undefined;
     var data_offset: usize = undefined;
 
@@ -38,6 +39,7 @@ fn createLinux(
         guard_offset = bytes;
 
         bytes += @max(page_size, stack_size);
+        stack_top_offset = bytes;
         bytes = mem.alignForward(usize, bytes, page_size);
         stack_offset = bytes;
 
@@ -84,8 +86,8 @@ fn createLinux(
         .data = &mapped[data_offset],
         .fn_ptr = @ptrCast(&StackState.alwaysYield),
         .stack = .{
-            .top = {},
-            .bottom = {},
+            .top = &mapped[stack_top_offset],
+            .bottom = stack_bottom,
             // -8 because the C calling convention also counts the base pointer
             // for stack alignement.
             .rsp = @ptrFromInt(@intFromPtr(stack_bottom) - @sizeOf(usize)),
@@ -104,17 +106,17 @@ fn destroyLinux(self: AnyCoroutine) void {
     posix.munmap(self.allocated);
 }
 
-const create = switch (os_tag) {
+pub const create = switch (os_tag) {
     .linux => createLinux,
     else => private.compileError("Coroutines for \"{t}\": Not Yet Implemented", .{os_tag}),
 };
 
-const destroy = switch (os_tag) {
+pub const destroy = switch (os_tag) {
     .linux => destroyLinux,
     else => private.compileError("Coroutines for \"{t}\": Not Yet Implemented", .{os_tag}),
 };
 
-fn reinit(self: *AnyCoroutine) void {
+pub fn reinit(self: *AnyCoroutine) void {
     self.stack.rsp = self.stack.bottom;
     self.stack.rbp = self.stack.bottom;
     self.stack.rip = self.fn_ptr;
@@ -148,9 +150,9 @@ pub fn yield(self: *AnyCoroutine) Io.Cancelable!void {
 }
 
 /// A thin IO implementation for non-blocking files/sockets.
-/// 
+///
 /// Does not implement anything other than networking currently.
-/// 
+///
 /// External polling required.
 pub fn io(self: *AnyCoroutine) Io {
     return .{
