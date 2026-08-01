@@ -17,11 +17,7 @@ const is_debug = builtin.mode == .Debug;
 /// This limit can be specified by calling `nextAllocMax()` instead of `nextAlloc()`.
 pub const default_max_value_len = 4 * 1024 * 1024;
 
-pub const AllocWhen = enum {
-    alloc_never,
-    alloc_if_needed,
-    alloc_always
-};
+pub const AllocWhen = enum { alloc_never, alloc_if_needed, alloc_always };
 pub const BaseType = enum { boolean, byte, short, int, long, float, double, string, array, aggregate };
 pub const TokenType = enum {
     boolean,
@@ -146,7 +142,13 @@ pub const Token = union(TokenType) {
     float: f32,
     double: f64,
     string: []const u8,
-    array_start: BaseType,
+    /// The length field allows readers to pre-allocate memory based upon the given type.
+    /// 
+    /// If length or type is null, further reading and book-keeping is required to make sure proper
+    /// serialization on the writing-end, such as:
+    /// - Length of the array
+    /// - Type and structure of following elements
+    array_start: struct { length: ?usize, type: ?BaseType },
     array_end,
     aggregate_start,
     aggregate_end,
@@ -180,8 +182,10 @@ pub const MapWriter = struct {
 
     pub const WriteError = IoWriter.Error;
     pub const BeginArrayError = IoWriter.Error || error{
-        /// Json writers may allow untyped arrays
-        UnknownTypeUnsupported,
+        /// Some writers may disallow untyped arrays
+        UnknownType,
+        /// Some writers may disallow non length prefixed arrays
+        UnknownLength,
     };
 
     pub const VTable = struct {
@@ -194,7 +198,7 @@ pub const MapWriter = struct {
         writeFloat: *const fn (self: *MapWriter, value: f32) WriteError!void,
         writeDouble: *const fn (self: *MapWriter, value: f64) WriteError!void,
         writeString: *const fn (self: *MapWriter, value: []const u8) WriteError!void,
-        beginArray: *const fn (self: *MapWriter, @"type": ?BaseType) BeginArrayError!void,
+        beginArray: *const fn (self: *MapWriter, length: ?usize, @"type": ?BaseType) BeginArrayError!void,
         endArray: *const fn (self: *MapWriter) WriteError!void,
         beginAggregate: *const fn (self: *MapWriter) WriteError!void,
         endAggregate: *const fn (self: *MapWriter) WriteError!void,
@@ -227,8 +231,8 @@ pub const MapWriter = struct {
     pub inline fn writeString(self: *MapWriter, value: []const u8) WriteError!void {
         return self.vtable.writeString(self, value);
     }
-    pub inline fn beginArray(self: *MapWriter, @"type": ?BaseType) BeginArrayError!void {
-        return self.vtable.beginArray(self, @"type");
+    pub inline fn beginArray(self: *MapWriter, length: ?usize, @"type": ?BaseType) BeginArrayError!void {
+        return self.vtable.beginArray(self, length, @"type");
     }
     pub inline fn endArray(self: *MapWriter) WriteError!void {
         return self.vtable.endArray(self);
@@ -254,7 +258,7 @@ pub const MapReader = struct {
         UnexpectedToken,
     };
 
-    pub const NestingType = enum(u1) {aggregate,list};
+    pub const NestingType = enum(u1) { aggregate, list };
 
     pub const VTable = struct {
         peek: *const fn (self: *MapReader) ReadError!Token,
