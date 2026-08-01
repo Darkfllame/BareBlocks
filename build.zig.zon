@@ -9,14 +9,17 @@
         .vulkan = .{
             .url = "git+https://github.com/Darkfllame/vulkan-zig.git#3a60f9abf7f2c49579fd4a4aa1d0f4bd53325134",
             .hash = "vulkan-0.0.0-r7YtxxaJAwBiuKx_FnWP-JjUmwMvbMQl5m_P_UY05Ckd",
+            .lazy = true,
         },
         .vulkan_headers = .{
             .url = "git+https://github.com/KhronosGroup/Vulkan-Headers#8cfaaa1d4deedc865e52a42e654c5ec0d7d75eb0",
             .hash = "N-V-__8AAGfhdwLcch-RCImEQbiTe8n0-ZfevT6sXEEfSuKT",
+            .lazy = true,
         },
         .sdl = .{
             .url = "git+https://github.com/castholm/SDL#21c6b79840d123e94a9f183f4b0fa1731668f48d",
             .hash = "sdl-0.5.0+3.4.8-SDL--k4DpgH323IfF6cEaGzKUdtUQv1azbBmmcv0RMAu",
+            .lazy = true,
         },
     },
 

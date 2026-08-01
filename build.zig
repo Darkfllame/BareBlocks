@@ -29,30 +29,29 @@ pub fn build(b: *std.Build) !void {
     } });
     const optimize = b.standardOptimizeOption(.{});
 
-    const vk_headers = b.dependency("vulkan_headers", .{});
-    const sdl_dep = b.dependency("sdl", .{
-        .target = target,
-        .optimize = optimize,
-        .preferred_linkage = .dynamic,
-    });
+    // const vk_headers = b.dependency("vulkan_headers", .{});
+    // const sdl_dep = b.dependency("sdl", .{
+    //     .target = target,
+    //     .optimize = optimize,
+    //     .preferred_linkage = .dynamic,
+    // });
     const coro_mod = b.dependency("coroutines", .{
         .target = target,
         .optimize = optimize,
     }).module("coroutines");
-    const vulkan_mod = b.dependency("vulkan", .{
-        .registry = vk_headers.path("registry/vk.xml"),
-        .video = vk_headers.path("registry/video.xml"),
-    }).module("vulkan-zig");
-    _ = vulkan_mod;
+    // const vulkan_mod = b.dependency("vulkan", .{
+    //     .registry = vk_headers.path("registry/vk.xml"),
+    //     .video = vk_headers.path("registry/video.xml"),
+    // }).module("vulkan-zig");
 
-    const sdl_c = b.addTranslateC(.{
-        .root_source_file = b.path("src/sdl_decls.h"),
-        .target = target,
-        .optimize = optimize,
-    });
-    sdl_c.addIncludePath(sdl_dep.path("include/"));
-    const sdl_mod = sdl_c.createModule();
-    sdl_mod.linkLibrary(sdl_dep.artifact("SDL3"));
+    // const sdl_c = b.addTranslateC(.{
+    //     .root_source_file = b.path("src/sdl_decls.h"),
+    //     .target = target,
+    //     .optimize = optimize,
+    // });
+    // sdl_c.addIncludePath(sdl_dep.path("include/"));
+    // const sdl_mod = sdl_c.createModule();
+    // sdl_mod.linkLibrary(sdl_dep.artifact("SDL3"));
 
     const config = b.addOptions();
     config.addOption(std.SemanticVersion, "version", version);
