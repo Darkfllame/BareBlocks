@@ -533,6 +533,12 @@ pub const Type = union(enum) {
         return .{ .array = .remaining(sub) };
     }
 
+    pub inline fn readRoot(comptime self: Type, arena: Allocator, reader: *Reader) ReadError!self.getZigType() {
+        var ret: self.getZigType() = undefined;
+        try self.read(arena, reader, .{}, &ret);
+        return ret;
+    }
+
     /// Data given with `reader` MUST be all available without any rebasing.
     pub fn read(comptime self: Type, arena: Allocator, reader: *Reader, parent: anytype, ret: *self.getZigType()) ReadError!void {
         if (@typeInfo(@TypeOf(parent)) != .@"struct") @compileError("Parent argument must be a struct type");
