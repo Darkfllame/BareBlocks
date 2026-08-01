@@ -48,7 +48,7 @@ pub const UUID = extern union {
 
     pub const HashCtx = struct {
         pub fn hash(_: HashCtx, uuid: UUID) u64 {
-            return std.hash.Wyhash.hash(0, @ptrCast(&uuid));
+            return std.hash.Wyhash.hash(0, &uuid.bytes);
         }
         pub fn eql(_: HashCtx, a: UUID, b: UUID) bool {
             return a.eql(b);
