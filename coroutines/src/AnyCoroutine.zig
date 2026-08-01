@@ -18,9 +18,6 @@ const IoImpl = switch (os_tag) {
     else => private.compileError("Embedded IO for \"{t}\": Not Yet Implemented", .{os_tag}),
 };
 
-threadlocal var small_stack: [17]u8 align(16) = undefined;
-threadlocal var always_yield_coro = always_yield;
-
 fn createLinux(
     self: *AnyCoroutine,
     stack_size: usize,
@@ -129,20 +126,7 @@ fn_ptr: *const CoroFunction,
 stack: StackState,
 state: IoImpl,
 
-pub const always_yield = AnyCoroutine{
-    .allocated = small_stack[0..0],
-    .data = undefined,
-    .fn_ptr = &StackState.alwaysYield,
-    .stack = .{
-        .rsp = &small_stack[small_stack.len - 1],
-        .rbp = &small_stack[small_stack.len - 1],
-        .top = if (private.is_windows) &small_stack else {},
-        .bottom = if (private.is_windows) &small_stack[small_stack.len - 1] else {},
-    },
-    .state = undefined,
-};
-
-pub const always_yield_ptr = &always_yield_coro;
+pub const static_io = Io{ .userdata = null, .vtable = &IoImpl.vtable };
 
 pub fn yield(self: *AnyCoroutine) Io.Cancelable!void {
     self.stack.switchStack();
@@ -160,3 +144,4 @@ pub fn io(self: *AnyCoroutine) Io {
         .vtable = &IoImpl.vtable,
     };
 }
+
