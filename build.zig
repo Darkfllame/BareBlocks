@@ -29,6 +29,8 @@ pub fn build(b: *std.Build) !void {
     } });
     const optimize = b.standardOptimizeOption(.{});
 
+    const use_llvm = b.option(bool, "use_llvm", "Force the use of LLVM");
+
     // const vk_headers = b.dependency("vulkan_headers", .{});
     // const sdl_dep = b.dependency("sdl", .{
     //     .target = target,
@@ -58,12 +60,14 @@ pub fn build(b: *std.Build) !void {
     const config_mod = config.createModule();
 
     const lm_mod = b.createModule(.{ .root_source_file = b.path("src/lm.zig") });
-    const utils_mod = b.createModule(.{ .root_source_file = b.path("src/utils/utils.zig") ,
+    const utils_mod = b.createModule(.{
+        .root_source_file = b.path("src/utils/utils.zig"),
         .imports = &.{
             .{ .name = "en_us", .module = b.createModule(.{
                 .root_source_file = b.path("assets/minecraft/assets/lang/en_us.json"),
             }) },
-        },});
+        },
+    });
     const net_mod = b.createModule(.{ .root_source_file = b.path("src/net/net.zig") });
     const core_mod = b.createModule(.{ .root_source_file = b.path("src/core/core.zig") });
 
@@ -72,11 +76,14 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
         .link_libc = false,
+        .error_tracing = true,
     });
 
     const main_exe = b.addExecutable(.{
         .name = "bare_blocks",
         .root_module = main_mod,
+        .use_llvm = use_llvm,
+        .use_lld = use_llvm,
     });
 
     const local_imports = [_]std.Build.Module.Import{
