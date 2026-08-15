@@ -52,51 +52,56 @@ pub const StatusResponse = struct {
         }
     };
 
-    pub fn jsonStringify(self: StatusResponse, jw: *std.json.Stringify) !void {
-        try jw.beginObject();
+    pub fn serialize(self: *const StatusResponse, mapw: *utils.serial.MapWriter) !void {
+        try mapw.beginAggregate();
 
-        try jw.objectField("version");
-        try jw.write(self.version);
+        try mapw.fieldName("version");
+        try mapw.beginAggregate();
+        try mapw.fieldName("name");
+        try mapw.writeString(self.version.name);
+        try mapw.fieldName("protocol");
+        try mapw.writeInt(@intCast(self.version.protocol));
+        try mapw.endAggregate();
 
         if (self.players) |players| {
-            try jw.objectField("players");
-            try jw.beginObject();
-            try jw.objectField("max");
-            try jw.write(players.max);
-            try jw.objectField("online");
-            try jw.write(players.online);
+            try mapw.fieldName("players");
+            try mapw.beginAggregate();
+            try mapw.fieldName("max");
+            try mapw.writeInt(players.max);
+            try mapw.fieldName("online");
+            try mapw.writeInt(players.online);
             if (players.sample.len > 0) {
-                try jw.objectField("sample");
-                try jw.beginArray();
+                try mapw.fieldName("sample");
+                try mapw.beginArray();
                 for (players.sample) |entry| {
-                    try jw.beginObject();
-                    try jw.objectField("name");
-                    try jw.write(entry.name);
-                    try jw.objectField("id");
-                    try jw.write(entry.id);
-                    try jw.endObject();
+                    try mapw.beginAggregate();
+                    try mapw.fieldName("name");
+                    try mapw.writeString(entry.name);
+                    try mapw.fieldName("id");
+                    try entry.id.serialize(mapw);
+                    try mapw.endAggregate();
                 }
-                try jw.endArray();
+                try mapw.endArray();
             }
-            try jw.endObject();
+            try mapw.endAggregate();
         }
 
-        if (!self.description.isSimpleText() and self.description.content.text.len > 0) {
-            try jw.objectField("description");
-            try jw.write(self.description);
+        if (!self.description.isSimpleText() and !self.description.isEmpty()) {
+            try mapw.fieldName("description");
+            try self.description.serialize(mapw);
         }
 
         if (self.enforcesSecureChat) |enforcesSecureChat| {
-            try jw.objectField("enforcesSecureChat");
-            try jw.write(enforcesSecureChat);
+            try mapw.fieldName("enforcesSecureChat");
+            try mapw.writeBoolean(enforcesSecureChat);
         }
 
         if (self.preventsChatReports) |preventsChatReports| {
-            try jw.objectField("preventsChatReports");
-            try jw.write(preventsChatReports);
+            try mapw.fieldName("preventsChatReports");
+            try mapw.writeBoolean(preventsChatReports);
         }
 
-        try jw.endObject();
+        try mapw.endAggregate();
     }
 };
 

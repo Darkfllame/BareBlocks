@@ -1,4 +1,5 @@
 const std = @import("std");
+const utils = @import("utils.zig");
 
 const assert = std.debug.assert;
 
@@ -107,24 +108,16 @@ pub const UUID = extern union {
         });
     }
 
-    pub fn jsonStringify(self: UUID, jw: *std.json.Stringify) std.json.Stringify.Error!void {
-        try jw.beginWriteRaw();
-        defer jw.endWriteRaw();
-
-        var buffer: [stringified_length]u8 = undefined;
-        var vecs = [_][]const u8{ "\"", &buffer, "\"" };
-
-        self.stringify(&buffer);
-        try jw.writer.writeVecAll(&vecs);
+    pub fn serialize(self: UUID, mapw: *utils.serial.MapWriter) utils.serial.MapWriter.WriteError!void {
+        var buf: [stringified_length]u8 = undefined;
+        self.stringify(&buf);
+        try mapw.writeString(&buf);
     }
 
-    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !UUID {
-        const str = switch (try source.nextAllocMax(
-            allocator,
-            .alloc_if_needed,
-            options.max_value_len orelse std.math.maxInt(usize),
-        )) {
-            .string, .allocated_string => |s| s,
+    pub fn deserialize(allocator: std.mem.Allocator, mapr: *utils.serial.MapReader) utils.serial.MapReader.ReadError!UUID {
+        _ = allocator;
+        const str = switch (try mapr.next()) {
+            .string => |s| s,
             else => return error.UnexpectedToken,
         };
 

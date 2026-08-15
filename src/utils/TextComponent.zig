@@ -11,6 +11,7 @@ const translation = utils.translation;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const Writer = std.Io.Writer;
+const Reader = std.Io.Reader;
 const json = std.json;
 const assert = std.debug.assert;
 const eql = std.mem.eql;
@@ -390,7 +391,9 @@ fn nbtWriteContent(self: TextComponent, writer: *Writer) NBT.WriteError!void {
                 Identifier => {
                     try writer.writeByte(@intFromEnum(NBT.ValueTag.string));
                     try NBT.writeJavaString(writer, f.name);
-                    try NBT.writeJavaString(writer, value.id);
+                    try NBT.writeJavaStringVec(writer, &.{
+                        value.namespace(), ":", value.path(),
+                    });
                 },
                 bool => {
                     try writer.writeByte(@intFromEnum(NBT.ValueTag.byte));
@@ -464,6 +467,7 @@ pub const banned_ip_reason = translate("multiplayer.disconnect.banned_ip.reason"
 pub const banned_exp = translate("multiplayer.disconnect.banned.expiration", null, &.{}, .{});
 pub const banned_reason = translate("multiplayer.disconnect.banned.reason", null, &.{}, .{});
 pub const banned_reason_default = translate("multiplayer.disconnect.banned.reason.default", null, &.{}, .{});
+pub const exceeded_packet_rate = translate("disconnect.exceeded_packet_rate", null, &.{}, .{});
 
 pub const CreateCommonOptions = struct {
     arena_state: ArenaAllocator.State = .{},
@@ -645,6 +649,10 @@ pub fn isSimpleText(self: TextComponent) bool {
     return (self.content == .text or self.content == .int or self.content == .float) and self.children.len == 0 and
         self.formatting_mask.sub == Formatting.MaskPacked{} and self.insertion.len == 0 and
         self.click_event == .none and self.hover_event == .none;
+}
+
+pub fn isEmpty(self: TextComponent) bool {
+    return self.isSimpleText() and self.content.text.len == 0;
 }
 
 pub fn format(self: TextComponent, writer: *Writer) Writer.Error!void {
@@ -921,12 +929,126 @@ pub fn jsonParseFromValue(allocator: Allocator, source: json.Value, options: jso
     }
 }
 
-pub fn nbtWrite(self: TextComponent, writer: *Writer) NBT.WriteError!void {
-    return nbtWriteInner(self, writer, null, false);
+pub inline fn nbtWrite(self: TextComponent, writer: *Writer, name: ?[]const u8) NBT.WriteError!void {
+    return nbtWriteInner(self, writer, name, false);
 }
 
-pub fn nbtWriteNamed(self: TextComponent, writer: *Writer, name: []const u8) NBT.WriteError!void {
-    return nbtWriteInner(self, writer, name, false);
+pub fn serialize(self: *const TextComponent, mapw: *utils.serial.MapWriter) utils.serial.MapWriter.WriteError!void {
+    if (self.isSimpleText()) {
+        return mapw.writeString(self.content.text);
+    }
+    if (self.children.len > 0) {
+        try mapw.beginArray(self.children.len);
+    }
+
+    try mapw.beginAggregate();
+
+    var string_buffer: [16]u8 = undefined;
+    switch (self.content) {
+        .text => |_text| {
+            try mapw.fieldName("text");
+            try mapw.writeString(_text);
+        },
+        inline .int, .float => |num| {
+            try mapw.fieldName("text");
+            const w = try mapw.stringWriter(null, &string_buffer);
+            try w.print("{d}", .{num});
+            try w.flush();
+        },
+        .translatable => |tr| {
+            try mapw.fieldName("translate");
+            try mapw.writeString(tr.id);
+            if (tr.fallback.len > 0) {
+                try mapw.fieldName("fallback");
+                try mapw.writeString(tr.fallback);
+            }
+            if (tr.with.len > 0) {
+                try mapw.fieldName("with");
+                try mapw.beginArray(tr.with.len);
+                for (tr.with) |tc| try tc.serialize(mapw);
+                try mapw.endArray();
+            }
+        },
+        .score => |score| {
+            try mapw.fieldName("score");
+            try mapw.beginAggregate();
+            try mapw.fieldName("name");
+            switch (score.name) {
+                .reader => try mapw.writeString("*"),
+                .selector => |sel| {
+                    const w = try mapw.stringWriter(null, &string_buffer);
+                    var modified = sel;
+                    modified.limit = 1;
+
+                    try modified.format(w);
+                    try w.flush();
+                },
+            }
+            try mapw.fieldName("objective");
+            try mapw.writeString(score.objective);
+            try mapw.endAggregate();
+        },
+        .selector => |sel| {
+            try mapw.fieldName("selector");
+            {
+                const w = try mapw.stringWriter(null, &string_buffer);
+                try sel.value.format(w);
+                try w.flush();
+            }
+            try mapw.fieldName("separator");
+            try sel.separator.serialize(mapw);
+        },
+        .keybind => |kb| {
+            try mapw.fieldName("keybind");
+            if (kb.key == .unknown) {
+                try mapw.writeString(kb.translation);
+            } else {
+                const w = try mapw.stringWriter(null, &string_buffer);
+                try w.print("key.{t}", .{kb.key});
+                try w.flush();
+            }
+        },
+        .nbt => @panic("Not Yet Implemented"), // TODO: TextComponent::serialize<content.nbt>
+    }
+
+    inline for (@typeInfo(Formatting).@"struct".fields) |f| {
+        if (@field(self.formatting_mask.sub, f.name)) {
+            const value = @field(self.formatting, f.name);
+            try mapw.fieldName(f.name);
+            switch (f.type) {
+                Color => switch (value) {
+                    else => |tag| try mapw.writeString(@tagName(tag)),
+                    _ => |tag| {
+                        const w = try mapw.stringWriter(null, &string_buffer);
+                        try w.print("#{x:0>6}", .{@intFromEnum(tag)});
+                        try w.flush();
+                    },
+                },
+                Color.ARGB => try mapw.writeInt(@bitCast(value)),
+                bool => try mapw.writeBoolean(value),
+                Identifier => try value.serialize(mapw),
+                else => comptime unreachable,
+            }
+        }
+    }
+
+    try mapw.endAggregate();
+
+    if (self.children.len > 0) {
+        for (self.children) |tc| try tc.serialize(mapw);
+        try mapw.endArray();
+    }
+}
+
+pub fn deserialize(_arena: Allocator, mapr: *utils.serial.MapReader) utils.serial.MapReader.ReadError!TextComponent {
+    _ = _arena;
+    switch (try mapr.next()) {
+        .string => |s| return .text(s, .{}),
+        .aggregate_start => {},
+        .array_start => {},
+        else => return error.UnexpectedToken,
+    }
+    return .empty;
 }
 
 test {

@@ -1,14 +1,22 @@
 const Identifier = @This();
 const std = @import("std");
+const serial = @import("serial.zig");
 
 const json = std.json;
+const MapWriter = serial.MapWriter;
+const MapReader = serial.MapReader;
 
-id: []const u8,
-sep_offset: usize,
+namespace_ptr: [*]const u8,
+path_ptr: [*]const u8,
+namespace_len: u16,
+path_len: u16,
 
 pub const HashCtx = struct {
     pub fn hash(_: HashCtx, id: Identifier) u64 {
-        return std.hash.Wyhash.hash(0, id.id);
+        var hasher = std.hash.Wyhash.init(0);
+        hasher.update(id.namespace());
+        hasher.update(id.path());
+        return hasher.final();
     }
     pub fn eql(_: HashCtx, a: Identifier, b: Identifier) bool {
         return a.eql(b);
@@ -18,20 +26,27 @@ pub const HashCtx = struct {
 pub const ValidationError = error{
     SeparatorNotFound,
     InvalidCharacter,
+    NamespaceTooLong,
+    PathTooLong,
 };
 
 pub fn namespace(self: Identifier) []const u8 {
-    return self.id[0..self.sep_offset];
+    return self.namespace_ptr[0..self.namespace_len];
 }
 
 pub fn path(self: Identifier) []const u8 {
-    return self.id[self.sep_offset + 1 ..];
+    return self.path_ptr[0..self.path_len];
 }
 
 pub fn dupe(self: Identifier, allocator: std.mem.Allocator) std.mem.Allocator.Error!Identifier {
+    const duped = try allocator.alloc(u8, self.namespace_len + self.path_len);
+    @memcpy(duped[0..self.namespace_len], self.namespace_ptr);
+    @memcpy(duped[self.namespace_len..], self.path_ptr);
     return .{
-        .id = try allocator.dupe(u8, self.id),
-        .sep_offset = self.sep_offset,
+        .namespace_ptr = duped.ptr,
+        .path_ptr = duped.ptr + self.namespace_len,
+        .namespace_len = self.namespace_len,
+        .path_len = self.path_len,
     };
 }
 
@@ -39,21 +54,30 @@ pub fn dupe(self: Identifier, allocator: std.mem.Allocator) std.mem.Allocator.Er
 pub fn validate(id: []const u8) ValidationError!Identifier {
     var colon_idx: ?usize = null;
     for (id, 0..) |c, i| switch (c) {
-        ':' => colon_idx = i,
+        ':' => {
+            if (i > std.math.maxInt(@FieldType(Identifier, "namespace_len")))
+                return error.NamespaceTooLong;
+            colon_idx = i;
+        },
         '0'...'9', 'a'...'z', '-', '.', '_' => continue,
-        else => if (@intFromBool(c == '/') ^ @intFromBool(colon_idx == null) == 0)
+        else => if (colon_idx == null or c != '/')
             return error.InvalidCharacter
         else
             continue,
     };
+    const path_off = colon_idx orelse return error.SeparatorNotFound;
+    if (id.len - path_off > std.math.maxInt(@FieldType(Identifier, "path_len")))
+        return error.PathTooLong;
 
-    return if (colon_idx) |sepoff| .{
-        .id = id,
-        .sep_offset = sepoff,
-    } else error.SeparatorNotFound;
+    return .{
+        .namespace_ptr = id.ptr,
+        .namespace_len = @intCast(path_off),
+        .path_ptr = id.ptr + path_off,
+        .path_len = @intCast(id.len - path_off),
+    };
 }
 
-pub inline fn validateComptime(comptime id: []const u8) Identifier {
+pub inline fn literal(comptime id: []const u8) Identifier {
     comptime {
         @setEvalBranchQuota(id.len * 100);
         var colon_idx: ?usize = null;
@@ -77,41 +101,35 @@ pub inline fn validateComptime(comptime id: []const u8) Identifier {
 }
 
 pub inline fn vanilla(comptime _path: []const u8) Identifier {
-    return comptime if (std.mem.startsWith(u8, _path, "minecraft:"))
-        validateComptime(_path)
+    comptime return if (std.mem.startsWith(u8, _path, "minecraft:"))
+        literal(_path)
     else
-        validateComptime("minecraft:" ++ _path);
+        literal("minecraft:" ++ _path);
 }
 
 pub fn format(self: Identifier, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-    try writer.print("Identifier({s}, {s})", .{ self.namespace(), self.path() });
+    try writer.print("Identifier({s}:{s})", .{ self.namespace(), self.path() });
 }
 
 pub fn eql(a: Identifier, b: Identifier) bool {
-    return std.mem.eql(u8, a.id, b.id);
+    return std.mem.eql(u8, a.namespace(), b.namespace()) and
+        std.mem.eql(u8, a.path(), b.path());
 }
 
-pub fn jsonStringify(self: Identifier, jw: *json.Stringify) json.Stringify.Error!void {
-    try jw.beginWriteRaw();
-    defer jw.endWriteRaw();
+pub fn deserialize(arena: std.mem.Allocator, mapr: *MapReader) MapReader.ReadError!Identifier {
+    const tok = try mapr.next();
+    if (tok != .string) return error.UnexpectedToken;
 
-    try jw.writer.print("\"{s}\"", .{self.id});
+    const tok_cpy = try arena.dupe(u8, tok.string);
+    errdefer arena.free(tok_cpy);
+    
+    return validate(tok_cpy) catch error.UnexpectedToken;
 }
 
-pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !Identifier {
-    const str = switch (try source.nextAllocMax(
-        allocator,
-        .alloc_if_needed,
-        options.max_value_len orelse std.math.maxInt(usize),
-    )) {
-        .string, .allocated_string => |s| s,
-        else => return error.UnexpectedToken,
-    };
-
-    return validate(str) catch |err| switch (err) {
-        error.SeparatorNotFound => error.LengthMismatch,
-        error.InvalidCharacter => error.InvalidCharacter,
-    };
+pub fn serialize(self: Identifier, mapw: *MapWriter) MapWriter.WriteError!void {
+    const w = try mapw.stringWriter(self.namespace_len + self.path_len + 1, &.{});
+    try w.print("{s}:{s}", .{self.namespace(),self.path()});
+    try w.flush();
 }
 
 test {

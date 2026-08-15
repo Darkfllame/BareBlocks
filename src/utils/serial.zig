@@ -53,7 +53,7 @@ pub const TaglessValue = union {
     float: f32,
     double: f64,
     string: []const u8,
-    array: Value.Array,
+    array: std.MultiArrayList(Value),
     aggregate: Value.Aggregate,
 };
 
@@ -66,10 +66,9 @@ pub const Value = union(BaseType) {
     float: f32,
     double: f64,
     string: []const u8,
-    array: Array,
+    array: std.MultiArrayList(Value),
     aggregate: Aggregate,
 
-    pub const Array = struct { type: BaseType, values: []TaglessValue };
     pub const Aggregate = struct {
         inline fn convertValueAtIndex(self: Aggregate, index: usize) Value {
             return self.values[index].makeTagged(self.types[index]);
@@ -143,7 +142,7 @@ pub const Token = union(TokenType) {
     double: f64,
     string: []const u8,
     /// The length field allows readers to pre-allocate memory based upon the given type.
-    /// 
+    ///
     /// If length or type is null, further reading and book-keeping is required to make sure proper
     /// serialization on the writing-end, such as:
     /// - Length of the array
@@ -153,9 +152,20 @@ pub const Token = union(TokenType) {
     aggregate_start,
     aggregate_end,
 
-    pub fn getInt(self: Token) ?i64 {
+    /// Converts integer-like values to a single integer type
+    pub fn asInt(self: Token) ?i64 {
         return switch (self) {
+            .boolean => |b| @intFromBool(b),
             .byte, .short, .int, .long => |v| v,
+            else => null,
+        };
+    }
+
+    /// Converts integer-like values to a boolean value
+    pub fn asBool(self: Token) ?bool {
+        return switch (self) {
+            .boolean => |b| b,
+            .byte, .short, .int, .long => |v| v != 0,
             else => null,
         };
     }
@@ -168,25 +178,13 @@ pub const Token = union(TokenType) {
     }
 };
 
-pub const Diagnostics = struct {
-    /// Starts at 1.
-    line: usize = 1,
-    /// Starts at 1.
-    column: usize = 1,
-    offset: usize = 0,
-};
-
 pub const MapWriter = struct {
     writer: *IoWriter,
     vtable: *const VTable,
 
+    /// `error.WriteError` can either be caused by the `writer` or and error within
+    /// the underlaying implementation of this `MapWriter` value.
     pub const WriteError = IoWriter.Error;
-    pub const BeginArrayError = IoWriter.Error || error{
-        /// Some writers may disallow untyped arrays
-        UnknownType,
-        /// Some writers may disallow non length prefixed arrays
-        UnknownLength,
-    };
 
     pub const VTable = struct {
         fieldName: *const fn (self: *MapWriter, name: []const u8) WriteError!void,
@@ -198,8 +196,13 @@ pub const MapWriter = struct {
         writeFloat: *const fn (self: *MapWriter, value: f32) WriteError!void,
         writeDouble: *const fn (self: *MapWriter, value: f64) WriteError!void,
         writeString: *const fn (self: *MapWriter, value: []const u8) WriteError!void,
-        beginArray: *const fn (self: *MapWriter, length: ?usize, @"type": ?BaseType) BeginArrayError!void,
+        stringWriter: *const fn (self: *MapWriter, length: ?usize, buffer: []u8) WriteError!*IoWriter,
+        /// `length` is merely an indication as to how many elements will be in this
+        /// array for the sole purpose of memory pre-allocation.
+        beginArray: *const fn (self: *MapWriter, length: ?usize) WriteError!void,
         endArray: *const fn (self: *MapWriter) WriteError!void,
+        /// `length` is merely an indication as to how many elements will be in this
+        /// aggregate for the sole purpose of memory pre-allocation.
         beginAggregate: *const fn (self: *MapWriter) WriteError!void,
         endAggregate: *const fn (self: *MapWriter) WriteError!void,
     };
@@ -231,8 +234,16 @@ pub const MapWriter = struct {
     pub inline fn writeString(self: *MapWriter, value: []const u8) WriteError!void {
         return self.vtable.writeString(self, value);
     }
-    pub inline fn beginArray(self: *MapWriter, length: ?usize, @"type": ?BaseType) BeginArrayError!void {
-        return self.vtable.beginArray(self, length, @"type");
+    /// Hands the caller an `std.Io.Writer` to write a string value.
+    ///
+    /// **DON'T FORGET TO FLUSH!** \
+    /// Calling `flush()` on the returned writer will end the string and leave the writer
+    /// in a valid state to write more data.
+    pub inline fn stringWriter(self: *MapWriter, length: ?usize, buffer: []u8) WriteError!*IoWriter {
+        return self.vtable.stringWriter(self, length, buffer);
+    }
+    pub inline fn beginArray(self: *MapWriter, length: ?usize) WriteError!void {
+        return self.vtable.beginArray(self, length);
     }
     pub inline fn endArray(self: *MapWriter) WriteError!void {
         return self.vtable.endArray(self);
@@ -250,20 +261,22 @@ pub const MapReader = struct {
     vtable: *const VTable,
     nesting: BitStack,
     arena: std.heap.ArenaAllocator,
-    diag: Diagnostics,
     /// Override the `max_value_len` parameter when `nextAlloc()` is called.
     max_value_len: usize = default_max_value_len,
 
     pub const ReadError = Allocator.Error || IoReader.Error || error{
         UnexpectedToken,
+        ValueTooLong,
+        TooDeep,
+        LengthMismatch,
+        InvalidCharacter,
     };
 
     pub const NestingType = enum(u1) { aggregate, list };
 
     pub const VTable = struct {
-        peek: *const fn (self: *MapReader) ReadError!Token,
-        peekNextTokenType: *const fn (self: *MapReader) ReadError!TokenType,
-        next: *const fn (self: *MapReader, when: AllocWhen, max_value_len: usize) ReadError!Token,
+        peek: *const fn (self: *MapReader) ReadError!TokenType,
+        next: *const fn (self: *MapReader, max_value_len: usize) ReadError!Token,
         skip: *const fn (self: *MapReader, target_nesting: usize) ReadError!void,
     };
 
@@ -285,16 +298,16 @@ pub const MapReader = struct {
     }
 
     pub inline fn peekNesting(self: *MapReader) ?NestingType {
-        if (self.nesting.bit_len <= 1) return null;
+        if (self.nesting.bit_len < 1) return null;
         return @enumFromInt(self.nesting.peek());
     }
 
-    pub inline fn nextAlloc(self: *MapReader, when: AllocWhen) ReadError!Token {
-        return self.vtable.next(self, when, self.max_value_len);
+    pub inline fn next(self: *MapReader) ReadError!Token {
+        return self.vtable.next(self, self.max_value_len);
     }
 
-    pub inline fn nextAllocMax(self: *MapReader, when: AllocWhen, max_value_len: usize) ReadError!Token {
-        return self.vtable.next(self, when, max_value_len);
+    pub inline fn nextMax(self: *MapReader, max_value_len: usize) ReadError!Token {
+        return self.vtable.next(self, max_value_len);
     }
 
     pub inline fn skipValue(self: *MapReader) ReadError!void {
@@ -312,4 +325,72 @@ pub const MapReader = struct {
     pub inline fn ensureTotalStackCapacity(self: *MapReader, height: usize) Allocator.Error!void {
         return self.nesting.ensureTotalCapacity(self.getAlloctor(), height);
     }
+
+    pub fn mapToWriter(self: *MapReader, comptime max_depth: usize, mapw: *MapWriter) (MapWriter.WriteError || ReadError)!void {
+        const base_height = self.stackHeight();
+
+        var bstack: [max_depth]u8 = undefined;
+        var depth: usize = 0;
+        var count: u1 = 0;
+        while (true) {
+            const tok = try self.next();
+
+            const is_object = depth > 0 and std.BitStack.peekWithState(&bstack, depth) == 0;
+            const is_fieldname = is_object and count == 0;
+            if (is_object and tok != .aggregate_end) count ^= 1;
+
+            try switch (tok) {
+                .boolean => |v| mapw.writeBoolean(v),
+                .byte => |v| mapw.writeByte(v),
+                .short => |v| mapw.writeShort(v),
+                .int => |v| mapw.writeInt(v),
+                .long => |v| mapw.writeLong(v),
+                .float => |v| mapw.writeFloat(v),
+                .double => |v| mapw.writeDouble(v),
+                .string => |v| if (is_fieldname)
+                    mapw.fieldName(v)
+                else
+                    mapw.writeString(v),
+                .array_start => |a| {
+                    if (depth >= max_depth) return error.TooDeep;
+                    std.BitStack.pushWithStateAssumeCapacity(&bstack, &depth, 1);
+                    try mapw.beginArray(a.length);
+                },
+                .array_end => {
+                    depth -= 1;
+                    try mapw.endArray();
+                },
+                .aggregate_start => {
+                    if (depth >= max_depth) return error.TooDeep;
+                    std.BitStack.pushWithStateAssumeCapacity(&bstack, &depth, 0);
+                    try mapw.beginAggregate();
+                },
+                .aggregate_end => {
+                    depth -= 1;
+                    try mapw.endAggregate();
+                },
+            };
+
+            if (self.stackHeight() == base_height) break;
+        }
+    }
 };
+
+pub const nbt = struct {
+    pub const Writer = @import("NBT.zig").SerialWriter;
+    pub const Reader = @import("NBT.zig").SerialReader;
+};
+
+pub const json = struct {
+    pub const Writer = @import("serial/json.zig").SerialWriter;
+    pub const Reader = @import("serial/json.zig").SerialReader;
+};
+
+test {
+    std.testing.refAllDecls(@This());
+    std.testing.refAllDecls(nbt);
+    std.testing.refAllDecls(json);
+    std.testing.refAllDecls(MapWriter);
+    std.testing.refAllDecls(MapReader);
+    std.testing.refAllDecls(Token);
+}

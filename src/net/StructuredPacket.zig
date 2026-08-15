@@ -105,9 +105,9 @@ pub const Type = union(enum) {
     custom: struct {
         type: type,
         /// `out` is `*<.type>`
-        readFn: fn (arena: Allocator, reader: *Reader, parent: anytype, out: anytype) ReadError!void,
+        readFn: fn (gpa: Allocator, arena: Allocator, reader: *Reader, parent: anytype, out: anytype) ReadError!void,
         /// `val` is `<.type>`
-        writeFn: fn (arena: Allocator, writer: *Writer, val: anytype) WriteError!void,
+        writeFn: fn (gpa: Allocator, arena: Allocator, writer: *Writer, val: anytype) WriteError!void,
     },
     structured: StructuredPacket,
     bool,
@@ -272,6 +272,7 @@ pub const Type = union(enum) {
         InvalidUTF8,
         InvalidLength,
         InvalidJSON,
+        InvalidNBT,
         InvalidEnumTag,
         InvalidNumber,
     };
@@ -302,12 +303,11 @@ pub const Type = union(enum) {
             .float => f32,
             .double => f64,
             .string => []const u8,
-            .json => |may_sub| if (may_sub) |sub| sub else json.Value,
+            .json, .nbt => |may_sub| if (may_sub) |sub| sub else utils.serial.Value,
             .identifier => Identifier,
             .entity_metadata => void, // TODO: Implement entity_metadata
             .slot => void, // TODO: Implement slot
             .hashed_slot => void, // TODO: Implement hashed_slot
-            .nbt => |may_sub| if (may_sub) |sub| sub else NBT.Value,
             .block_position => BlockPosition,
             .byte_angle => u8,
             .uuid => UUID,
@@ -533,26 +533,35 @@ pub const Type = union(enum) {
         return .{ .array = .remaining(sub) };
     }
 
-    pub inline fn readRoot(comptime self: Type, arena: Allocator, reader: *Reader) ReadError!self.getZigType() {
+    pub inline fn readRoot(comptime self: Type, gpa: Allocator, arena: Allocator, reader: *Reader) ReadError!self.getZigType() {
         var ret: self.getZigType() = undefined;
-        try self.read(arena, reader, .{}, &ret);
+        try self.read(gpa, arena, reader, .{}, &ret);
         return ret;
     }
 
+    pub inline fn readNoAlloc(comptime self: Type, reader: *Reader) ReadError!self.getZigType() {
+        return self.readRoot(.failing, .failing, reader);
+    }
+
+    pub inline fn writerNoAlloc(comptime self: Type, writer: *Writer, val: self.getZigType()) WriteError!void {
+        return self.write(.failing, .failing, writer, val);
+    }
+
     /// Data given with `reader` MUST be all available without any rebasing.
-    pub fn read(comptime self: Type, arena: Allocator, reader: *Reader, parent: anytype, ret: *self.getZigType()) ReadError!void {
+    pub fn read(comptime self: Type, gpa: Allocator, arena: Allocator, reader: *Reader, parent: anytype, ret: *self.getZigType()) ReadError!void {
         if (@typeInfo(@TypeOf(parent)) != .@"struct") @compileError("Parent argument must be a struct type");
         ret.* = sw: switch (self) {
             .custom => |c| {
-                try c.readFn(arena, reader, parent, ret);
+                try c.readFn(gpa, arena, reader, parent, ret);
                 break :sw ret.*;
             },
             .structured => |desc| {
                 inline for (desc.fields) |field| {
                     try field.type.read(
+                        gpa,
                         arena,
                         reader,
-                        if (@typeInfo(@TypeOf(parent)).@"struct".fields.len == 0)
+                        if (@typeInfo(@TypeOf(parent)).@"struct".fields.len == 0) // pass `ret` if current call is root
                             ret.*
                         else
                             parent,
@@ -584,8 +593,10 @@ pub const Type = union(enum) {
             },
             .string => |may_max_cps| try readString(reader, may_max_cps),
             .json => |may_sub| {
-                const Sub = may_sub orelse json.Value;
+                const Sub = may_sub orelse utils.serial.Value;
+                if (true) @compileError("TODO: Make json serial reader");
                 const str = try readString(reader, null);
+
                 const value = json.parseFromSliceLeaky(Sub, arena, str, .{
                     .allocate = .alloc_if_needed,
                 }) catch |e| {
@@ -604,10 +615,24 @@ pub const Type = union(enum) {
             .entity_metadata => @compileError("Not Yet Implemented"),
             .slot => @compileError("Not Yet Implemented"),
             .hashed_slot => @compileError("Not Yet Implemented"),
-            .nbt => |may_sub| try if (may_sub) |sub|
-                sub.nbtRead(reader, arena)
-            else
-                NBT.readValueLeaky(reader, arena),
+            .nbt => |may_sub| {
+                const T = may_sub orelse utils.serial.Value;
+                var nbt_sr: utils.serial.nbt.Reader = undefined;
+                nbt_sr.init(gpa, reader, false);
+                defer nbt_sr.deinit();
+
+                break :sw @as(utils.serial.MapReader.ReadError!T, T.deserialize(arena, &nbt_sr.mapr)) catch |e| return switch (e) {
+                    error.ValueTooLong => error.InvalidLength,
+                    error.UnexpectedToken => error.InvalidNBT,
+                    error.OutOfMemory => error.OutOfMemory,
+                    error.ReadFailed, error.EndOfStream => |err| err,
+                    else => if (nbt_sr.@"error") |err| switch (err) {
+                        error.ValueTooLong, error.UnexpectedToken, error.OutOfMemory, error.ReadFailed, error.EndOfStream => unreachable,
+                        error.InvalidString => error.InvalidUTF8,
+                        error.InvalidLength, error.InvalidEnumTag => |err2| err2,
+                    } else error.InvalidNBT,
+                };
+            },
             .block_position => @bitCast(@byteSwap(try reader.takeInt(u64, .big))),
             .byte_angle => try reader.takeByte(),
             .uuid => .{ .value = try reader.takeInt(u128, .big) },
@@ -878,11 +903,11 @@ pub const Type = union(enum) {
         };
     }
 
-    pub fn write(comptime self: Type, arena: Allocator, writer: *Writer, val: self.getZigType()) WriteError!void {
+    pub fn write(comptime self: Type, gpa: Allocator, arena: Allocator, writer: *Writer, val: self.getZigType()) WriteError!void {
         switch (self) {
-            .custom => |c| try c.writeFn(arena, writer, val),
+            .custom => |c| try c.writeFn(gpa, arena, writer, val),
             .structured => |desc| inline for (desc.fields) |field| {
-                try field.type.write(arena, writer, @field(val, field.name));
+                try field.type.write(gpa, arena, writer, @field(val, field.name));
             },
             .bool => try writer.writeByte(@intFromBool(val)),
             .byte => try writer.writeByte(@bitCast(val)),
@@ -893,10 +918,21 @@ pub const Type = union(enum) {
                 .big,
             ),
             .string => try writeString(writer, val),
-            .json => {
-                var alloc_w = Writer.Allocating.init(arena);
-                json.fmt(val, .{})
-                    .format(&alloc_w.writer) catch return error.OutOfMemory;
+            .json => |may_sub| {
+                const T = may_sub orelse utils.serial.Value;
+                var alloc_w = Writer.Allocating.init(gpa);
+                defer alloc_w.deinit();
+
+                var json_sw: utils.serial.json.Writer = undefined;
+                json_sw.init(gpa, &alloc_w.writer);
+                defer json_sw.deinit();
+
+                @as(utils.serial.MapWriter.WriteError!void, T.serialize(&json_sw.mapw)) catch {
+                    if (json_sw.@"error") |e| return switch (e) {
+                        error.OutOfMemory => |err| err,
+                    };
+                    return error.WriteFailed;
+                };
 
                 try writeString(writer, alloc_w.written());
             },
@@ -905,10 +941,20 @@ pub const Type = union(enum) {
             .entity_metadata => @compileError("Not Yet Implemented"),
             .slot => @compileError("Not Yet Implemented"),
             .hashed_slot => @compileError("Not Yet Implemented"),
-            .nbt => |may_sub| try if (may_sub != null)
-                val.nbtWrite(writer)
-            else
-                val.writeTo(writer),
+            .nbt => |may_sub| {
+                const T = may_sub orelse utils.serial.Value;
+                var nbt_sw: utils.serial.nbt.Writer = undefined;
+                nbt_sw.init(gpa, writer);
+                defer nbt_sw.deinit();
+
+                @as(utils.serial.MapWriter.WriteError!void, T.serialize(&nbt_sw.mapw)) catch {
+                    if (nbt_sw.@"error") |e| return switch (e) {
+                        error.InvalidLength, error.InvalidEnumTag, error.OutOfMemory => |err| err,
+                        else => error.WriteFailed,
+                    };
+                    return error.WriteFailed;
+                };
+            },
             .block_position => try writer.writeInt(u64, @bitCast(val), .big),
             .byte_angle => try writer.writeByte(val),
             .uuid => try writer.writeInt(u128, val.value, .big),
@@ -1162,24 +1208,29 @@ pub fn readVarIntMax(reader: *Reader, comptime T: type, max_val: T) Reader.TakeL
         @bitCast(result);
 }
 
+/// Reading strings are weird: They are technically written as utf8 but
+/// count codepoints as if they are utf16. All of this because sun
+/// microshitstem wanted utf16 strings in java.
+///
+/// Though I will use UTF8 instead as it'll be easier for me.
 pub fn readString(reader: *Reader, may_max_cps: ?u15) (Reader.TakeLeb128Error || Reader.ReadAllocError || error{ InvalidUTF8, InvalidLength })![]const u8 {
     const max_cps = may_max_cps orelse std.math.maxInt(u15);
     const len = try readVarIntMax(reader, u32, @as(u32, max_cps) * 3);
     const buf = try reader.take(len);
-    const cps = std.unicode.utf8CountCodepoints(buf) catch |e| {
-        logger.err("Invalid UTF8 string [{t}]", .{e});
-        return error.InvalidUTF8;
-    };
-    if (cps > max_cps) {
-        logger.err("String exceeded maximum length, got [{d}], max [{d}]", .{ cps, max_cps });
+    var it = utils.Utf8Iterator.init(buf);
+    var utf16_cp: usize = 0;
+    while (try it.nextCodepoint()) |cp| {
+        utf16_cp += 1 + @intFromBool(cp > 0xFFFF);
+    }
+    if (utf16_cp > max_cps) {
+        logger.err("String exceeded maximum length, got [{d}], max [{d}]", .{ utf16_cp, max_cps });
         return error.InvalidLength;
     }
     return buf;
 }
 
 pub fn writeString(writer: *Writer, s: []const u8) (Writer.Error || error{InvalidUTF8})!void {
-    const cps = std.unicode.utf8CountCodepoints(s) catch return error.InvalidUTF8;
-    try writeVarInt(writer, cps);
+    try writeVarInt(writer, s.len);
     try writer.writeAll(s);
 }
 
