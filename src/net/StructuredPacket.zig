@@ -99,6 +99,34 @@ pub const Field = struct {
     type: Type,
 };
 
+pub const AllocPair = struct {
+    gpa: Allocator,
+    arena: Allocator,
+
+    pub fn new(gpa: Allocator, arena: Allocator) AllocPair {
+        return .{ .gpa = gpa, .arena = arena };
+    }
+
+    pub fn newWithArena(gpa: Allocator, arena: *std.heap.ArenaAllocator) AllocPair {
+        return .{ .gpa = gpa, .arena = arena.allocator() };
+    }
+
+    pub fn newFromGpa(gpa: Allocator, out_arena: *std.heap.ArenaAllocator) AllocPair {
+        out_arena.* = .init(gpa);
+        return .{ .gpa = gpa, .arena = out_arena.allocator() };
+    }
+
+    pub fn read(self: *const AllocPair, comptime @"type": Type, reader: *Reader) Type.ReadError!@"type".getZigType() {
+        var ret: @"type".getZigType() = undefined;
+        try @"type".read(self.gpa, self.arena, reader, .{}, &ret);
+        return ret;
+    }
+
+    pub fn write(self: *const AllocPair, comptime @"type": Type, writer: *Writer, value: @"type".getZigType()) Type.WriteError!void {
+        return @"type".write(self.gpa, self.arena, writer, value);
+    }
+};
+
 pub const IdSet = union(enum) { tag: Identifier, ids: []u32 };
 
 pub const Type = union(enum) {

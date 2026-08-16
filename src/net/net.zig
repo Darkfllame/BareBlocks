@@ -6,20 +6,32 @@ const utils = @import("utils");
 const Io = std.Io;
 const net = Io.net;
 const Allocator = std.mem.Allocator;
-const logger = std.log.scoped(logger_scope);
+const flate = std.compress.flate;
+const math = std.math;
+const TextComponent = utils.TextComponent;
+const AllocPair = StructuredPacket.AllocPair;
+const logger = std.log.scoped(.net);
 
 const assert = std.debug.assert;
 
 const static_io = coro.AnyCoroutine.static_io;
-
-const logger_scope = .net;
 
 pub const StructuredPacket = @import("StructuredPacket.zig");
 pub const packets = @import("packets.zig");
 
 pub const PacketType = StructuredPacket.Type;
 
-pub const NetworkingSide = enum { client, server };
+pub const NetworkingSide = enum {
+    client,
+    server,
+
+    pub fn opposite(self: NetworkingSide) NetworkingSide {
+        return switch (self) {
+            .client => .server,
+            .server => .client,
+        };
+    }
+};
 pub const NetworkingPhase = enum { handshake, status, login, configuration, play };
 pub const PacketID = enum(u16) { _ };
 
@@ -33,6 +45,7 @@ pub const PacketRegistry = struct {
     };
 
     pub const Entry = struct {
+        write_cushion: usize,
         resource: []const u8,
         callback: *const Connection.ReadCallbackFn,
     };
@@ -93,6 +106,10 @@ pub const PacketRegistry = struct {
     }
 };
 
+/// An intrusive interface (like `std.Io.Reader/Writer`) that handles all the operations related to a
+/// minecraft connection in either way. Use `.init()` to initalize it with specific options.
+///
+/// TODO: doc
 pub const Connection = struct {
     const reader_vtable = Io.Reader.VTable{
         .stream = streamImpl,
@@ -112,12 +129,16 @@ pub const Connection = struct {
         InvalidPacketID,
         OutOfMemory,
         Disconnected,
+        Timeout,
+        InvalidLength,
+        DecompressionFailed,
     };
     const CoroWriteError = error{ Disconnected, ConnectionResetByPeer, SystemResources };
 
     const PacketNode = struct {
         node: std.DoublyLinkedList.Node,
         length: usize,
+        close: bool,
 
         fn getBytes(self: *PacketNode) []const u8 {
             return @as([*]const u8, @ptrCast(self))[0 .. @sizeOf(PacketNode) + self.length];
@@ -145,10 +166,15 @@ pub const Connection = struct {
         const dest_n, const data_size = try io_r.writableVector(&iovecs_buffer, data);
         const dest = iovecs_buffer[0..dest_n];
         assert(dest[0].len > 0);
+        const start_time = Io.Timestamp.now(static_io, .boot);
         const n = io.vtable.netRead(io.userdata, conn.stream_handle, dest) catch |err| {
             conn.read_error = err;
             return error.ReadFailed;
         };
+        if (start_time.untilNow(static_io, .boot).nanoseconds >= conn.timeout.nanoseconds) {
+            conn.read_error = error.Timeout;
+            return error.ReadFailed;
+        }
         if (n == 0) {
             return error.EndOfStream;
         }
@@ -188,16 +214,18 @@ pub const Connection = struct {
                 logger.warn("Failed to reset arena allocator for {f}", .{self.ip_address});
             }
         }) {
-            self.readConnection(read_arena.allocator()) catch |e| switch (e) {
+            self.readConnection(allocator, read_arena.allocator()) catch |e| switch (e) {
                 error.ReadFailed => return switch (self.read_error.?) {
                     error.SocketUnconnected, error.Canceled => break,
                     error.NetworkDown => error.Disconnected,
-                    error.SystemResources, error.ConnectionResetByPeer => |err| err,
-                    error.AccessDenied, error.Timeout, error.Unexpected => unreachable,
+                    error.SystemResources, error.ConnectionResetByPeer, error.Timeout => |err| err,
+                    error.AccessDenied, error.Unexpected => unreachable,
                 },
+                error.DecompressionFailed,
                 error.LegacyHandshake,
                 error.PacketTooSmall,
                 error.PacketTooLarge,
+                error.InvalidLength,
                 error.EndOfStream,
                 error.InvalidPacketID,
                 error.OutOfMemory,
@@ -230,13 +258,18 @@ pub const Connection = struct {
         }
     }
 
-    fn readConnection(self: *Connection, allocator: Allocator) !void {
+    fn readConnection(self: *Connection, gpa: Allocator, arena: Allocator) !void {
+        const apair = StructuredPacket.AllocPair{
+            .gpa = gpa,
+            .arena = arena,
+        };
+
         const reader = &self.reader;
         if (self.phase == .handshake and (try reader.peekByte()) == 0xFE) { // legacy handshake
             return error.LegacyHandshake;
         }
 
-        const packet_length: i32 = PacketType.readRoot(.var_int, .failing, reader) catch |e| switch (e) {
+        const packet_length: i32 = PacketType.readNoAlloc(.var_int, reader) catch |e| switch (e) {
             error.Overflow => return error.PacketTooLarge,
             error.ReadFailed, error.EndOfStream => |err| return err,
             else => unreachable,
@@ -247,24 +280,49 @@ pub const Connection = struct {
         const packet_bytes = try if (reader.buffer.len >= length)
             reader.take(length)
         else
-            reader.readAlloc(allocator, length);
-        var preader = Io.Reader.fixed(packet_bytes);
-        const packet_id = PacketType.readRoot(.var_int, .failing, &preader) catch |e| switch (e) {
-            error.Overflow => return error.InvalidPacketID,
-            error.ReadFailed, error.EndOfStream => |err| return err,
+            reader.readAlloc(arena, length);
+
+        var raw_reader = Io.Reader.fixed(packet_bytes);
+        var decomp: flate.Decompress = undefined;
+
+        const packet_reader = if (self.compression) |comp| blk: {
+            const uncompressed_length = PacketType.readNoAlloc(.var_int, &raw_reader) catch |e| return switch (e) {
+                error.Overflow, error.EndOfStream => error.InvalidLength,
+                else => unreachable,
+            };
+            if (uncompressed_length < 0) return error.InvalidLength;
+            if (uncompressed_length == 0) break :blk &raw_reader;
+
+            decomp = .init(&raw_reader, .zlib, &comp.buffer);
+            break :blk &decomp.reader;
+        } else &raw_reader;
+
+        const packet_id = PacketType.readNoAlloc(.var_int, packet_reader) catch |e| return switch (e) {
+            error.Overflow => error.InvalidPacketID,
+            error.EndOfStream => error.InvalidLength,
+            error.ReadFailed => {
+                self.compression.?.decompression_error = decomp.err;
+                return error.DecompressionFailed;
+            },
             else => unreachable,
         };
+        self.addReadPacket();
 
         const pid = self.packet_registry.getPacketID(self.target_side, self.phase, packet_id) orelse
             return error.InvalidPacketID;
         const entry = self.packet_registry.getEntry(self.target_side, self.phase, pid);
 
-        entry.callback(self, &preader, allocator) catch |e| switch (e) {
-            error.ReadFailed => switch (builtin.mode) {
-                .Debug, .ReleaseSafe => std.debug.panic("[{f}] impossible error.ReadFailed occured while reading packet", .{self}),
-                .ReleaseFast, .ReleaseSmall => unreachable,
-            },
-            error.OutOfMemory, error.EndOfStream => |err| return err,
+        entry.callback(self, packet_reader, apair) catch |e| {
+            const err = switch (e) {
+                error.ReadFailed => {
+                    self.compression.?.decompression_error = decomp.err;
+                    return error.DecompressionFailed;
+                },
+                error.OutOfMemory, error.EndOfStream => |err| err,
+                else => error.ReadFailed,
+            };
+            self.parsing_error = err;
+            return err;
         };
     }
 
@@ -281,11 +339,12 @@ pub const Connection = struct {
 
         assert(bytes.len <= max_packet_length);
 
-        PacketType.write(.var_int, .failing, writer, @intCast(bytes.len)) catch |e| switch (e) {
+        PacketType.writerNoAlloc(.var_int, writer, @intCast(bytes.len)) catch |e| switch (e) {
             error.WriteFailed => |err| return err,
             else => unreachable,
         };
         try writer.writeAll(bytes);
+        self.addWritePacket();
     }
 
     fn popPacket(self: *Connection) ?*PacketNode {
@@ -293,13 +352,37 @@ pub const Connection = struct {
         return @fieldParentPtr("node", pack);
     }
 
+    fn addReadPacket(self: *const Connection) void {
+        if (self.rate_limited) |rl| {
+            rl.received +|= 1; // Realistically these shouldn't overflow but just in case
+        }
+    }
+
+    fn addWritePacket(self: *const Connection) void {
+        if (self.rate_limited) |rl| {
+            rl.sent +|= 1; // Realistically these shouldn't overflow but just in case
+        }
+    }
+
+    /// Handshake and Status don't have this.
+    fn noDisconnectMessage(self: *Connection, reason: *const TextComponent) Allocator.Error!void {
+        _ = self;
+        _ = reason;
+    }
+
+    // TODO: Bandwidth monitor ?
+
     /// Will replace the ip when this connection gets formatted to the console.
     name: ?[]const u8 = null,
     phase: NetworkingPhase,
     target_side: NetworkingSide,
-
+    timeout: Io.Duration,
+    rate_limited: ?*RateLimited,
     packet_registry: *const PacketRegistry,
+    compression: ?*Compression,
 
+    read_closed: bool,
+    write_closed: bool,
     stream_handle: net.Socket.Handle,
     ip_address: net.IpAddress,
 
@@ -316,39 +399,111 @@ pub const Connection = struct {
 
     send_queue: std.DoublyLinkedList,
 
+    // Connection-specific callbacks
+    disconnect_callback: *const DisconnectCallbackFn,
+
     /// Maximum value of `u21`, roughly 2MiB
     pub const max_packet_length = (2 * 1024 * 1024) - 1;
 
-    pub const ReadCallbackError = Io.Reader.Error || Allocator.Error;
+    pub const ReadCallbackError = Io.Reader.Error || Allocator.Error || PacketType.ReadError;
+    pub const WritePacketError = Allocator.Error || PacketType.WriteError || error{
+        PacketIDNotFound,
+        PacketTooLarge,
+    };
 
-    /// Because `Connection` is supposed to be embedded like `std.Io.Reader`,
-    /// it should only return errors possible from an `std.Io.Reader` and `std.mem.Allocator`
-    /// (for copying data) More detailed error codes should be set inside a parent structure
-    /// and retreive when neccesary.
-    ///
     /// The data in `reader` will never move, as such the `StructuredPacket` API is useable with it.
     ///
-    /// The memory allocated by the allocator passed in this function will only stay valid for this call
+    /// The memory allocated by the arena allocator passed in this function will only stay valid for this call
     /// **only**. Any data that is wished to stay persitent must be copied to a new location.
     ///
     /// Note: `error.ReadFailed` is technically impossible, but is here mainly for convenience, so you can
     /// just call functions within `reader` with `try` directly.
-    pub const ReadCallbackFn = fn (conn: *Connection, reader: *Io.Reader, arena: Allocator) ReadCallbackError!void;
+    pub const ReadCallbackFn = fn (conn: *Connection, reader: *Io.Reader, apair: AllocPair) ReadCallbackError!void;
+    pub const DisconnectCallbackFn = fn (conn: *Connection, reason: *const TextComponent) Allocator.Error!void;
+
+    pub const RateLimited = struct {
+        limit: Count,
+        average_received: Average = 0,
+        average_sent: Average = 0,
+        received: Count = 0,
+        sent: Count = 0,
+
+        pub const Average = f32;
+        pub const Count = usize;
+
+        /// Sugar function.
+        ///
+        /// Allows you to init and return this pointer in a single line.
+        pub inline fn init(self: *RateLimited, limit: Count) *RateLimited {
+            self.* = .{ .limit = limit };
+            return self;
+        }
+    };
+
+    pub const Compression = struct {
+        threshold: usize,
+        buffer: [flate.max_window_len]u8,
+        decompression_error: ?flate.Decompress.Error,
+    };
 
     pub const InitOptions = struct {
+        /// The packet registry used to callback function to read and
+        /// handle incomming packets.
         packet_registry: *const PacketRegistry,
         stream: net.Stream,
+        /// Whether the other end of this connection will be a server or
+        /// client.
         target_side: NetworkingSide,
+        /// Optional name of this connection to be logged.
+        ///
+        /// If `null` the ip of the other end of the connection will be
+        /// printed instead.
+        name: ?[]const u8 = null,
+        /// I figured this could be useful if one (for example), makes a plugin/mod/whatever
+        /// that automatically reconnect players in a certain phase.
+        phase: NetworkingPhase = .handshake,
+        /// Sets a timeout on the reading end, if exceeded it automatically
+        /// closes the connection.
+        timeout: Io.Duration = .fromSeconds(30),
+        /// Include `RateLimited` within your implementation struct
+        /// and pass it here or in `reconfigure()` to limit packet
+        /// rate.
+        rate_limited: ?*RateLimited = null,
+        /// Defaults with a callback that does nothing.
+        disconnect_callback: *const DisconnectCallbackFn = &noDisconnectMessage,
+        compression: ?*Compression = null,
+    };
+
+    pub const ReconfigureOptions = struct {
+        fn empty(self: ReconfigureOptions) bool {
+            inline for (@typeInfo(ReconfigureOptions).@"struct".fields) |f| {
+                comptime if (@typeInfo(f.type) != .optional) continue;
+                if (@field(self, f.name) != null) return false;
+            }
+            return true;
+        }
+
+        name: ?[]const u8 = null,
+        phase: ?NetworkingPhase = null,
+        timeout: ?Io.Duration = null,
+        rate_limited: ?*RateLimited = null,
+        disconnect_callback: ?*const DisconnectCallbackFn = null,
+        compression: ?*Compression = null,
     };
 
     /// `allocator` must remain valid until this connection is deinitalized
     pub fn init(self: *Connection, allocator: Allocator, options: InitOptions) Allocator.Error!void {
         self.* = .{
-            .phase = .handshake,
+            .phase = options.phase,
             .target_side = options.target_side,
+            .timeout = options.timeout,
+            .rate_limited = options.rate_limited,
+            .compression = options.compression,
 
             .packet_registry = options.packet_registry,
 
+            .read_closed = false,
+            .write_closed = false,
             .stream_handle = options.stream.socket.handle,
             .ip_address = options.stream.socket.address,
 
@@ -364,6 +519,8 @@ pub const Connection = struct {
             .write_coro = undefined,
 
             .send_queue = .{},
+
+            .disconnect_callback = options.disconnect_callback,
         };
 
         try self.read_coro.init(.{}, coro_readConnection, .{ self, allocator });
@@ -373,6 +530,8 @@ pub const Connection = struct {
     }
 
     pub fn deinit(self: *Connection, allocator: Allocator) void {
+        self.read_closed = true;
+        self.write_closed = true;
         self.read_coro.await(.cancel) catch |e| {
             logger.debug("[{f}] Error occured when closing connection: {t}", .{ self, e });
         };
@@ -383,6 +542,23 @@ pub const Connection = struct {
         static_io.vtable.netClose(static_io.userdata, (&self.stream_handle)[0..1]);
     }
 
+    /// Doesn't reallocate/duplicate anything.
+    ///
+    /// Asserts that `options` actually does stuff, otherwise this might
+    /// mean a bad design.
+    pub fn reconfigure(self: *Connection, options: ReconfigureOptions) void {
+        assert(!options.empty()); // Pointless reconfigure
+
+        self.name = options.name;
+        if (options.phase) |p| self.phase = p;
+        if (options.timeout) |to| self.timeout = to;
+        if (options.rate_limited) |rl| self.rate_limited = rl;
+        if (options.disconnect_callback) |cb| self.disconnect_callback = cb;
+        if (options.compression) |c| self.compression = c;
+    }
+
+    /// Allows this connection to be printed to `std.Io.Writer`s as: `[ip-or-name]<[phase]>->[target-side]`
+    /// (excluding `[]`s)
     pub fn format(self: *const Connection, writer: *Io.Writer) Io.Writer.Error!void {
         try if (self.name) |nm|
             writer.writeAll(nm)
@@ -390,10 +566,93 @@ pub const Connection = struct {
             self.ip_address.format(writer);
         try writer.print("<{t}>->{t}", .{ self.phase, self.target_side });
     }
+
+    pub fn sendPacket(
+        self: *Connection,
+        apair: AllocPair,
+        resource: []const u8,
+        comptime @"type": PacketType,
+        value: @"type".getZigType(),
+    ) WritePacketError!void {
+        const pack_id = self.packet_registry.packedIDFromResource(self.target_side.opposite(), self.phase, resource) orelse
+            return error.PacketIDNotFound;
+        const entry = self.packet_registry.getEntry(self.target_side.opposite(), self.phase, pack_id);
+
+        var aw = Io.Writer.Allocating.initAligned(apair.gpa, .of(PacketNode));
+        defer aw.deinit();
+        try aw.ensureTotalCapacity(1 + entry.write_cushion);
+        aw.writer.advance(@sizeOf(PacketNode));
+
+        PacketType.writerNoAlloc(.var_int, &aw.writer, @intFromEnum(pack_id)) catch return error.OutOfMemory;
+
+        apair.write(@"type", &aw.writer, value) catch |e| return switch (e) {
+            error.WriteFailed => error.OutOfMemory,
+            else => |err| err,
+        };
+
+        if (aw.written().len >= max_packet_length) return error.PacketTooLarge;
+
+        const bytes_result = res: {
+            if (self.compression) |comp| {
+                const content = aw.written()[@sizeOf(PacketNode)..];
+
+                var out_w = Io.Writer.Allocating.initAligned(apair.gpa, .of(PacketNode));
+                defer out_w.deinit();
+                try out_w.ensureTotalCapacity(1 + content.len);
+                aw.writer.advance(@sizeOf(PacketNode));
+
+                if (content.len < comp.threshold) {
+                    PacketType.writerNoAlloc(.var_int, &out_w.writer, 0) catch unreachable;
+                    out_w.writer.writeAll(content) catch unreachable;
+                } else {
+                    PacketType.writerNoAlloc(.var_int, &out_w.writer, @intCast(content.len)) catch unreachable;
+                    var compress = flate.Compress.init(&out_w.writer, &comp.buffer, .zlib, .default) catch
+                        return error.OutOfMemory;
+
+                    compress.writer.writeAll(content) catch return error.OutOfMemory;
+
+                    compress.finish() catch return error.OutOfMemory;
+                }
+
+                break :res try out_w.toOwnedSlice();
+            }
+
+            break :res try aw.toOwnedSlice();
+        };
+        errdefer comptime unreachable;
+
+        const pnode: *PacketNode = @ptrCast(@alignCast(bytes_result.ptr));
+        pnode.* = .{
+            .node = undefined,
+            .length = bytes_result.len - @sizeOf(PacketNode),
+            .close = false,
+        };
+        self.send_queue.append(&pnode.node);
+    }
+
+    pub fn shutdown(self: *Connection, how: net.ShutdownHow) net.ShutdownError!void {
+        self.read_closed = self.read_closed or how != .send; // recv or both
+        self.write_closed = self.write_closed or how != .recv; // send or both
+        try static_io.vtable.netShutdown(static_io.userdata, self.stream_handle, how);
+    }
+
+    pub fn tickSecond(self: *Connection) (Allocator.Error || net.ShutdownError)!void {
+        if (self.rate_limited) |rl| {
+            rl.average_sent = math.lerp(@as(RateLimited.Average, @floatFromInt(rl.sent)), rl.average_sent, 0.75);
+            rl.average_received = math.lerp(@as(RateLimited.Average, @floatFromInt(rl.received)), rl.average_received, 0.75);
+            rl.sent = 0;
+            rl.received = 0;
+            if (@as(RateLimited.Count, @trunc(rl.average_received)) >= rl.limit) {
+                logger.warn("[{f}] Exceeded rate-limit (sent {d} packets per seconds)", .{self, rl.average_received});
+                try self.disconnect_callback(self, &.exceeded_packet_rate);
+                try self.shutdown(.recv);
+            }
+        }
+    }
 };
 
 test {
     std.testing.refAllDecls(@This());
-    std.testing.refAllDecls(Connection);
     std.testing.refAllDecls(PacketRegistry);
+    std.testing.refAllDecls(Connection);
 }
