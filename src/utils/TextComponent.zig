@@ -33,7 +33,7 @@ const ClickEvent = union(enum) {
     show_dialog: struct {},
     custom: struct {
         id: Identifier,
-        payload: []const u8,
+        payload: ?[]const u8 = null,
     },
 };
 const HoverEvent = union(enum) {
@@ -160,7 +160,7 @@ const FormatContext = struct {
             .translatable => |t| prg: {
                 const components = translation.get(t.id);
                 if (components.len == 0) {
-                    try writer.writeAll(t.fallback);
+                    try writer.writeAll(t.fallback orelse t.id);
                     break :prg;
                 }
 
@@ -204,18 +204,18 @@ const FormatContext = struct {
 const Content = union(enum) {
     text: []const u8,
     // 128 bits will represent most integer commonly used
-    // and fits within the minimum size of this struct.
+    // and fits within the size of this union.
     /// This will never be returned by the client, and will be
     /// formatted to a simple 'text' component when serialized.
     int: i128,
     // 128 bits will represent most floats commonly used
-    // and fits within the minimum size of this struct.
+    // and fits within the size of this union.
     /// This will never be returned by the client, and will be
     /// formatted to a simple 'text' component when serialized.
     float: f128,
     translatable: struct {
         id: []const u8,
-        fallback: []const u8 = "",
+        fallback: ?[]const u8 = null,
         with: []const TextComponent = &.{},
     },
     score: struct {
@@ -227,7 +227,7 @@ const Content = union(enum) {
     },
     selector: struct {
         value: Selector,
-        separator: *const TextComponent,
+        separator: ?*const TextComponent = null,
     },
     keybind: struct {
         key: Keybind,
@@ -281,165 +281,58 @@ fn fromContent(content: Content, options: CreateCommonOptions) TextComponent {
     };
 }
 
-fn nbtWriteContent(self: TextComponent, writer: *Writer) NBT.WriteError!void {
-    switch (self.content) {
-        .text => |_text| {
-            try writer.writeByte(@intFromEnum(NBT.ValueTag.string));
-            try NBT.writeJavaString(writer, "text");
-            try NBT.writeJavaString(writer, _text);
-        },
-        inline .int, .float => |num| {
-            try writer.writeByte(@intFromEnum(NBT.ValueTag.string));
-            try NBT.writeJavaString(writer, "text");
-            const len = std.fmt.count("{d}", .{num});
-            if (len > std.math.maxInt(u15)) return error.InvalidLength;
-            try writer.writeInt(i16, @intCast(len), .big);
-            try writer.print("{d}", .{num});
-        },
-        .translatable => |trans| {
-            try writer.writeByte(@intFromEnum(NBT.ValueTag.string));
-            try NBT.writeJavaString(writer, "translate");
-            try NBT.writeJavaString(writer, trans.id);
-            if (trans.fallback.len != 0) {
-                try writer.writeByte(@intFromEnum(NBT.ValueTag.string));
-                try NBT.writeJavaString(writer, "fallback");
-                try NBT.writeJavaString(writer, trans.fallback);
-            }
-            if (trans.with.len != 0) {
-                if (trans.with.len > std.math.maxInt(u31)) return error.InvalidLength;
-                try writer.writeByte(@intFromEnum(NBT.ValueTag.list));
-                try NBT.writeJavaString(writer, "with");
-                try writer.writeByte(@intFromEnum(NBT.ValueTag.compound));
-                try writer.writeInt(i32, @intCast(trans.with.len), .big);
-                for (trans.with) |tc| {
-                    try tc.nbtWriteContent(writer);
-                }
-            }
-        },
-        .score => |score| {
-            try writer.writeByte(@intFromEnum(NBT.ValueTag.compound));
-            try NBT.writeJavaString(writer, "score");
-            try writer.writeByte(@intFromEnum(NBT.ValueTag.string));
-            try NBT.writeJavaString(writer, "name");
-            switch (score.name) {
-                .reader => try writer.writeAll("\x00\x01*"),
-                .selector => |sel| {
-                    const count = std.fmt.count("{f}", .{sel});
-                    if (count > std.math.maxInt(u15)) return error.InvalidLength;
-                    try writer.print("{f}", .{sel});
-                },
-            }
-            try writer.writeByte(@intFromEnum(NBT.ValueTag.string));
-            try NBT.writeJavaString(writer, "objective");
-            try NBT.writeJavaString(writer, score.objective);
-            try writer.writeByte(@intFromEnum(NBT.ValueTag.void));
-        },
-        .selector => |selector| {
-            try writer.writeByte(@intFromEnum(NBT.ValueTag.string));
-            try NBT.writeJavaString(writer, "selector");
-            const count = std.fmt.count("{f}", .{selector.value});
-            if (count > std.math.maxInt(u15)) return error.InvalidLength;
-            try writer.writeInt(i16, @intCast(count), .big);
-            try writer.print("{f}", .{selector.value});
-            try selector.separator.nbtWriteInner(writer, "separator", true);
-        },
-        .keybind => |kb| {
-            try writer.writeByte(@intFromEnum(NBT.ValueTag.string));
-            try NBT.writeJavaString(writer, "keybind");
-            if (kb.key != .unknown) {
-                const max_kb_len = comptime blk: {
-                    var max: usize = 0;
-                    for (@typeInfo(Keybind).@"enum".fields) |f| {
-                        max = @max(max, f.name.len);
-                    }
-                    break :blk max;
-                };
-
-                var buf: [4 + max_kb_len]u8 = undefined;
-                var buf_writer = Writer.fixed(&buf);
-                buf_writer.print("key.{t}", .{kb.key}) catch unreachable;
-                try NBT.writeJavaString(writer, buf_writer.buffered());
-            } else {
-                try NBT.writeJavaString(writer, kb.translation);
-            }
-        },
-        .nbt => @panic("TODO: Implement"),
-    }
-
-    inline for (@typeInfo(Formatting).@"struct".fields) |f| {
-        if (@field(self.formatting_mask.sub, f.name)) {
-            const value = @field(self.formatting, f.name);
-            switch (f.type) {
-                Color => {
-                    try writer.writeByte(@intFromEnum(NBT.ValueTag.string));
-                    try NBT.writeJavaString(writer, f.name);
-                    switch (value) {
-                        else => |tag| {
-                            try NBT.writeJavaString(writer, @tagName(tag));
-                        },
-                        _ => |tag| {
-                            try writer.writeInt(i16, 7, .big);
-                            try writer.print("\"#{x:0>6}\"", .{@intFromEnum(tag)});
-                        },
-                    }
-                },
-                Color.ARGB => {
-                    try writer.writeByte(@intFromEnum(NBT.ValueTag.int));
-                    try NBT.writeJavaString(writer, f.name);
-                    try writer.writeInt(u32, @byteSwap(@as(u32, @bitCast(value))), .big);
-                },
-                Identifier => {
-                    try writer.writeByte(@intFromEnum(NBT.ValueTag.string));
-                    try NBT.writeJavaString(writer, f.name);
-                    try NBT.writeJavaStringVec(writer, &.{
-                        value.namespace(), ":", value.path(),
-                    });
-                },
-                bool => {
-                    try writer.writeByte(@intFromEnum(NBT.ValueTag.byte));
-                    try NBT.writeJavaString(writer, f.name);
-                    try writer.writeByte(@intFromBool(value));
-                },
-                else => unreachable,
-            }
-        }
-    }
-
-    if (self.children.len != 0) {
-        if (self.children.len > std.math.maxInt(u31)) return error.InvalidLength;
-        try writer.writeByte(@intFromEnum(NBT.ValueTag.list));
-        try NBT.writeJavaString(writer, "extra");
-        try writer.writeByte(@intFromEnum(NBT.ValueTag.compound));
-        try writer.writeInt(i32, @intCast(self.children.len), .big);
-        for (self.children) |tc| {
-            try tc.nbtWriteContent(writer);
-        }
-    }
-
-    try writer.writeByte(@intFromEnum(NBT.ValueTag.void));
+fn nextDupeExpectString(allocator: Allocator, mapr: *utils.serial.MapReader) utils.serial.MapReader.ReadError![]u8 {
+    const value = try mapr.next();
+    if (value != .string) return error.UnexpectedToken;
+    return allocator.dupe(u8, value.string);
 }
 
-fn nbtWriteInner(self: TextComponent, writer: *Writer, name: ?[]const u8, force_compound: bool) NBT.WriteError!void {
-    if (self.isSimpleText() and !force_compound) {
-        try writer.writeByte(@intFromEnum(NBT.ValueTag.string));
-        return switch (self.content) {
-            .text => |_text| NBT.writeJavaString(writer, _text),
-            inline .int, .float => |num| {
-                const len = std.fmt.count("{d}", .{num});
-                if (len > std.math.maxInt(u15)) return error.InvalidLength;
-                try writer.writeInt(i16, @intCast(len), .big);
-                try writer.print("{d}", .{num});
+fn nextDecodeBool(mapr: *utils.serial.MapReader) utils.serial.MapReader.ReadError!bool {
+    const tok = try mapr.next();
+    return switch (tok) {
+        .string => |s| if (eql(u8, s, "false"))
+            false
+        else if (eql(u8, s, "true"))
+            true
+        else
+            error.UnexpectedToken,
+        .boolean => |b| b,
+        .byte, .short, .int, .long => |i| i != 0,
+        else => error.UnexpectedToken,
+    };
+}
+
+fn gatherScoreValue(_arena: Allocator, mapr: *utils.serial.MapReader) utils.serial.MapReader.ReadError!@FieldType(Content, "score") {
+    if (try mapr.next() != .aggregate_start) return error.UnexpectedToken;
+
+    var name_f: ?[]const u8 = null;
+    var objective_f: ?[]const u8 = null;
+
+    while (true) {
+        const token = try mapr.next();
+        switch (token) {
+            .string => |s| {
+                if (eql(u8, s, "name")) {
+                    name_f = try nextDupeExpectString(_arena, mapr);
+                } else if (eql(u8, s, "objective")) {
+                    objective_f = try nextDupeExpectString(_arena, mapr);
+                }
             },
-            else => unreachable,
-        };
+            .aggregate_end => break,
+            else => return error.UnexpectedToken,
+        }
     }
 
-    try writer.writeByte(@intFromEnum(NBT.ValueTag.compound));
-    if (name) |nm| {
-        try NBT.writeJavaString(writer, nm);
-    }
+    if (name_f == null or objective_f == null) return error.MissingField;
 
-    try nbtWriteContent(self, writer);
+    return .{
+        .name = if (eql(u8, name_f.?, "*"))
+            .reader
+        else
+            @panic("Selector parsing not yet implemented"),
+        // .{ .selector = try Selector.parse(name_f.?) },
+        .objective = objective_f.?,
+    };
 }
 
 // This is actually really useful for comptime computing :D
@@ -449,8 +342,7 @@ children: []const TextComponent = &.{},
 formatting_mask: Formatting.Mask = .{},
 formatting: Formatting = undefined,
 
-/// `.len == 0` means it won't be serialized.
-insertion: []const u8 = "",
+insertion: ?[]const u8 = null,
 click_event: ClickEvent = .none,
 hover_event: HoverEvent = .none,
 
@@ -482,7 +374,7 @@ pub const CreateCommonOptions = struct {
     obfuscated: ?bool = null,
     shadow_color: ?Color.ARGB = null,
 
-    insertion: []const u8 = "",
+    insertion: ?[]const u8 = null,
     click_event: ClickEvent = .none,
     hover_event: HoverEvent = .none,
 };
@@ -551,7 +443,7 @@ pub fn cloneLeaky(self: TextComponent, allocator: Allocator) Allocator.Error!Tex
         inline .int, .float => |v, tag| @unionInit(Content, @tagName(tag), v),
         .translatable => |tr| .{ .translatable = .{
             .id = try allocator.dupe(u8, tr.id),
-            .fallback = try allocator.dupe(u8, tr.fallback),
+            .fallback = if (tr.fallback) |fb| try allocator.dupe(u8, fb) else null,
             .with = tcs: {
                 const cpy = try allocator.alloc(TextComponent, tr.with.len);
                 for (cpy, tr.with) |*out, in| {
@@ -569,11 +461,11 @@ pub fn cloneLeaky(self: TextComponent, allocator: Allocator) Allocator.Error!Tex
         } },
         .selector => |sel| .{ .selector = .{
             .value = try sel.value.cloneLeaky(allocator),
-            .separator = sep: {
+            .separator = if (sel.separator) |sep| sep: {
                 const tc = try allocator.create(TextComponent);
-                tc.* = try sel.separator.cloneLeaky(allocator);
+                tc.* = try sep.cloneLeaky(allocator);
                 break :sep tc;
-            },
+            } else null,
         } },
         .keybind => |kb| .{ .keybind = .{
             .key = kb.key,
@@ -595,7 +487,7 @@ pub fn cloneLeaky(self: TextComponent, allocator: Allocator) Allocator.Error!Tex
     if (self.formatting_mask.get(self.formatting, .font)) |font| {
         tc.formatting.font = try font.dupe(allocator);
     }
-    tc.insertion = try allocator.dupe(u8, self.insertion);
+    tc.insertion = if (self.insertion) |ins| try allocator.dupe(u8, ins) else null;
     tc.click_event = switch (self.click_event) {
         inline .none, .change_page => |val, tag| @unionInit(
             ClickEvent,
@@ -615,7 +507,7 @@ pub fn cloneLeaky(self: TextComponent, allocator: Allocator) Allocator.Error!Tex
         .show_dialog => @panic("Not Yet Implemented"), // TODO: TextComponent::cloneLeaky<click_event.show_dialog>
         .custom => |custom| .{ .custom = .{
             .id = try custom.id.dupe(allocator),
-            .payload = try allocator.dupe(u8, custom.payload),
+            .payload = if (custom.payload) |pl| try allocator.dupe(u8, pl) else null,
         } },
     };
     tc.hover_event = switch (tc.hover_event) {
@@ -647,7 +539,7 @@ pub fn applyFormatting(self: TextComponent, options: FormattingOptions) TextComp
 
 pub fn isSimpleText(self: TextComponent) bool {
     return (self.content == .text or self.content == .int or self.content == .float) and self.children.len == 0 and
-        self.formatting_mask.sub == Formatting.MaskPacked{} and self.insertion.len == 0 and
+        self.formatting_mask.sub == Formatting.MaskPacked{} and self.insertion == null and
         self.click_event == .none and self.hover_event == .none;
 }
 
@@ -657,280 +549,6 @@ pub fn isEmpty(self: TextComponent) bool {
 
 pub fn format(self: TextComponent, writer: *Writer) Writer.Error!void {
     try FormatContext.format(.{ .self = &self }, writer);
-}
-
-pub fn jsonStringify(self: TextComponent, jw: *json.Stringify) json.Stringify.Error!void {
-    if (self.isSimpleText()) {
-        return switch (self.content) {
-            .text => |_text| jw.write(_text),
-            inline .int, .float => |num| jw.print("\"{d}\"", .{num}),
-            else => unreachable,
-        };
-    }
-    if (self.children.len > 0) {
-        try jw.beginArray();
-    }
-
-    try jw.beginObject();
-
-    switch (self.content) {
-        .text => |_text| {
-            try jw.objectField("text");
-            try jw.write(_text);
-        },
-        inline .int, .float => |num| {
-            try jw.objectField("text");
-            try jw.print("\"{d}\"", .{num});
-        },
-        .translatable => |tr| {
-            try jw.objectField("translate");
-            try jw.write(tr.id);
-            if (tr.fallback.len > 0) {
-                try jw.objectField("fallback");
-                try jw.write(tr.fallback);
-            }
-            if (tr.with.len > 0) {
-                try jw.objectField("with");
-                try jw.write(tr.with);
-            }
-        },
-        .score => |score| {
-            try jw.objectField("score");
-            try jw.beginObject();
-            try jw.objectField("name");
-            switch (score.name) {
-                .reader => try jw.write("*"),
-                .selector => |sel| {
-                    try jw.beginWriteRaw();
-                    defer jw.endWriteRaw();
-                    var modified = sel;
-                    modified.limit = 1;
-
-                    try jw.writer.print("\"{f}\"", .{modified});
-                },
-            }
-            try jw.objectField("objective");
-            try jw.write(score.objective);
-            try jw.endObject();
-        },
-        .selector => |sel| {
-            try jw.objectField("selector");
-            {
-                try jw.beginWriteRaw();
-                defer jw.endWriteRaw();
-                try jw.writer.print("\"{f}\"", .{sel.value});
-            }
-            try jw.objectField("separator");
-            try jw.write(sel.separator);
-        },
-        .keybind => |kb| {
-            try jw.objectField("keybind");
-            if (kb.key == .unknown) {
-                try jw.write(kb.translation);
-            } else {
-                try jw.beginWriteRaw();
-                defer jw.endWriteRaw();
-                try jw.writer.print("\"key.{t}\"", .{kb.key});
-            }
-        },
-        .nbt => @panic("Not Yet Implemented"), // TODO: TextComponent::jsonStringify<content.nbt>
-    }
-
-    inline for (@typeInfo(Formatting).@"struct".fields) |f| {
-        if (@field(self.formatting_mask.sub, f.name)) {
-            const value = @field(self.formatting, f.name);
-            try jw.objectField(f.name);
-            switch (f.type) {
-                Color => switch (value) {
-                    else => |tag| try jw.write(@tagName(tag)),
-                    _ => |tag| {
-                        try jw.beginWriteRaw();
-                        defer jw.endWriteRaw();
-
-                        try jw.writer.print("\"#{x:0>6}\"", .{@intFromEnum(tag)});
-                    },
-                },
-                Color.ARGB => try jw.write(@as(i64, @as(u32, @bitCast(value)))),
-                else => try jw.write(value),
-            }
-        }
-    }
-
-    try jw.endObject();
-
-    if (self.children.len > 0) {
-        for (self.children) |tc| try tc.jsonStringify(jw);
-        try jw.endArray();
-    }
-}
-
-pub fn jsonParse(allocator: Allocator, source: anytype, options: json.ParseOptions) !TextComponent {
-    var modified_options = options;
-    modified_options.duplicate_field_behavior = .use_first;
-    const value = try json.innerParse(json.Value, allocator, source, modified_options);
-    return jsonParseFromValue(allocator, value, options);
-}
-
-pub fn jsonParseFromValue(allocator: Allocator, source: json.Value, options: json.ParseOptions) !TextComponent {
-    switch (source) {
-        .string => |_text| return text(_text, .{}),
-        .object => |obj| {
-            var out = TextComponent.empty;
-            if (obj.get("text")) |txt| {
-                if (txt != .string) return error.UnexpectedToken;
-                out.content = .{ .text = txt.string };
-            } else if (obj.get("translate")) |_translate| {
-                if (_translate != .string) return error.UnexpectedToken;
-                const fallback = obj.get("fallback");
-                const may_with = obj.get("with");
-                if (fallback != null and fallback.? != .string) return error.UnexpectedToken;
-                const fb_str = if (fallback) |fb| fb.string else null;
-                var with_array = std.ArrayList(TextComponent).empty;
-                if (may_with) |with| {
-                    if (with != .array) return error.UnexpectedToken;
-                    try with_array.ensureTotalCapacity(allocator, with.array.items.len);
-                    for (with.array.items) |value| {
-                        with_array.appendAssumeCapacity(try jsonParseFromValue(allocator, value, options));
-                    }
-                }
-                out.content = .{ .translatable = .{
-                    .id = _translate.string,
-                    .fallback = fb_str orelse "",
-                    .with = with_array.items,
-                } };
-            } else if (obj.get("score")) |score_v| {
-                if (score_v != .object) return error.UnexpectedToken;
-                const sc = score_v.object;
-                const name = sc.get("name") orelse return error.MissingField;
-                if (name != .string) return error.UnexpectedToken;
-                const objective = sc.get("objective") orelse return error.MissingField;
-                if (objective != .string) return error.UnexpectedToken;
-                out.content = .{
-                    .score = .{
-                        .name = if (eql(u8, name.string, "*"))
-                            .reader
-                        else
-                            @panic("Selector parsing not yet implemented"), // TODO: TextComponent::jsonParseFromValue<content.score.name.selector>
-                        .objective = objective.string,
-                    },
-                };
-            } else if (obj.get("keybind")) |kb| {
-                if (kb != .string) return error.UnexpectedToken;
-                const key = if (kb.string.len > 4)
-                    std.meta.stringToEnum(Keybind, kb.string[4..]) orelse .unknown
-                else
-                    .unknown;
-                out.content = .{ .keybind = .{
-                    .key = key,
-                    .translation = if (key == .unknown) kb.string else "",
-                } };
-            } else if (obj.get("nbt")) |_| {
-                return error.UnknownField; // TODO: Implement
-            }
-
-            var extra_array = std.ArrayList(TextComponent).empty;
-            if (obj.get("extra")) |extra| {
-                if (extra != .array) return error.UnexpectedToken;
-                try extra_array.ensureTotalCapacity(allocator, extra.array.items.len);
-                for (extra.array.items) |value| {
-                    extra_array.appendAssumeCapacity(try jsonParseFromValue(allocator, value, options));
-                }
-            }
-            out.children = extra_array.items;
-
-            if (obj.get("color")) |color| color: {
-                if (color != .string) break :color;
-                const cstr = color.string;
-                if (cstr.len > 0 and cstr[0] == '#') {
-                    const hex = cstr[1..];
-                    if (hex.len != 6) break :color;
-                    const int = try std.fmt.parseInt(u24, hex, 16);
-                    out.formatting_mask.set(&out.formatting, .color, Color.hex(int));
-                    break :color;
-                }
-                out.formatting_mask.set(&out.formatting, .color, std.meta.stringToEnum(Color, cstr));
-            }
-            if (obj.get("font")) |font| font: {
-                if (font != .string) break :font;
-                out.formatting_mask.set(&out.formatting, .font, Identifier.validate(font.string) catch null);
-            }
-            if (obj.get("bold")) |bold| bold: {
-                if (bold != .bool) break :bold;
-                out.formatting_mask.set(&out.formatting, .bold, bold.bool);
-            }
-            if (obj.get("italic")) |italic| italic: {
-                if (italic != .bool) break :italic;
-                out.formatting_mask.set(&out.formatting, .italic, italic.bool);
-            }
-            if (obj.get("underlined")) |underlined| underlined: {
-                if (underlined != .bool) break :underlined;
-                out.formatting_mask.set(&out.formatting, .underlined, underlined.bool);
-            }
-            if (obj.get("strikethrough")) |strikethrough| strikethrough: {
-                if (strikethrough != .bool) break :strikethrough;
-                out.formatting_mask.set(&out.formatting, .strikethrough, strikethrough.bool);
-            }
-            if (obj.get("obfuscated")) |obfuscated| obfuscated: {
-                if (obfuscated != .bool) break :obfuscated;
-                out.formatting_mask.set(&out.formatting, .obfuscated, obfuscated.bool);
-            }
-            if (obj.get("shadow_color")) |color| color: switch (color) {
-                .integer => |i| out.formatting_mask.set(
-                    &out.formatting,
-                    .shadow_color,
-                    Color.ARGB.hex(@truncate(@as(u64, @bitCast(i)))),
-                ),
-                .array => |arr| {
-                    var values: [4]f64 = undefined;
-                    if (arr.items.len != 4) break :color;
-                    for (arr.items, 0..) |value, i| {
-                        if (value != .float) break :color;
-                        if (value.float < 0 or value.float > 1) break :color;
-                        values[i] = value.float;
-                    }
-                    out.formatting_mask.set(&out.formatting, .shadow_color, Color.ARGB.floatsNormalized(
-                        f64,
-                        values[3],
-                        values[0],
-                        values[1],
-                        values[2],
-                    ));
-                },
-                else => {},
-            };
-
-            if (obj.get("insertion")) |insertion| insertion: {
-                if (insertion != .string) break :insertion;
-                out.insertion = insertion.string;
-            }
-            if (obj.get("click_event")) |click_event| click_event: {
-                _ = click_event;
-                break :click_event;
-            }
-            if (obj.get("hover_event")) |hover_event| hover_event: {
-                _ = hover_event;
-                break :hover_event;
-            }
-
-            return out;
-        },
-        .array => |arr| {
-            if (arr.items.len == 0) return TextComponent.empty;
-            var root = try jsonParseFromValue(allocator, arr.items[0], options);
-            var children = try std.ArrayList(TextComponent)
-                .initCapacity(allocator, arr.items.len - 1);
-            for (arr.items[1..]) |value| {
-                children.appendAssumeCapacity(try jsonParseFromValue(allocator, value, options));
-            }
-            root.children = children.items;
-            return root;
-        },
-        else => return error.UnexpectedToken,
-    }
-}
-
-pub inline fn nbtWrite(self: TextComponent, writer: *Writer, name: ?[]const u8) NBT.WriteError!void {
-    return nbtWriteInner(self, writer, name, false);
 }
 
 pub fn serialize(self: *const TextComponent, mapw: *utils.serial.MapWriter) utils.serial.MapWriter.WriteError!void {
@@ -958,9 +576,9 @@ pub fn serialize(self: *const TextComponent, mapw: *utils.serial.MapWriter) util
         .translatable => |tr| {
             try mapw.fieldName("translate");
             try mapw.writeString(tr.id);
-            if (tr.fallback.len > 0) {
+            if (tr.fallback) |fb| {
                 try mapw.fieldName("fallback");
-                try mapw.writeString(tr.fallback);
+                try mapw.writeString(fb);
             }
             if (tr.with.len > 0) {
                 try mapw.fieldName("with");
@@ -995,8 +613,10 @@ pub fn serialize(self: *const TextComponent, mapw: *utils.serial.MapWriter) util
                 try sel.value.format(w);
                 try w.flush();
             }
-            try mapw.fieldName("separator");
-            try sel.separator.serialize(mapw);
+            if (sel.separator) |sep| {
+                try mapw.fieldName("separator");
+                try sep.serialize(mapw);
+            }
         },
         .keybind => |kb| {
             try mapw.fieldName("keybind");
@@ -1032,6 +652,74 @@ pub fn serialize(self: *const TextComponent, mapw: *utils.serial.MapWriter) util
         }
     }
 
+    if (self.insertion) |ins| {
+        try mapw.fieldName("insertion");
+        try mapw.writeString(ins);
+    }
+
+    if (self.click_event != .none) {
+        try mapw.fieldName("click_event");
+        try mapw.beginAggregate();
+        try mapw.fieldName("action");
+        try mapw.writeString(@tagName(self.click_event));
+        switch (self.click_event) {
+            .none => unreachable,
+            .open_url => |s| {
+                try mapw.fieldName("url");
+                try mapw.writeString(s);
+            },
+            .open_file => |s| {
+                try mapw.fieldName("path");
+                try mapw.writeString(s);
+            },
+            .run_command, .suggest_command => |s| {
+                try mapw.fieldName("command");
+                try mapw.writeString(s);
+            },
+            .change_page => |p| {
+                try mapw.fieldName("page");
+                try mapw.writeInt(p);
+            },
+            .copy_to_clipboard => |v| {
+                try mapw.fieldName("value");
+                try mapw.writeString(v);
+            },
+            .show_dialog => {
+                @panic("Dialog not yet implemented");
+            },
+            .custom => |cus| {
+                try mapw.fieldName("id");
+                try cus.id.serialize(mapw);
+                if (cus.payload) |p| {
+                    try mapw.fieldName("payload");
+                    try mapw.writeString(p);
+                }
+            },
+        }
+        try mapw.endAggregate();
+    }
+
+    if (self.hover_event != .none) {
+        try mapw.fieldName("hover_event");
+        try mapw.beginAggregate();
+        try mapw.fieldName("action");
+        try mapw.writeString(@tagName(self.hover_event));
+        switch (self.hover_event) {
+            .none => unreachable,
+            .show_text => |tc| {
+                try mapw.fieldName("value");
+                try tc.serialize(mapw);
+            },
+            .show_item => {
+                @panic("Show Item not yet implemented");
+            },
+            .show_entity => {
+                @panic("Show Entity not yet implemented");
+            },
+        }
+        try mapw.endAggregate();
+    }
+
     try mapw.endAggregate();
 
     if (self.children.len > 0) {
@@ -1041,14 +729,247 @@ pub fn serialize(self: *const TextComponent, mapw: *utils.serial.MapWriter) util
 }
 
 pub fn deserialize(_arena: Allocator, mapr: *utils.serial.MapReader) utils.serial.MapReader.ReadError!TextComponent {
-    _ = _arena;
+    // May be more of a "hack" than any real expected behaviour but
+    // it works so idc
+    const gpa = mapr.arena.child_allocator;
+
+    var current: TextComponent = undefined;
     switch (try mapr.next()) {
         .string => |s| return .text(s, .{}),
-        .aggregate_start => {},
-        .array_start => {},
+        .aggregate_start => {
+            current = .empty;
+            var type_f: ?[]const u8 = null;
+
+            var first: enum {
+                none,
+                text,
+                translatable,
+                score,
+                selector,
+                keybind,
+                nbt,
+
+                fn maybeSet(self: *@This(), new: @This()) void {
+                    if (self.* == .none) self.* = new;
+                }
+            } = .none;
+
+            var text_f: ?[]const u8 = null;
+
+            var translate_f: ?[]const u8 = null;
+            var fallback_f: ?[]const u8 = null;
+            var with_f: std.ArrayList(TextComponent) = .empty;
+            defer with_f.deinit(gpa);
+
+            var score_f: ?@FieldType(Content, "score") = null;
+
+            var selector_f: ?[]const u8 = null;
+            // both used for selector and nbt
+            var separator_f: ?*TextComponent = null;
+            defer if (separator_f) |s| gpa.destroy(s);
+
+            var keybind_f: ?[]const u8 = null;
+
+            var source_f: ?[]const u8 = null;
+            var nbt_f: ?[]const u8 = null;
+            var interpret_f: ?bool = null;
+            var plain_f: ?bool = null;
+            var entity_f: ?[]const u8 = null;
+            var block_f: ?[]const u8 = null;
+            var storage_f: ?[]const u8 = null;
+
+            // formatting
+            var font_f: ?[]const u8 = null;
+            var bold_f: ?bool = null;
+            var italic_f: ?bool = null;
+            var underlined_f: ?bool = null;
+            var strikethrough_f: ?bool = null;
+            var obfuscated_f: ?bool = null;
+            var shadow_color_f: ?u32 = null;
+            var insertion_f: ?[]const u8 = null;
+            // var click_event_f: ?[]const u8 = null;
+            // var hover_event_f: ?[]const u8 = null;
+            var extra_f: std.ArrayList(TextComponent) = .empty;
+            defer extra_f.deinit(gpa);
+
+            // gather fields values
+            while (true) {
+                const token = try mapr.next();
+                const name = switch (token) {
+                    .string => |s| s,
+                    .aggregate_end => break,
+                    else => return error.UnexpectedToken,
+                };
+                if (eql(u8, name, "type")) {
+                    type_f = try nextDupeExpectString(_arena, mapr);
+                } else if (eql(u8, name, "text")) {
+                    text_f = try nextDupeExpectString(_arena, mapr);
+                    first.maybeSet(.text);
+                } else if (eql(u8, name, "translate")) {
+                    translate_f = try nextDupeExpectString(_arena, mapr);
+                    first.maybeSet(.translatable);
+                } else if (eql(u8, name, "fallback")) {
+                    fallback_f = try nextDupeExpectString(_arena, mapr);
+                } else if (eql(u8, name, "with")) {
+                    var tok = try mapr.next();
+                    if (tok != .array_start) return error.UnexpectedToken;
+                    with_f.clearRetainingCapacity();
+                    try with_f.ensureUnusedCapacity(gpa, tok.array_start.length orelse 0);
+                    while (true) {
+                        tok = try mapr.next();
+                        switch (tok) {
+                            .string, .aggregate_start, .array_start => try with_f.append(gpa, try deserialize(_arena, mapr)),
+                            .array_end => break,
+                            else => return error.UnexpectedToken,
+                        }
+                    }
+    
+                } else if (eql(u8, name, "score")) {
+                    score_f = try gatherScoreValue(_arena, mapr);
+                    first.maybeSet(.score);
+                } else if (eql(u8, name, "selector")) {
+                    selector_f = try nextDupeExpectString(_arena, mapr);
+                } else if (eql(u8, name, "separator")) {
+                    const sep_ptr = try gpa.create(TextComponent);
+                    errdefer gpa.destroy(sep_ptr);
+                    sep_ptr.* = try deserialize(_arena, mapr);
+
+                    if (separator_f) |sep| gpa.destroy(sep);
+                    separator_f = separator_f;
+                } else if (eql(u8, name, "keybind")) {
+                    keybind_f = try nextDupeExpectString(_arena, mapr);
+                    first.maybeSet(.keybind);
+                } else if (eql(u8, name, "nbt")) {
+                    nbt_f = try nextDupeExpectString(_arena, mapr);
+                    first.maybeSet(.nbt);
+                } else if (eql(u8, name, "source")) {
+                    source_f = try nextDupeExpectString(_arena, mapr);
+                } else if (eql(u8, name, "entity")) {
+                    entity_f = try nextDupeExpectString(_arena, mapr);
+                } else if (eql(u8, name, "block")) {
+                    block_f = try nextDupeExpectString(_arena, mapr);
+                } else if (eql(u8, name, "storage")) {
+                    storage_f = try nextDupeExpectString(_arena, mapr);
+                } else if (eql(u8, name, "interpret")) {
+                    interpret_f = try nextDecodeBool(mapr);
+                } else if (eql(u8, name, "plain")) {
+                    plain_f = try nextDecodeBool(mapr);
+                } else if (eql(u8, name, "font")) {
+                    font_f = try nextDupeExpectString(_arena, mapr);
+                } else if (eql(u8, name, "bold")) {
+                    bold_f = try nextDecodeBool(mapr);
+                } else if (eql(u8, name, "italic")) {
+                    italic_f = try nextDecodeBool(mapr);
+                } else if (eql(u8, name, "underlined")) {
+                    underlined_f = try nextDecodeBool(mapr);
+                } else if (eql(u8, name, "strikethrough")) {
+                    strikethrough_f = try nextDecodeBool(mapr);
+                } else if (eql(u8, name, "obfuscated")) {
+                    obfuscated_f = try nextDecodeBool(mapr);
+                } else if (eql(u8, name, "shadow_color")) {
+                    switch (try mapr.next()) {
+                        .int, .long => |v| shadow_color_f = @truncate(@as(u64, @bitCast(v))),
+                        .array_start => |arr| {
+                            if (arr.length) |l| {
+                                if (l != 4) return error.UnexpectedToken;
+                            }
+                            if (arr.type) |t| {
+                                if (t != .float) return error.UnexpectedToken;
+                            }
+                        },
+                        else => return error.UnexpectedToken,
+                    }
+                } else if (eql(u8, name, "insertion")) {
+                    insertion_f = try nextDupeExpectString(_arena, mapr);
+                }
+            }
+
+            const ContentType = @typeInfo(Content).@"union".tag_type.?;
+
+            const real_type: ContentType = blk: {
+                if (type_f) |typ| notype: {
+                    break :blk switch (std.meta.stringToEnum(ContentType, typ) orelse break :notype) {
+                        .int, .float => break :notype,
+                        else => |v| v,
+                    };
+                }
+
+                switch (first) {
+                    .none => return .empty,
+                    inline else => |tag| break :blk @field(ContentType, @tagName(tag)),
+                }
+            };
+
+            switch (real_type) {
+                .int, .float => unreachable,
+                .text => current.content = .{ .text = text_f orelse return error.MissingField },
+                .translatable => current.content = .{ .translatable = .{
+                    .id = translate_f orelse return error.MissingField,
+                    .fallback = fallback_f,
+                    .with = try _arena.dupe(TextComponent, with_f.items),
+                } },
+                .score => current.content = .{ .score = score_f orelse return error.MissingField },
+                .selector => {
+                    @panic("Selector parsing not yet implemented");
+                    //     current.content = .{ .selector = .{
+                    //     .value = try Selector.parse(selector_f orelse return error.MissingField),
+                    //     .separator = separator_f,
+                    // } }
+                },
+                .keybind => {
+                    const kb_translation = keybind_f orelse return error.MissingField;
+                    if (kb_translation.len < 4 or kb_translation.len > Keybind.max_formatted_len) {
+                        return error.LengthMismatch;
+                    }
+                    var buf: [Keybind.max_formatted_len]u8 = undefined;
+                    var bw = std.Io.Writer.fixed(&buf);
+                    bw.print("key.{s}", .{kb_translation}) catch unreachable;
+                    const real_kb = std.meta.stringToEnum(Keybind, bw.buffered());
+                    current.content = .{ .keybind = .{
+                        .key = real_kb orelse .unknown,
+                        .translation = kb_translation,
+                    } };
+                },
+                .nbt => {
+                    @panic("Nbt not yet implemented");
+                    // const Source = @FieldType(@FieldType(Content, "nbt"), "source");
+                    // var src: Source = undefined;
+                    // if (entity_f) |ent| {
+                    //     src = .{ .entity = try Selector.parse(ent) };
+                    // } else if (block_f) |block| {
+                    // }
+
+                    // current.content = .{ .nbt = .{
+                    //     .source =
+                    // } };
+                },
+            }
+        },
+        .array_start => |arr| {
+            var next_token = try mapr.peek();
+            switch (next_token) {
+                .string, .aggregate_start, .array_start => current = try deserialize(_arena, mapr),
+                .array_end => return .empty,
+                else => return error.UnexpectedToken,
+            }
+
+            var list = try std.ArrayList(TextComponent).initCapacity(gpa, (arr.length orelse 1) - 1);
+            defer list.deinit(gpa);
+
+            while (true) {
+                next_token = try mapr.peek();
+                switch (next_token) {
+                    .string, .aggregate_start, .array_start => try list.append(gpa, try deserialize(_arena, mapr)),
+                    .array_end => break,
+                    else => return error.UnexpectedToken,
+                }
+            }
+
+            current.children = try _arena.dupe(TextComponent, list.items);
+        },
         else => return error.UnexpectedToken,
     }
-    return .empty;
+    return current;
 }
 
 test {

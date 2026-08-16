@@ -2,12 +2,20 @@ const std = @import("std");
 const utils = @import("utils");
 
 const serial = utils.serial;
+const TextComponent = utils.TextComponent;
 
 pub fn main(init: std.process.Init) !void {
     var ca = utils.CountingAllocator.init(init.gpa, true);
     defer ca.deinit();
 
     const gpa = ca.allocator();
+
+    const tc = TextComponent.text("hiii", .{
+        .bold = true,
+        .children = &.{
+            .text("i want a steak", .{ .color = .red }),
+        },
+    });
 
     const nbt_data = blk: {
         var aw = std.Io.Writer.Allocating.init(gpa);
@@ -17,26 +25,7 @@ pub fn main(init: std.process.Init) !void {
         nbt_w.init(gpa, &aw.writer);
         defer nbt_w.deinit();
 
-        try nbt_w.beginArray(null);
-        {
-            try nbt_w.beginCompound();
-            {
-                try nbt_w.setFieldName("a");
-                try nbt_w.beginArray(null);
-                {
-                    try nbt_w.beginCompound();
-                    {
-                        try nbt_w.setFieldName("");
-                        try nbt_w.beginArray(null);
-                        try nbt_w.endArray();
-                    }
-                    try nbt_w.endCompound();
-                }
-                try nbt_w.endArray();
-            }
-            try nbt_w.endCompound();
-        }
-        try nbt_w.endArray();
+        try tc.serialize(&nbt_w.mapw);
 
         break :blk try aw.toOwnedSlice();
     };
