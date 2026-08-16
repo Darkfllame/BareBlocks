@@ -21,9 +21,14 @@ const buildzigzon: struct {
     };
 } = @import("build.zig.zon");
 
+const Build = std.Build;
+const LazyPath = Build.LazyPath;
+const Module = Build.Module;
+const Step = Build.Step;
+
 const version = std.SemanticVersion.parse(buildzigzon.version) catch unreachable;
 
-pub fn build(b: *std.Build) !void {
+pub fn build(b: *Build) !void {
     const target = b.standardTargetOptions(.{ .whitelist = &.{
         std.Target.Query{ .cpu_arch = .x86_64, .os_tag = .linux },
     } });
@@ -37,10 +42,7 @@ pub fn build(b: *std.Build) !void {
     //     .optimize = optimize,
     //     .preferred_linkage = .dynamic,
     // });
-    const coro_mod = b.dependency("coroutines", .{
-        .target = target,
-        .optimize = optimize,
-    }).module("coroutines");
+
     // const vulkan_mod = b.dependency("vulkan", .{
     //     .registry = vk_headers.path("registry/vk.xml"),
     //     .video = vk_headers.path("registry/video.xml"),
@@ -55,9 +57,17 @@ pub fn build(b: *std.Build) !void {
     // const sdl_mod = sdl_c.createModule();
     // sdl_mod.linkLibrary(sdl_dep.artifact("SDL3"));
 
+    const coro_mod = b.dependency("coroutines", .{
+        .target = target,
+        .optimize = optimize,
+    }).module("coroutines");
+
     const config = b.addOptions();
     config.addOption(std.SemanticVersion, "version", version);
     const config_mod = config.createModule();
+
+    const mc26_2_v = downloadMcVersion(b, downloadMCExec(b), "26.2");
+    const mc_generated = mcDatagenDir(b, mc26_2_v);
 
     const lm_mod = b.createModule(.{ .root_source_file = b.path("src/lm.zig") });
     const utils_mod = b.createModule(.{
@@ -86,7 +96,7 @@ pub fn build(b: *std.Build) !void {
         .use_lld = use_llvm,
     });
 
-    const local_imports = [_]std.Build.Module.Import{
+    const local_imports = [_]Module.Import{
         .{ .name = "main", .module = main_mod },
         .{ .name = "coro", .module = coro_mod },
         .{ .name = "core", .module = core_mod },
@@ -94,13 +104,19 @@ pub fn build(b: *std.Build) !void {
         .{ .name = "lm", .module = lm_mod },
         .{ .name = "net", .module = net_mod },
     };
-    const all_imports = local_imports ++ [_]std.Build.Module.Import{
+    const all_imports = local_imports ++ [_]Module.Import{
         // .{ .name = "vulkan", .module = vulkan_mod },
         // .{ .name = "sdl", .module = sdl_mod },
         .{ .name = "config", .module = config_mod },
     };
 
     b.installArtifact(main_exe);
+    b.getInstallStep().dependOn(&b.addInstallDirectory(.{
+        .source_dir = mc_generated,
+        .install_dir = .bin,
+        .install_subdir = "generated",
+        .include_extensions = &.{".json"},
+    }).step);
 
     const run_exe = b.addRunArtifact(main_exe);
     run_exe.step.dependOn(b.getInstallStep());
@@ -139,7 +155,7 @@ pub fn build(b: *std.Build) !void {
     }
 }
 
-fn compileShader(b: *std.Build, path: std.Build.LazyPath) std.Build.LazyPath {
+fn compileShader(b: *Build, path: LazyPath) LazyPath {
     const run_slangc = b.addSystemCommand(&.{
         "slangc", "-g",           "-target", "spirv",
         "-entry", "vertexMain",   "-stage",  "vertex",
@@ -149,4 +165,44 @@ fn compileShader(b: *std.Build, path: std.Build.LazyPath) std.Build.LazyPath {
     const out = run_slangc.addOutputFileArg("shader.spv");
     run_slangc.addFileArg(path);
     return out;
+}
+
+fn downloadMCExec(b: *Build) *Step.Compile {
+    const download_jar_mod = b.createModule(.{
+        .root_source_file = b.path("build/download_jar.zig"),
+        .target = b.resolveTargetQuery(.{}),
+        .optimize = .Debug,
+    });
+    const download_jar_exe = b.addExecutable(.{
+        .name = "download_jar",
+        .root_module = download_jar_mod,
+    });
+    return download_jar_exe;
+}
+
+fn downloadMcVersion(b: *Build, dl_mc_exec: *Step.Compile, _version: ?[]const u8) LazyPath {
+    const run_cmd = b.addRunArtifact(dl_mc_exec);
+    if (_version) |v| run_cmd.addArg(b.fmt("-v{s}", .{v}));
+    run_cmd.has_side_effects = false;
+    return run_cmd.addPrefixedOutputFileArg("-o", b.fmt("minecraft_{s}.jar", .{_version orelse "latest"}));
+}
+
+fn mcDatagenDir(b: *Build, _version: LazyPath) LazyPath {
+    const run_mc = b.addSystemCommand(&.{ "java", "-DbundlerMainClass=net.minecraft.data.Main", "-jar" });
+    run_mc.setCwd(mkdir(b, b.path("."), "datagen_run"));
+    _ = run_mc.captureStdOut(.{});
+    _ = run_mc.captureStdErr(.{});
+    run_mc.addFileArg(_version);
+    run_mc.addArgs(&.{ "--all", "--output" });
+    return  run_mc.addOutputFileArg("generated");
+
+}
+
+fn mkdir(b: *Build, root: LazyPath, path: []const u8) LazyPath {
+    const mkdir_cmd = b.addSystemCommand(&.{ "mkdir", "-p" });
+    mkdir_cmd.setCwd(root);
+    mkdir_cmd.addArg(path);
+    const gen = b.allocator.create(Build.GeneratedFile) catch @panic("OOM");
+    gen.* = .{ .step = &mkdir_cmd.step, .path = path };
+    return .{ .generated = .{ .file = gen } };
 }

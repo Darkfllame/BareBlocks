@@ -34,7 +34,8 @@ pub fn main(init: std.process.Init) !void {
     var args_it = try init.minimal.args.iterateAllocator(arena);
     _ = args_it.skip();
     while (args_it.next()) |arg| {
-        if (arg.len <= 1 or arg[0] != '-') return error.BadArgument;
+        if (arg.len <= 1) return error.BadArgument;
+        if (arg[0] != '-') return error.BadArgument;
 
         switch (arg[1]) {
             'v' => {
@@ -84,8 +85,9 @@ pub fn main(init: std.process.Init) !void {
     errdefer Io.Dir.cwd().deleteFile(init.io, filename) catch {};
     defer file.close(init.io);
 
-    var filew_buffer: [1024]u8 = undefined;
-    var filew = file.writer(init.io, &filew_buffer);
+    const filew_buffer = try init.gpa.alloc(u8, 8 * 1024);
+    defer init.gpa.free(filew_buffer);
+    var filew = file.writer(init.io, filew_buffer);
 
     var buffer: [1024]u8 = undefined;
     var bufw = Io.Writer.fixed(&buffer);

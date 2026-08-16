@@ -4,3 +4,4 @@ zig-pkg
 *.s
 players.csv
 out*
+datagen_run
