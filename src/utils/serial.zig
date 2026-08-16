@@ -263,6 +263,7 @@ pub const MapReader = struct {
     arena: std.heap.ArenaAllocator,
     /// Override the `max_value_len` parameter when `nextAlloc()` is called.
     max_value_len: usize = default_max_value_len,
+    cached_token: ?Token = null,
 
     pub const ReadError = Allocator.Error || IoReader.Error || error{
         UnexpectedToken,
@@ -270,12 +271,12 @@ pub const MapReader = struct {
         TooDeep,
         LengthMismatch,
         InvalidCharacter,
+        MissingField,
     };
 
     pub const NestingType = enum(u1) { aggregate, list };
 
     pub const VTable = struct {
-        peek: *const fn (self: *MapReader) ReadError!TokenType,
         next: *const fn (self: *MapReader, max_value_len: usize) ReadError!Token,
         skip: *const fn (self: *MapReader, target_nesting: usize) ReadError!void,
     };
@@ -302,7 +303,17 @@ pub const MapReader = struct {
         return @enumFromInt(self.nesting.peek());
     }
 
-    pub inline fn next(self: *MapReader) ReadError!Token {
+    pub fn peek(self: *MapReader) ReadError!TokenType {
+        if (self.cached_token) |t| return t;
+        self.cached_token = try self.next();
+        return self.cached_token.?;
+    }
+
+    pub fn next(self: *MapReader) ReadError!Token {
+        if (self.cached_token) |t| {
+            self.cached_token = null;
+            return t;
+        }
         return self.vtable.next(self, self.max_value_len);
     }
 
