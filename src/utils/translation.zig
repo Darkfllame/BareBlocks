@@ -165,15 +165,7 @@ pub fn get(name: []const u8) []const Component {
 }
 
 pub fn getKeybind(kb: utils.Keybind) []const u8 {
-    const max_kb_len = comptime blk: {
-        var max: usize = 0;
-        for (@typeInfo(utils.Keybind).@"enum".fields) |f| {
-            max = @max(max, f.name.len);
-        }
-        break :blk max;
-    };
-
-    var buf: [4 + max_kb_len]u8 = undefined;
+    var buf: [4 + utils.Keybind.max_formatted_len]u8 = undefined;
     var fba = std.Io.Writer.fixed(&buf);
 
     fba.print("key.{t}", .{kb}) catch unreachable;

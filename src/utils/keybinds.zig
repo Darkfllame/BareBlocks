@@ -69,6 +69,14 @@ pub const Keybind = enum {
     @"debug.profilingChart",
     @"debug.fpsChart",
     @"debug.networkCharts",
+
+    pub const max_formatted_len = blk: {
+        var max: usize = 0;
+        for (@typeInfo(Keybind).@"enum".fields) |f| {
+            max = @max(max, f.name.len);
+        }
+        break :blk max;
+    };
 };
 
 test {
