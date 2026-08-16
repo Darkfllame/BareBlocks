@@ -933,11 +933,12 @@ pub const SerialWriter = struct {
             .string => return error.InvalidState,
         };
         new_state.streaming = is_streaming;
+        new_state.data = .{ .compound = undefined };
         if (!is_streaming) {
-            new_state.data = .{ .compound = .{
+            new_state.data.compound = .{
                 .buffer = .{ .owned = .empty },
                 .wrapper = .dont_know,
-            } };
+            };
             if (old_state.data == .compound) {
                 new_state.data.compound.shareBuffer(&old_state.data.compound);
             }
@@ -1011,7 +1012,6 @@ pub const SerialWriter = struct {
 
 pub const SerialReader = struct {
     const vtable = MapReader.VTable{
-        .peek = peekImpl,
         .next = nextImpl,
         .skip = skipImpl,
     };
@@ -1024,11 +1024,6 @@ pub const SerialReader = struct {
         list_value,
         value_end,
     };
-
-    fn peekImpl(mapr: *MapReader) MapReader.ReadError!serial.TokenType {
-        _ = mapr;
-        @panic("TODO: Unimplemented peekImpl");
-    }
 
     fn nextImpl(mapr: *MapReader, max_value_len: usize) MapReader.ReadError!serial.Token {
         const self: *SerialReader = @fieldParentPtr("mapr", mapr);
