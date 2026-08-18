@@ -79,11 +79,11 @@ pub fn Vec(comptime T: type, comptime DIM: comptime_int) type {
         fn Field(comptime i: comptime_int) type {
             return struct {
                 pub inline fn get(self: Self) T {
-                    return self.vec[i];
+                    return self.array[i];
                 }
 
                 pub inline fn set(self: *Self, v: T) void {
-                    self.vec[i] = v;
+                    self.array[i] = v;
                 }
             };
         }
@@ -97,20 +97,20 @@ pub fn Vec(comptime T: type, comptime DIM: comptime_int) type {
 
         fn newCropped(_x: T, _y: T, _z: T, _w: T) Self {
             var res: Self = undefined;
-            res.vec[0] = _x;
-            res.vec[1] = _y;
-            if (DIM >= 3) res.vec[2] = _z;
-            if (DIM >= 4) res.vec[3] = _w;
+            res.array[0] = _x;
+            res.array[1] = _y;
+            if (DIM >= 3) res.array[2] = _z;
+            if (DIM >= 4) res.array[3] = _w;
             return res;
         }
         fn new2(_x: T, _y: T) Self {
-            return .{ .vec = .{ _x, _y } };
+            return .{ .array = .{ _x, _y } };
         }
         fn new3(_x: T, _y: T, _z: T) Self {
-            return .{ .vec = .{ _x, _y, _z } };
+            return .{ .array = .{ _x, _y, _z } };
         }
         fn new4(_x: T, _y: T, _z: T, _w: T) Self {
-            return .{ .vec = .{ _x, _y, _z, _w } };
+            return .{ .array = .{ _x, _y, _z, _w } };
         }
 
         fn convert(v: anytype, comptime get_value: bool) if (get_value) Self else bool {
@@ -145,11 +145,11 @@ pub fn Vec(comptime T: type, comptime DIM: comptime_int) type {
                 }
                 if (get_value) {
                     if (subinfo.child == T) {
-                        return .{ .vec = v };
+                        return .{ .array = v };
                     }
                     var res: Self = undefined;
                     for (0..DIM) |i| {
-                        res.vec[i] = _castArithType(subinfo.child, T, v[i]);
+                        res.array[i] = _castArithType(subinfo.child, T, v[i]);
                     }
                     return res;
                 } else return true;
@@ -184,8 +184,12 @@ pub fn Vec(comptime T: type, comptime DIM: comptime_int) type {
             return if (get_value) @compileError("Cannot convert \"" ++ @typeName(V) ++ "\" to " ++ @typeName(Self)) else false;
         }
 
+        fn vec(self: Self) @Vector(DIM, T) {
+            return self.array;
+        }
+
         /// The data of this vector as a SIMD type.
-        vec: @Vector(DIM, T),
+        // vec: @Vector(DIM, T),
         /// The data of this vector as a simple array type.
         array: [DIM]T,
 
@@ -227,7 +231,7 @@ pub fn Vec(comptime T: type, comptime DIM: comptime_int) type {
 
         /// **Returns**: A new uniformely-scaled vector
         pub fn newUniform(s: T) Self {
-            return .{ .vec = @splat(s) };
+            return .{ .array = @splat(s) };
         }
 
         /// The horizontal component of the vector.
@@ -310,7 +314,7 @@ pub fn Vec(comptime T: type, comptime DIM: comptime_int) type {
                     }
                     break :shuffle_mask mask;
                 };
-                break :ret .{ .vec = @shuffle(T, self.vec, @Vector(2, T){ 0, 1 }, mask) };
+                break :ret .{ .array = @shuffle(T, self.array, @Vector(2, T){ 0, 1 }, mask) };
             };
         }
 
@@ -328,7 +332,7 @@ pub fn Vec(comptime T: type, comptime DIM: comptime_int) type {
             if (NewType == T) return self;
             var result: Vec(NewType, DIM) = undefined;
             inline for (&result.array, 0..) |*f, i| {
-                f.* = _castArithType(T, NewType, self.vec[i]);
+                f.* = _castArithType(T, NewType, self.array[i]);
             }
             return result;
         }
@@ -362,7 +366,7 @@ pub fn Vec(comptime T: type, comptime DIM: comptime_int) type {
         /// - This functions uses `from` to convert
         ///   `b` to `Self`.
         pub fn dot(self: Self, b: Self) T {
-            return @reduce(.Add, self.vec * b.vec);
+            return @reduce(.Add, self.vec() * b.vec());
         }
         /// **Returns**: The cross product for the given vectors.
         ///
@@ -436,60 +440,60 @@ pub fn Vec(comptime T: type, comptime DIM: comptime_int) type {
         /// **Note**:
         /// - Uses `from` to convert `b` to `Self`.
         pub fn add(self: Self, b: Self) Self {
-            return from(self.vec + b.vec);
+            return from(self.vec() + b.vec());
         }
         /// **Note**:
         /// - Uses `from` to convert `b` to `Self`.
         pub fn sub(self: Self, b: Self) Self {
-            return from(self.vec - b.vec);
+            return from(self.vec() - b.vec());
         }
         pub fn neg(self: Self) Self {
-            return from(-self.vec);
+            return from(-self.vec());
         }
         /// **Note**:
         /// - Uses `from` to convert `b` to `Self`.
         pub fn mul(self: Self, b: Self) Self {
-            return .{ .vec = self.vec * b.vec };
+            return .{ .array = self.vec() * b.vec() };
         }
         /// **Note**:
         /// - Uses `from` to convert `b` to `Self`.
         pub fn div(self: Self, b: Self) Self {
-            return from(self.vec / b.vec);
+            return from(self.vec() / b.vec());
         }
         pub fn mod(self: Self, b: Self) Self {
-            return from(@mod(self.vec, b.vec));
+            return from(@mod(self.vec(), b.vec()));
         }
         pub fn rem(self: Self, b: Self) Self {
-            return from(@rem(self.vec, b.vec));
+            return from(@rem(self.vec(), b.vec()));
         }
         pub fn min(self: Self, b: Self) Self {
-            return from(@min(self.vec, b.vec));
+            return from(@min(self.vec(), b.vec()));
         }
         pub fn max(self: Self, b: Self) Self {
-            return from(@max(self.vec, from(b).vec));
+            return from(@max(self.vec(), from(b).vec()));
         }
         pub fn componentMin(self: Self) T {
-            return @reduce(.Min, self.vec);
+            return @reduce(.Min, self.vec());
         }
         pub fn componentMax(self: Self) T {
-            return @reduce(.Max, self.vec);
+            return @reduce(.Max, self.vec());
         }
         pub fn abs(self: Self) Self {
-            return from(@abs(self.vec));
+            return from(@abs(self.vec()));
         }
         pub fn round(self: Self) Self {
-            return from(@round(self.vec));
+            return from(@round(self.vec()));
         }
         pub fn floor(self: Self) Self {
-            return from(@floor(self.vec));
+            return from(@floor(self.vec()));
         }
         pub fn ceil(self: Self) Self {
-            return from(@ceil(self.vec));
+            return from(@ceil(self.vec()));
         }
 
         /// Checks raw equality (no threshold for floats).
         pub fn eql(self: Self, b: Self) bool {
-            return @reduce(.And, self.vec == b.vec);
+            return @reduce(.And, self.vec() == b.vec());
         }
         pub fn approxEqAbs(self: Self, b: Self, tolerance: T) bool {
             inline for (self.array, 0..) |v, i| {
@@ -640,11 +644,11 @@ pub fn Mat(comptime T: type, comptime DIM: comptime_int) type {
         /// The matrix as a DIM x DIM array of T.
         array: [DIM * DIM]T,
         /// The matrix as a DIM x DIM vector of T.
-        vec: @Vector(DIM * DIM, T),
+        // vec: @Vector(DIM * DIM, T),
         /// The matrix as an array of array of T.
         arrays: [DIM][DIM]T,
         /// The matrix as an array of vector of T.
-        vecs: [DIM]@Vector(DIM, T),
+        // vecs: [DIM]@Vector(DIM, T),
 
         pub const LM_TYPE = LMType.matrix;
 

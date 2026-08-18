@@ -131,15 +131,15 @@ pub fn build(b: *Build) !void {
     };
 
     b.installArtifact(main_exe);
-    // if (false) {
-    b.getInstallStep().dependOn(&b.addInstallBinFile(mc_manifest, "manifest.json").step);
-    b.getInstallStep().dependOn(&b.addInstallBinFile(mc26_2_meta, "meta.json").step);
-    b.getInstallStep().dependOn(&b.addInstallBinFile(mc26_2_jar, "minecraft-26.2.jar").step);
-    // }
+    if (false) {
+        b.getInstallStep().dependOn(&b.addInstallBinFile(mc_manifest, "manifest.json").step);
+        b.getInstallStep().dependOn(&b.addInstallBinFile(mc26_2_meta, "meta.json").step);
+        b.getInstallStep().dependOn(&b.addInstallBinFile(mc26_2_jar, "minecraft-26.2.jar").step);
+    }
 
     const run_exe = b.addRunArtifact(main_exe);
     run_exe.step.dependOn(b.getInstallStep());
-    run_exe.addArgs(b.args orelse &.{});
+    run_exe.addPassthruArgs();
     run_exe.setCwd(b.path("."));
 
     const run_step = b.step("run", "Run the executable");

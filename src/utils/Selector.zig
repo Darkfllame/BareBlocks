@@ -36,18 +36,20 @@ pub const at_n = Selector{ .sort = .nearest };
 pub const ArgumentsMask = struct {
     const Packed = blk: {
         const info = @typeInfo(Arguments).@"struct";
-        var types: [info.fields.len]type = undefined;
+        const fcount = info.field_names.len;
+
+        var types: [fcount]type = undefined;
         @memset(&types, bool);
-        var names: [info.fields.len][]const u8 = undefined;
-        var attribs: [info.fields.len]std.builtin.Type.StructField.Attributes = undefined;
+        var names: [fcount][]const u8 = undefined;
+        var attribs: [fcount]std.builtin.Type.Struct.FieldAttributes = undefined;
         @memset(&attribs, .{ .default_value_ptr = &@as(bool, false) });
-        for (info.fields, &names) |f, *out| {
-            out.* = f.name;
+        for (info.field_names, &names) |name, *out| {
+            out.* = name;
         }
 
         break :blk @Struct(
             .@"packed",
-            @Int(.unsigned, info.fields.len),
+            @Int(.unsigned, fcount),
             &names,
             &types,
             &attribs,

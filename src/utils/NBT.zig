@@ -13,7 +13,7 @@ const MapReader = serial.MapReader;
 const assert = std.debug.assert;
 
 const logger = std.log.scoped(.NBT);
-const is_debug = builtin.mode == .Debug;
+const is_debug = builtin.optimize == .debug;
 
 const StreamedValue = union(ValueTag) {
     void,

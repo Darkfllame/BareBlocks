@@ -2,13 +2,13 @@
     .name = .bare_blocks,
     .fingerprint = 0xb1f619523bcf4010,
     .version = "0.0.1",
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0-dev.1778+767d25269",
 
     .dependencies = .{
         .coroutines = .{ .path = "./coroutines" },
         .vulkan = .{
-            .url = "git+https://github.com/Darkfllame/vulkan-zig.git#3a60f9abf7f2c49579fd4a4aa1d0f4bd53325134",
-            .hash = "vulkan-0.0.0-r7YtxxaJAwBiuKx_FnWP-JjUmwMvbMQl5m_P_UY05Ckd",
+            .url = "git+https://github.com/Darkfllame/vulkan-zig#1772ae26829ce54afeba0f06821e2ec582ecfab0",
+            .hash = "vulkan-0.0.0-r7Ytx1iPAwD9PYl-gTsfYDE5kCLpw5UIfR1tqcjLtG8C",
             .lazy = true,
         },
         .vulkan_headers = .{
@@ -17,8 +17,8 @@
             .lazy = true,
         },
         .sdl = .{
-            .url = "git+https://github.com/castholm/SDL#21c6b79840d123e94a9f183f4b0fa1731668f48d",
-            .hash = "sdl-0.5.0+3.4.8-SDL--k4DpgH323IfF6cEaGzKUdtUQv1azbBmmcv0RMAu",
+            .url = "git+https://github.com/castholm/SDL.git#fb2d799c4778832a34ccb3739e40dded700684bd",
+            .hash = "sdl-0.5.3+3.4.14-SDL--v4eqAGuIKFsspMVxBxZf1OIEmmH-yHDdEl9ZRdX",
             .lazy = true,
         },
     },

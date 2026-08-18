@@ -33,6 +33,24 @@ fn checkCancel(ud: ?*anyopaque) Io.Cancelable!void {
     if (co.state.canceled) return error.Canceled;
 }
 
+fn operate(userdata: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.Operation.Result{
+    const co: *AnyCoroutine = @ptrCast(@alignCast(userdata));
+
+    switch (operation) {
+        .net_read => |nr| {
+            const res = netRead(co, nr.socket_handle, nr.data);
+            if (res == error.Canceled) return error.Canceled;
+            return .{.net_read=@errorCast(res)};
+        },
+        .net_write => |nw| {
+            const res = netWrite(co, nw.socket_handle, nw.header, nw.data, nw.splat);
+            if (res == error.Canceled) return error.Canceled;
+            return .{.net_write=@errorCast(res)};
+        },
+        else => std.debug.panic("Operation {t} unsupported", .{operation}),
+    }
+}
+
 //#region Time
 fn now(_: ?*anyopaque, clock: Io.Clock) Io.Timestamp {
     const clock_id = clockToPosix(clock);
@@ -154,7 +172,7 @@ fn getSocketOption(fd: posix.fd_t, level: i32, opt_name: u32) !u32 {
 }
 
 fn openSocketPosix(family: posix.sa_family_t, options: IpAddress.BindOptions) !posix.socket_t {
-    if (options.ip6_only and posix.IPV6 == void) return error.OptionUnsupported;
+    if (options.ip6_only != null and posix.IPV6 == void) return error.OptionUnsupported;
 
     const mode, const protocol = try posixSocketModeProtocol(family, options.mode, options.protocol);
     const flags: u32 = mode | if (socket_flags_unsupported)
@@ -182,12 +200,12 @@ fn openSocketPosix(family: posix.sa_family_t, options: IpAddress.BindOptions) !p
     };
     errdefer closeFd(socket_fd);
 
-    if (options.ip6_only) {
+    if (options.ip6_only) |status| {
         try setSocketOption(
             socket_fd,
             posix.IPPROTO.IPV6,
             posix.IPV6.V6ONLY,
-            0,
+            @intFromBool(status),
         );
     }
 
@@ -599,8 +617,8 @@ fn netSocketCreatePair(_: ?*anyopaque, options: net.Socket.CreatePairOptions) ne
     }
 }
 
-fn netClose(_: ?*anyopaque, handles: []const net.Socket.Handle) void {
-    for (handles) |handle| closeFd(handle);
+fn netClose(_: ?*anyopaque, sockets: []const net.Socket) void {
+    for (sockets) |sock| closeFd(sock.handle);
 }
 
 fn netShutdown(_: ?*anyopaque, handle: net.Socket.Handle, how: net.ShutdownHow) net.ShutdownError!void {
@@ -624,9 +642,7 @@ fn netShutdown(_: ?*anyopaque, handle: net.Socket.Handle, how: net.ShutdownHow) 
     }
 }
 
-fn netRead(userdata: ?*anyopaque, fd: net.Socket.Handle, data: [][]u8) net.Stream.Reader.Error!usize {
-    const co: *AnyCoroutine = @ptrCast(@alignCast(userdata));
-
+fn netRead(co: *AnyCoroutine, fd: net.Socket.Handle, data: [][]u8) net.Stream.Reader.Error!usize {
     var iovecs_buffer: [Threaded.max_iovecs_len]posix.iovec = undefined;
     var i: usize = 0;
     for (data) |buf| {
@@ -653,7 +669,7 @@ fn netRead(userdata: ?*anyopaque, fd: net.Socket.Handle, data: [][]u8) net.Strea
             .NOBUFS, .NOMEM => error.SystemResources,
             .NOTCONN => error.SocketUnconnected,
             .CONNRESET => error.ConnectionResetByPeer,
-            .TIMEDOUT => error.Timeout,
+            .TIMEDOUT => error.ConnectionTimedOut,
             .PIPE => error.SocketUnconnected,
             .NETDOWN => error.NetworkDown,
             .INVAL, .FAULT, .BADF => |err| errnoBug(err), // File descriptor used after closed.
@@ -664,14 +680,12 @@ fn netRead(userdata: ?*anyopaque, fd: net.Socket.Handle, data: [][]u8) net.Strea
 }
 
 fn netWrite(
-    userdata: ?*anyopaque,
+    co: *AnyCoroutine,
     fd: net.Socket.Handle,
     header: []const u8,
     data: []const []const u8,
     splat: usize,
 ) net.Stream.Writer.Error!usize {
-    const co: *AnyCoroutine = @ptrCast(@alignCast(userdata));
-
     var iovecs: [Threaded.max_iovecs_len]posix.iovec_const = undefined;
     var msg: posix.msghdr_const = .{
         .name = null,
@@ -731,6 +745,7 @@ fn netWrite(
             .NETUNREACH => error.NetworkUnreachable,
             .PIPE, .NOTCONN => error.SocketUnconnected,
             .NETDOWN => error.NetworkDown,
+            .TIMEDOUT => error.ConnectionTimedOut,
 
             .ACCES,
             .BADF, // File descriptor used after closed.
@@ -870,7 +885,7 @@ pub const vtable = Io.VTable{
     .futexWaitUncancelable = private.unreachIoFunc("futexWaitUncancelable"),
     .futexWake = private.unreachIoFunc("futexWake"),
 
-    .operate = private.unreachIoFunc("operate"),
+    .operate = operate,
     .batchAwaitAsync = private.unreachIoFunc("batchAwaitAsync"),
     .batchAwaitConcurrent = private.unreachIoFunc("batchAwaitConcurrent"),
     .batchCancel = private.unreachIoFunc("batchCancel"),
@@ -965,10 +980,7 @@ pub const vtable = Io.VTable{
     .netSocketCreatePair = netSocketCreatePair,
     .netClose = netClose,
     .netShutdown = netShutdown,
-    .netRead = netRead,
-    .netWrite = netWrite,
     .netWriteFile = netWriteFileUnimplemented,
-    .netSend = netSendUnimplemented,
     .netInterfaceNameResolve = netInterfaceNameResolve,
     .netInterfaceName = netInterfaceNameUnimplemented,
     .netLookup = netLookupUnimplemented,

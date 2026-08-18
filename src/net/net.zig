@@ -133,7 +133,12 @@ pub const Connection = struct {
         InvalidLength,
         DecompressionFailed,
     };
-    const CoroWriteError = error{ Disconnected, ConnectionResetByPeer, SystemResources };
+    const CoroWriteError = error{
+        Disconnected,
+        ConnectionResetByPeer,
+        SystemResources,
+        Timeout,
+    };
 
     const PacketNode = struct {
         node: std.DoublyLinkedList.Node,
@@ -148,6 +153,13 @@ pub const Connection = struct {
             return @as([*]const u8, @ptrCast(self))[@sizeOf(PacketNode)..][0..self.length];
         }
     };
+
+    fn asStream(self: *const Connection) net.Stream {
+        return .{ .socket = .{
+            .handle = self.stream_handle,
+            .address = self.ip_address,
+        } };
+    }
 
     fn streamImpl(io_r: *Io.Reader, io_w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
         const dest = limit.slice(try io_w.writableSliceGreedy(1));
@@ -167,12 +179,19 @@ pub const Connection = struct {
         const dest = iovecs_buffer[0..dest_n];
         assert(dest[0].len > 0);
         const start_time = Io.Timestamp.now(static_io, .boot);
-        const n = io.vtable.netRead(io.userdata, conn.stream_handle, dest) catch |err| {
+        const res = io.operate(.{ .net_read = .{
+            .socket_handle = conn.stream_handle,
+            .data = dest,
+        } }) catch |e| {
+            conn.read_error = e;
+            return error.ReadFailed;
+        };
+        const n = res.net_read catch |err| {
             conn.read_error = err;
             return error.ReadFailed;
         };
         if (start_time.untilNow(static_io, .boot).nanoseconds >= conn.timeout.nanoseconds) {
-            conn.read_error = error.Timeout;
+            conn.read_error = error.ConnectionTimedOut;
             return error.ReadFailed;
         }
         if (n == 0) {
@@ -189,7 +208,16 @@ pub const Connection = struct {
         const conn: *Connection = @alignCast(@fieldParentPtr("writer", io_w));
         const io = conn.write_coro.any.io();
         const buffered = io_w.buffered();
-        const n = io.vtable.netWrite(io.userdata, conn.stream_handle, buffered, data, splat) catch |err| {
+        const res = io.operate(.{ .net_write = .{
+            .socket_handle = conn.stream_handle,
+            .header = buffered,
+            .data = data,
+            .splat = splat,
+        } }) catch |e| {
+            conn.write_error = e;
+            return error.WriteFailed;
+        };
+        const n = res.net_write catch |err| {
             conn.write_error = err;
             return error.WriteFailed;
         };
@@ -218,7 +246,8 @@ pub const Connection = struct {
                 error.ReadFailed => return switch (self.read_error.?) {
                     error.SocketUnconnected, error.Canceled => break,
                     error.NetworkDown => error.Disconnected,
-                    error.SystemResources, error.ConnectionResetByPeer, error.Timeout => |err| err,
+                    error.ConnectionTimedOut => error.Timeout,
+                    error.SystemResources, error.ConnectionResetByPeer => |err| err,
                     error.AccessDenied, error.Unexpected => unreachable,
                 },
                 error.DecompressionFailed,
@@ -251,6 +280,7 @@ pub const Connection = struct {
                     error.SocketNotBound,
                     error.HostUnreachable,
                     => error.Disconnected,
+                    error.ConnectionTimedOut => error.Timeout,
                     error.ConnectionResetByPeer, error.SystemResources => |err| err,
                     error.AddressFamilyUnsupported, error.Unexpected, error.FastOpenAlreadyInProgress => unreachable,
                 };
@@ -476,9 +506,10 @@ pub const Connection = struct {
 
     pub const ReconfigureOptions = struct {
         fn empty(self: ReconfigureOptions) bool {
-            inline for (@typeInfo(ReconfigureOptions).@"struct".fields) |f| {
-                comptime if (@typeInfo(f.type) != .optional) continue;
-                if (@field(self, f.name) != null) return false;
+            const info = @typeInfo(ReconfigureOptions).@"struct";
+            inline for (info.field_names, info.field_types) |fname, ftype| {
+                comptime if (@typeInfo(ftype) != .optional) continue;
+                if (@field(self, fname) != null) return false;
             }
             return true;
         }
@@ -539,7 +570,7 @@ pub const Connection = struct {
             logger.debug("[{f}] Error occured when closing connection: {t}", .{ self, e });
         };
         while (self.popPacket()) |packet| allocator.free(packet.getBytes());
-        static_io.vtable.netClose(static_io.userdata, (&self.stream_handle)[0..1]);
+        static_io.vtable.netClose(static_io.userdata, (&self.asStream().socket)[0..1]);
     }
 
     /// Doesn't reallocate/duplicate anything.
@@ -643,7 +674,7 @@ pub const Connection = struct {
             rl.sent = 0;
             rl.received = 0;
             if (@as(RateLimited.Count, @trunc(rl.average_received)) >= rl.limit) {
-                logger.warn("[{f}] Exceeded rate-limit (sent {d} packets per seconds)", .{self, rl.average_received});
+                logger.warn("[{f}] Exceeded rate-limit (sent {d} packets per seconds)", .{ self, rl.average_received });
                 try self.disconnect_callback(self, &.exceeded_packet_rate);
                 try self.shutdown(.recv);
             }

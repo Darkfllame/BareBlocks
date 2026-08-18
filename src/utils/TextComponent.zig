@@ -46,18 +46,20 @@ const HoverEvent = union(enum) {
 const Formatting = struct {
     const MaskPacked = blk: {
         const info = @typeInfo(Formatting).@"struct";
-        var types: [info.fields.len]type = undefined;
+        const fcount = info.field_names.len;
+
+        var types: [fcount]type = undefined;
         @memset(&types, bool);
-        var names: [info.fields.len][]const u8 = undefined;
-        var attribs: [info.fields.len]std.builtin.Type.StructField.Attributes = undefined;
+        var names: [fcount][]const u8 = undefined;
+        var attribs: [fcount]std.builtin.Type.Struct.FieldAttributes = undefined;
         @memset(&attribs, .{ .default_value_ptr = &@as(bool, false) });
-        for (info.fields, &names) |f, *out| {
-            out.* = f.name;
+        for (info.field_names, &names) |name, *out| {
+            out.* = name;
         }
 
         break :blk @Struct(
             .@"packed",
-            @Int(.unsigned, info.fields.len),
+            @Int(.unsigned, fcount),
             &names,
             &types,
             &attribs,
@@ -631,11 +633,12 @@ pub fn serialize(self: *const TextComponent, mapw: *utils.serial.MapWriter) util
         .nbt => @panic("Not Yet Implemented"), // TODO: TextComponent::serialize<content.nbt>
     }
 
-    inline for (@typeInfo(Formatting).@"struct".fields) |f| {
-        if (@field(self.formatting_mask.sub, f.name)) {
-            const value = @field(self.formatting, f.name);
-            try mapw.fieldName(f.name);
-            switch (f.type) {
+    const formatting_info = @typeInfo(Formatting).@"struct";
+    inline for (formatting_info.field_names, formatting_info.field_types) |fname, ftype| {
+        if (@field(self.formatting_mask.sub, fname)) {
+            const value = @field(self.formatting, fname);
+            try mapw.fieldName(fname);
+            switch (ftype) {
                 Color => switch (value) {
                     else => |tag| try mapw.writeString(@tagName(tag)),
                     _ => |tag| {
@@ -823,7 +826,6 @@ pub fn deserialize(_arena: Allocator, mapr: *utils.serial.MapReader) utils.seria
                             else => return error.UnexpectedToken,
                         }
                     }
-    
                 } else if (eql(u8, name, "score")) {
                     score_f = try gatherScoreValue(_arena, mapr);
                     first.maybeSet(.score);
