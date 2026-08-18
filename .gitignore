@@ -5,3 +5,4 @@ zig-pkg
 players.csv
 out*
 datagen_run
+*.nbt

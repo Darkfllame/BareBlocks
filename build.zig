@@ -80,14 +80,26 @@ pub fn build(b: *Build) !void {
         run_cmd.addArg("26.2");
         break :blk file;
     };
+    const mc26_2_assets_json = blk: {
+        const run_cmd = b.addRunArtifact(mc_downloader);
+        run_cmd.addArgs(&.{ "assets", "json" });
+        run_cmd.addFileArg(mc26_2_meta);
+        break :blk run_cmd.addOutputFileArg("assets.json");
+    };
+    const mc26_2_assets = blk: {
+        const run_cmd = b.addRunArtifact(mc_downloader);
+        run_cmd.has_side_effects = true;
+        run_cmd.addArgs(&.{ "assets", "files" });
+        run_cmd.addFileArg(mc26_2_assets_json);
+        break :blk run_cmd.addOutputDirectoryArg("assets");
+    };
     const mc26_2_jar = blk: {
         const run_cmd = b.addRunArtifact(mc_downloader);
-        run_cmd.addArg("jar");
+        run_cmd.addArgs(&.{ "jar", "server" });
         run_cmd.addFileArg(mc26_2_meta);
-        run_cmd.addArg("server");
         break :blk run_cmd.addOutputFileArg("minecraft-26.2.jar");
     };
-    // const mc_generated = mcDatagenDir(b, mc26_2_v);
+    const mc_generated = mcDatagenDir(b, mc26_2_jar);
 
     const lm_mod = b.createModule(.{ .root_source_file = b.path("src/lm.zig") });
     const utils_mod = b.createModule(.{
@@ -135,6 +147,12 @@ pub fn build(b: *Build) !void {
     b.getInstallStep().dependOn(&b.addInstallBinFile(mc_manifest, "manifest.json").step);
     b.getInstallStep().dependOn(&b.addInstallBinFile(mc26_2_meta, "meta.json").step);
     b.getInstallStep().dependOn(&b.addInstallBinFile(mc26_2_jar, "minecraft-26.2.jar").step);
+    b.getInstallStep().dependOn(&b.addInstallDirectory(.{
+        .source_dir = mc_generated,
+        .install_dir = .bin,
+        .install_subdir = "generated",
+        .include_extensions = &.{".json"},
+    }).step);
     // }
 
     const run_exe = b.addRunArtifact(main_exe);
@@ -144,6 +162,13 @@ pub fn build(b: *Build) !void {
 
     const run_step = b.step("run", "Run the executable");
     run_step.dependOn(&run_exe.step);
+
+    const assets_step = b.step("assets", "Download assets from mojang's servers");
+    assets_step.dependOn(&b.addInstallDirectory(.{
+        .source_dir = mc26_2_assets,
+        .install_dir = .bin,
+        .install_subdir = "assets",
+    }).step);
 
     const test_step = b.step("test", "Run test untis");
     const check_step = b.step("check", "Run semantic analysis");
@@ -190,7 +215,7 @@ fn downloadMCExec(b: *Build) *Step.Compile {
     const download_jar_mod = b.createModule(.{
         .root_source_file = b.path("build/mc_downloader.zig"),
         .target = b.resolveTargetQuery(.{}),
-        .optimize = .ReleaseSafe,
+        .optimize = .Debug,
     });
     const download_jar_exe = b.addExecutable(.{
         .name = "mc_downloader",
@@ -199,19 +224,12 @@ fn downloadMCExec(b: *Build) *Step.Compile {
     return download_jar_exe;
 }
 
-fn downloadMcVersion(b: *Build, dl_mc_exec: *Step.Compile, _version: ?[]const u8) LazyPath {
-    const run_cmd = b.addRunArtifact(dl_mc_exec);
-    if (_version) |v| run_cmd.addArg(b.fmt("-v{s}", .{v}));
-    run_cmd.has_side_effects = false;
-    return run_cmd.addPrefixedOutputFileArg("-o", b.fmt("minecraft_{s}.jar", .{_version orelse "latest"}));
-}
-
-fn mcDatagenDir(b: *Build, _version: LazyPath) LazyPath {
+fn mcDatagenDir(b: *Build, jar_path: LazyPath) LazyPath {
     const run_mc = b.addSystemCommand(&.{ "java", "-DbundlerMainClass=net.minecraft.data.Main", "-jar" });
     run_mc.setCwd(mkdir(b, b.path("."), "datagen_run"));
     _ = run_mc.captureStdOut(.{});
     _ = run_mc.captureStdErr(.{});
-    run_mc.addFileArg(_version);
+    run_mc.addFileArg(jar_path);
     run_mc.addArgs(&.{ "--all", "--output" });
     return run_mc.addOutputFileArg("generated");
 }

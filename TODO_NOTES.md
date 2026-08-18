@@ -1,0 +1,8 @@
+- Pack assets and data in output executables ?
+    - Only data and `minecraft/lang` in servers
+    - Everything included in client
+    - Make it unpack itself
+        - In tmp or cwd ?
+    - Compressed or just tar ?
+- Packet auto registration with datagens
+- 
