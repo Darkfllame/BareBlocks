@@ -66,8 +66,28 @@ pub fn build(b: *Build) !void {
     config.addOption(std.SemanticVersion, "version", version);
     const config_mod = config.createModule();
 
-    const mc26_2_v = downloadMcVersion(b, downloadMCExec(b), "26.2");
-    const mc_generated = mcDatagenDir(b, mc26_2_v);
+    const mc_downloader = downloadMCExec(b);
+    const mc_manifest = blk: {
+        const run_cmd = b.addRunArtifact(mc_downloader);
+        run_cmd.addArg("manifest");
+        break :blk run_cmd.addOutputFileArg("manifest.json");
+    };
+    const mc26_2_meta = blk: {
+        const run_cmd = b.addRunArtifact(mc_downloader);
+        run_cmd.addArg("meta");
+        run_cmd.addFileArg(mc_manifest);
+        const file = run_cmd.addOutputFileArg("meta.json");
+        run_cmd.addArg("26.2");
+        break :blk file;
+    };
+    const mc26_2_jar = blk: {
+        const run_cmd = b.addRunArtifact(mc_downloader);
+        run_cmd.addArg("jar");
+        run_cmd.addFileArg(mc26_2_meta);
+        run_cmd.addArg("server");
+        break :blk run_cmd.addOutputFileArg("minecraft-26.2.jar");
+    };
+    // const mc_generated = mcDatagenDir(b, mc26_2_v);
 
     const lm_mod = b.createModule(.{ .root_source_file = b.path("src/lm.zig") });
     const utils_mod = b.createModule(.{
@@ -111,12 +131,11 @@ pub fn build(b: *Build) !void {
     };
 
     b.installArtifact(main_exe);
-    b.getInstallStep().dependOn(&b.addInstallDirectory(.{
-        .source_dir = mc_generated,
-        .install_dir = .bin,
-        .install_subdir = "generated",
-        .include_extensions = &.{".json"},
-    }).step);
+    // if (false) {
+    b.getInstallStep().dependOn(&b.addInstallBinFile(mc_manifest, "manifest.json").step);
+    b.getInstallStep().dependOn(&b.addInstallBinFile(mc26_2_meta, "meta.json").step);
+    b.getInstallStep().dependOn(&b.addInstallBinFile(mc26_2_jar, "minecraft-26.2.jar").step);
+    // }
 
     const run_exe = b.addRunArtifact(main_exe);
     run_exe.step.dependOn(b.getInstallStep());
@@ -169,12 +188,12 @@ fn compileShader(b: *Build, path: LazyPath) LazyPath {
 
 fn downloadMCExec(b: *Build) *Step.Compile {
     const download_jar_mod = b.createModule(.{
-        .root_source_file = b.path("build/download_jar.zig"),
+        .root_source_file = b.path("build/mc_downloader.zig"),
         .target = b.resolveTargetQuery(.{}),
-        .optimize = .Debug,
+        .optimize = .ReleaseSafe,
     });
     const download_jar_exe = b.addExecutable(.{
-        .name = "download_jar",
+        .name = "mc_downloader",
         .root_module = download_jar_mod,
     });
     return download_jar_exe;
@@ -194,8 +213,7 @@ fn mcDatagenDir(b: *Build, _version: LazyPath) LazyPath {
     _ = run_mc.captureStdErr(.{});
     run_mc.addFileArg(_version);
     run_mc.addArgs(&.{ "--all", "--output" });
-    return  run_mc.addOutputFileArg("generated");
-
+    return run_mc.addOutputFileArg("generated");
 }
 
 fn mkdir(b: *Build, root: LazyPath, path: []const u8) LazyPath {
