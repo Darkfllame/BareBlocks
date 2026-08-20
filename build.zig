@@ -60,6 +60,7 @@ pub fn build(b: *Build) !void {
     const coro_mod = b.dependency("coroutines", .{
         .target = target,
         .optimize = optimize,
+        .static = true,
     }).module("coroutines");
 
     const config = b.addOptions();
@@ -101,7 +102,7 @@ pub fn build(b: *Build) !void {
     };
     const mc_generated = mcDatagenDir(b, mc26_2_jar);
 
-    const lm_mod = b.createModule(.{ .root_source_file = b.path("src/lm.zig") });
+    const math_mod = b.createModule(.{ .root_source_file = b.path("src/math/math.zig") });
     const utils_mod = b.createModule(.{
         .root_source_file = b.path("src/utils/utils.zig"),
         .imports = &.{
@@ -133,7 +134,7 @@ pub fn build(b: *Build) !void {
         .{ .name = "coro", .module = coro_mod },
         .{ .name = "core", .module = core_mod },
         .{ .name = "utils", .module = utils_mod },
-        .{ .name = "lm", .module = lm_mod },
+        .{ .name = "math", .module = math_mod },
         .{ .name = "net", .module = net_mod },
     };
     const all_imports = local_imports ++ [_]Module.Import{
@@ -143,17 +144,17 @@ pub fn build(b: *Build) !void {
     };
 
     b.installArtifact(main_exe);
-    // if (false) {
-    b.getInstallStep().dependOn(&b.addInstallBinFile(mc_manifest, "manifest.json").step);
-    b.getInstallStep().dependOn(&b.addInstallBinFile(mc26_2_meta, "meta.json").step);
-    b.getInstallStep().dependOn(&b.addInstallBinFile(mc26_2_jar, "minecraft-26.2.jar").step);
-    b.getInstallStep().dependOn(&b.addInstallDirectory(.{
-        .source_dir = mc_generated,
-        .install_dir = .bin,
-        .install_subdir = "generated",
-        .include_extensions = &.{".json"},
-    }).step);
-    // }
+    if (false) {
+        b.getInstallStep().dependOn(&b.addInstallBinFile(mc_manifest, "manifest.json").step);
+        b.getInstallStep().dependOn(&b.addInstallBinFile(mc26_2_meta, "meta.json").step);
+        b.getInstallStep().dependOn(&b.addInstallBinFile(mc26_2_jar, "minecraft-26.2.jar").step);
+        b.getInstallStep().dependOn(&b.addInstallDirectory(.{
+            .source_dir = mc_generated,
+            .install_dir = .bin,
+            .install_subdir = "generated",
+            .include_extensions = &.{".json"},
+        }).step);
+    }
 
     const run_exe = b.addRunArtifact(main_exe);
     run_exe.step.dependOn(b.getInstallStep());

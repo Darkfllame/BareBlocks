@@ -1,6 +1,7 @@
 const StructuredPacket = @This();
 const std = @import("std");
 const utils = @import("utils");
+const math = @import("math");
 const TextComponent = utils.TextComponent;
 const UUID = utils.UUID;
 const Identifier = utils.Identifier;
@@ -15,6 +16,33 @@ const json = std.json;
 const NBT = utils.NBT;
 
 const logger = std.log.scoped(.packet);
+
+pub const lpvec3 = struct {
+    pub const data_bits = 15;
+    pub const data_bits_mask = (1 << data_bits) - 1;
+    pub const max_quantized_value = data_bits_mask - 1;
+    pub const scale_bits = 2;
+    pub const scale_bits_mask = (1 << scale_bits) - 1;
+    pub const continuation_flag = 4;
+    pub const x_offset = 3;
+    pub const y_offset = 18;
+    pub const z_offset = 33;
+    pub const abs_max_value = 1.7179869183E10;
+    pub const abs_min_value = 3.051944088384301E-5;
+
+    pub fn sanitize(value: f64) f64 {
+        return if (std.math.isNan(value)) 0 else std.math.clamp(value, -abs_max_value, abs_max_value);
+    }
+
+    pub fn unpack(value: u32) f64 {
+        const scaled = @min(value & data_bits_mask, max_quantized_value) * scale_bits;
+        return (@as(f64, @floatFromInt(scaled)) / max_quantized_value) - 1;
+    }
+
+    pub fn pack(value: f64) u32 {
+        return @intFromFloat(@round((value * 0.5 + 0.5) * max_quantized_value));
+    }
+};
 
 fn IntWithRange(comptime I: type) type {
     return struct {
@@ -189,6 +217,7 @@ pub const Type = union(enum) {
     /// Resolves to `Either(<value>[0], <value>[1])`
     either: *const [2]Type,
     game_profile,
+    lpvec3,
 
     pub const ibyte = Type{ .byte = .signed };
     pub const ubyte = Type{ .byte = .unsigned };
@@ -373,6 +402,7 @@ pub const Type = union(enum) {
             .id_set => IdSet,
             .either => |subs| Either(subs[0], subs[1]),
             .game_profile => GameProfile,
+            .lpvec3 => math.Vec3d,
         };
     }
 
@@ -928,6 +958,25 @@ pub const Type = union(enum) {
                     .properties_ptr = props.ptr,
                 };
             },
+            .lpvec3 => {
+                const lowest: u32 = try reader.takeByte();
+                if (lowest == 0) break :sw .zero;
+
+                const middle: u32 = try reader.takeByte();
+                const highest: u32 = try reader.takeInt(u32, .big);
+
+                const buffer: u64 = (highest << 16) | (middle << 8) | lowest;
+                var scale = lowest & lpvec3.scale_bits_mask;
+                if ((lowest & lpvec3.continuation_flag) == lpvec3.continuation_flag) {
+                    scale |= (try readVarIntMax(reader, u32, std.math.maxInt(u32))) << 2;
+                }
+
+                break :sw .new(
+                    lpvec3.unpack(buffer >> lpvec3.x_offset) * scale,
+                    lpvec3.unpack(buffer >> lpvec3.y_offset) * scale,
+                    lpvec3.unpack(buffer >> lpvec3.z_offset) * scale,
+                );
+            },
         };
     }
 
@@ -1088,6 +1137,35 @@ pub const Type = union(enum) {
                         try writer.writeByte(1);
                         try writeString(writer, sig);
                     } else try writer.writeByte(0);
+                }
+            },
+            .lpvec3 => {
+                const x = lpvec3.sanitize(val.x());
+                const y = lpvec3.sanitize(val.y());
+                const z = lpvec3.sanitize(val.z());
+                const chessboard_length = @max(@abs(x), @abs(y), @abs(z));
+                if (chessboard_length < lpvec3.abs_min_value) {
+                    return writer.writeByte(0);
+                }
+
+                const scale: u64 = @intFromFloat(@ceil(chessboard_length));
+                const is_partial = (scale & lpvec3.scale_bits_mask) != scale;
+                const markers = if (is_partial)
+                    scale & lpvec3.scale_bits_mask | lpvec3.continuation_flag
+                else
+                    scale;
+                const scalef: f64 = @floatFromInt(scale);
+                const xn = lpvec3.pack(x / scalef) << lpvec3.x_offset;
+                const yn = lpvec3.pack(z / scalef) << lpvec3.y_offset;
+                const zn = lpvec3.pack(z / scalef) << lpvec3.z_offset;
+                const buffer = markers | xn | yn | zn;
+                try writer.writeAll(&.{
+                    @truncate(buffer),
+                    @truncate(buffer >> 8),
+                });
+                try writer.writeInt(u32, @truncate(buffer >> 16), .big);
+                if (is_partial) {
+                    try writeVarInt(writer, scale >> 2);
                 }
             },
         }

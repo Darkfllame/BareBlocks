@@ -1,0 +1,48 @@
+const std = @import("std");
+
+pub const big_int = @import("big_int.zig");
+pub const lm = @import("lm.zig");
+
+pub const BigInt = big_int.BigInt;
+pub const Vec = lm.Vec;
+pub const Mat = lm.Mat;
+pub const Quat = lm.Quat;
+//#region LM quick types
+pub const Vec2b = lm.Vec2b;
+pub const Vec2s = lm.Vec2s;
+pub const Vec2i = lm.Vec2i;
+pub const Vec2l = lm.Vec2l;
+pub const Vec2f = lm.Vec2f;
+pub const Vec2d = lm.Vec2d;
+pub const Vec3b = lm.Vec3b;
+pub const Vec3s = lm.Vec3s;
+pub const Vec3i = lm.Vec3i;
+pub const Vec3l = lm.Vec3l;
+pub const Vec3f = lm.Vec3f;
+pub const Vec3d = lm.Vec3d;
+pub const Vec4b = lm.Vec4b;
+pub const Vec4s = lm.Vec4s;
+pub const Vec4i = lm.Vec4i;
+pub const Vec4l = lm.Vec4l;
+pub const Vec4f = lm.Vec4f;
+pub const Vec4d = lm.Vec4d;
+pub const Mat2b = lm.Mat2b;
+pub const Mat2s = lm.Mat2s;
+pub const Mat2i = lm.Mat2i;
+pub const Mat2l = lm.Mat2l;
+pub const Mat2f = lm.Mat2f;
+pub const Mat2d = lm.Mat2d;
+pub const Mat3b = lm.Mat3b;
+pub const Mat3s = lm.Mat3s;
+pub const Mat3i = lm.Mat3i;
+pub const Mat3l = lm.Mat3l;
+pub const Mat3f = lm.Mat3f;
+pub const Mat4b = lm.Mat4b;
+pub const Mat4s = lm.Mat4s;
+pub const Mat4i = lm.Mat4i;
+pub const Mat4l = lm.Mat4l;
+pub const Mat4f = lm.Mat4f;
+pub const Mat4d = lm.Mat4d;
+pub const Quatf = lm.Quatf;
+pub const Quatd = lm.Quatd;
+//#endregion
