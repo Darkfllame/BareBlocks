@@ -1449,63 +1449,74 @@ fn streamJavaString(reader: *IoReader, writer: *IoWriter) StreamStringError!usiz
     var cp_count: usize = 0;
     var read: usize = 0;
 
+    var cp_out: [4]u8 = undefined;
+
     while (read < len) : (cp_count += 1) {
-        const lead_byte = try reader.takeByte();
-        read += 1;
-        switch (lead_byte) {
-            0b00000000...0b01111111 => try writer.writeByte(lead_byte),
-            0b11000000...0b11011111 => { // 2 bytes value
-                const contib = try reader.takeByte();
-                read += 1;
-                if (contib & 0b11000000 != 0b10000000) return error.InvalidString;
-                try writer.writeByte(lead_byte);
-                try writer.writeByte(contib);
-            },
-            0b11100000...0b11101111 => { // 3 bytes value
-                const contib1 = try reader.takeByte();
-                if (contib1 & 0b11000000 != 0b10000000) return error.InvalidString;
-                const contib2 = try reader.takeByte();
-                if (contib2 & 0b11000000 != 0b10000000) return error.InvalidString;
-                read += 2;
+        const codepoint = decodeJavaCodepoint(reader, &read) catch |e| switch (e) {
+            error.InvalidString => 0xFFFD,
+            else => |err| return err,
+        };
 
-                const codepoint: u16 = (@as(u16, lead_byte & 0b1111) << 12) |
-                    (@as(u16, contib1 & 0b00111111) << 6) |
-                    (@as(u16, contib2 & 0b00111111));
-                const codepoint_full = sw: switch (codepoint) {
-                    0xD800...0xDBFF => {
-                        const lead_byte2 = try reader.takeByte();
-                        if (lead_byte2 & 0b11110000 != 0b11100000) return error.InvalidString;
-                        const contib1_2 = try reader.takeByte();
-                        if (contib1_2 & 0b11000000 != 0b10000000) return error.InvalidString;
-                        const contib2_2 = try reader.takeByte();
-                        if (contib2_2 & 0b11000000 != 0b10000000) return error.InvalidString;
-                        cp_count += 1;
-                        read += 3;
-
-                        const surrogate2: u16 = (@as(u16, lead_byte2 & 0b1111) << 12) |
-                            (@as(u16, contib1_2 & 0b00111111) << 6) |
-                            (@as(u16, contib2_2 & 0b00111111));
-
-                        if (surrogate2 < 0xDC00 or surrogate2 > 0xDFFF) return error.InvalidString;
-
-                        break :sw ((@as(u21, codepoint - 0xD800) << 10) + 0x10000) | @as(u21, surrogate2 - 0xDC00);
-                    },
-                    0xDC00...0xDFFF => return error.InvalidString, // low-surrogate codepoint
-                    else => codepoint,
-                };
-
-                var out: [4]u8 = undefined;
-                // wtf8 allows surrogate codepoints, but they will technically never happen
-                // in this case. It is used to avoid the "Utf8CannotEncodeSurrogateHalf" error
-                // that is possible to be returned with the regular "utf8Encode" function.
-                const l = std.unicode.wtf8Encode(codepoint_full, &out) catch return error.InvalidString;
-                try writer.writeAll(out[0..l]);
-            },
-            else => return error.InvalidString,
-        }
+        // wtf8 allows surrogate codepoints, but they will technically never happen
+        // in this case. It is used to avoid the "Utf8CannotEncodeSurrogateHalf" error
+        // that is possible to be returned with the regular "utf8Encode" function.
+        const l = std.unicode.wtf8Encode(codepoint, &cp_out) catch return error.InvalidString;
+        try writer.writeAll(cp_out[0..l]);
     }
 
     return cp_count;
+}
+
+fn decodeJavaCodepoint(reader: *IoReader, read: *usize) !u21 {
+    const lead_byte = try reader.takeByte();
+    read.* += 1;
+    var codepoint_full: u21 = undefined;
+    switch (lead_byte) {
+        0b00000000...0b01111111 => codepoint_full = lead_byte,
+        0b11000000...0b11011111 => { // 2 bytes value
+            const contib = try reader.takeByte();
+            read.* += 1;
+            if (contib & 0b11000000 != 0b10000000) return error.InvalidString;
+            codepoint_full = (@as(u16, lead_byte & 0b11111) << 6) | (contib & 0b00111111);
+        },
+        0b11100000...0b11101111 => { // 3 bytes value
+            const contib1 = try reader.takeByte();
+            read.* += 1;
+            if (contib1 & 0b11000000 != 0b10000000) return error.InvalidString;
+            const contib2 = try reader.takeByte();
+            read.* += 1;
+            if (contib2 & 0b11000000 != 0b10000000) return error.InvalidString;
+
+            const codepoint: u16 = (@as(u16, lead_byte & 0b1111) << 12) |
+                (@as(u16, contib1 & 0b00111111) << 6) |
+                (@as(u16, contib2 & 0b00111111));
+            codepoint_full = sw: switch (codepoint) {
+                0xD800...0xDBFF => {
+                    const lead_byte2 = try reader.takeByte();
+                    read.* += 1;
+                    if (lead_byte2 & 0b11110000 != 0b11100000) return error.InvalidString;
+                    const contib1_2 = try reader.takeByte();
+                    read.* += 1;
+                    if (contib1_2 & 0b11000000 != 0b10000000) return error.InvalidString;
+                    const contib2_2 = try reader.takeByte();
+                    read.* += 1;
+                    if (contib2_2 & 0b11000000 != 0b10000000) return error.InvalidString;
+
+                    const surrogate2: u16 = (@as(u16, lead_byte2 & 0b1111) << 12) |
+                        (@as(u16, contib1_2 & 0b00111111) << 6) |
+                        (@as(u16, contib2_2 & 0b00111111));
+
+                    if (surrogate2 < 0xDC00 or surrogate2 > 0xDFFF) return error.InvalidString;
+
+                    break :sw ((@as(u21, codepoint - 0xD800) << 10) + 0x10000) | @as(u21, surrogate2 - 0xDC00);
+                },
+                0xDC00...0xDFFF => return error.InvalidString, // low-surrogate codepoint
+                else => codepoint,
+            };
+        },
+        else => return error.InvalidString,
+    }
+    return codepoint_full;
 }
 
 inline fn writeJavaString(writer: *IoWriter, str: []const u8) WriteError!void {
