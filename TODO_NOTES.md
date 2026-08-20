@@ -5,4 +5,14 @@
         - In tmp or cwd ?
     - Compressed or just tar ?
 - Packet auto registration with datagens
-- 
+- Serial
+    - JSON Reader still not done.
+    - SNBT interfaces
+- Encryption/Authentication stuff ?
+    - RSA-1024 is used to share an 128bits AES(-cbc ?? CFB !?? dude like) shared secret ???
+    - The fuck is a PKCS#1v1.5
+    - ASN.1 DER ??? we are just typing shit atp
+- Finding a better http library
+    - `std.http` kinda trash
+    - httpx-zig doesn't offer streaming
+    - Make one myself ?
