@@ -23,10 +23,17 @@
         },
     },
 
+    // Files and folders to keep and used to calculate repo's hash
     .paths = .{
+        "assets/",
+        "build/",
+        "coroutines/",
         "src/",
+
         ".gitignore",
         "build.zig",
         "build.zig.zon",
+        "LICENSE",
+        "README.md",
     },
 }
