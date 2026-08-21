@@ -60,45 +60,36 @@ pub fn build(b: *Build) !void {
     const coro_mod = b.dependency("coroutines", .{
         .target = target,
         .optimize = optimize,
-        .static = true,
     }).module("coroutines");
+
+    const mc_version = b.option([]const u8, "mcver", "Version of minecraft (default: latest)") orelse "latest";
 
     const config = b.addOptions();
     config.addOption(std.SemanticVersion, "version", version);
     const config_mod = config.createModule();
 
     const mc_downloader = downloadMCExec(b);
-    const mc_manifest = blk: {
+    const mcd_cache = mkdir(b, b.path("."), ".mccache");
+
+    const mc26_2_jar = blk: {
         const run_cmd = b.addRunArtifact(mc_downloader);
-        run_cmd.addArg("manifest");
-        break :blk run_cmd.addOutputFileArg("manifest.json");
-    };
-    const mc26_2_meta = blk: {
-        const run_cmd = b.addRunArtifact(mc_downloader);
-        run_cmd.addArg("meta");
-        run_cmd.addFileArg(mc_manifest);
-        const file = run_cmd.addOutputFileArg("meta.json");
-        run_cmd.addArg("26.2");
-        break :blk file;
-    };
-    const mc26_2_assets_json = blk: {
-        const run_cmd = b.addRunArtifact(mc_downloader);
-        run_cmd.addArgs(&.{ "assets", "json" });
-        run_cmd.addFileArg(mc26_2_meta);
-        break :blk run_cmd.addOutputFileArg("assets.json");
+        run_cmd.has_side_effects = true;
+        run_cmd.stdio = .inherit;
+        run_cmd.addDirectoryArg(mcd_cache);
+        run_cmd.addArgs(&.{ "jar", "server" });
+        const out_jar = run_cmd.addOutputFileArg("minecraft.jar");
+        run_cmd.addArg(mc_version);
+        break :blk out_jar;
     };
     const mc26_2_assets = blk: {
         const run_cmd = b.addRunArtifact(mc_downloader);
         run_cmd.has_side_effects = true;
-        run_cmd.addArgs(&.{ "assets", "files" });
-        run_cmd.addFileArg(mc26_2_assets_json);
-        break :blk run_cmd.addOutputDirectoryArg("assets");
-    };
-    const mc26_2_jar = blk: {
-        const run_cmd = b.addRunArtifact(mc_downloader);
-        run_cmd.addArgs(&.{ "jar", "server" });
-        run_cmd.addFileArg(mc26_2_meta);
-        break :blk run_cmd.addOutputFileArg("minecraft-26.2.jar");
+        run_cmd.stdio = .inherit;
+        run_cmd.addDirectoryArg(mcd_cache);
+        run_cmd.addArg("assets");
+        const out_dir = run_cmd.addOutputFileArg("minecraft.jar");
+        run_cmd.addArg(mc_version);
+        break :blk out_dir;
     };
     const mc_generated = mcDatagenDir(b, mc26_2_jar);
 
@@ -144,17 +135,17 @@ pub fn build(b: *Build) !void {
     };
 
     b.installArtifact(main_exe);
-    if (false) {
-        b.getInstallStep().dependOn(&b.addInstallBinFile(mc_manifest, "manifest.json").step);
-        b.getInstallStep().dependOn(&b.addInstallBinFile(mc26_2_meta, "meta.json").step);
-        b.getInstallStep().dependOn(&b.addInstallBinFile(mc26_2_jar, "minecraft-26.2.jar").step);
-        b.getInstallStep().dependOn(&b.addInstallDirectory(.{
-            .source_dir = mc_generated,
-            .install_dir = .bin,
-            .install_subdir = "generated",
-            .include_extensions = &.{".json"},
-        }).step);
-    }
+    // if (false) {
+    //     b.getInstallStep().dependOn(&b.addInstallBinFile(mc_manifest, "manifest.json").step);
+    //     b.getInstallStep().dependOn(&b.addInstallBinFile(mc26_2_meta, "meta.json").step);
+    b.getInstallStep().dependOn(&b.addInstallBinFile(mc26_2_jar, "minecraft.jar").step);
+    b.getInstallStep().dependOn(&b.addInstallDirectory(.{
+        .source_dir = mc_generated,
+        .install_dir = .bin,
+        .install_subdir = "generated",
+        .include_extensions = &.{".json"},
+    }).step);
+    // }
 
     const run_exe = b.addRunArtifact(main_exe);
     run_exe.step.dependOn(b.getInstallStep());
@@ -216,7 +207,7 @@ fn downloadMCExec(b: *Build) *Step.Compile {
     const download_jar_mod = b.createModule(.{
         .root_source_file = b.path("build/mc_downloader.zig"),
         .target = b.resolveTargetQuery(.{}),
-        .optimize = .Debug,
+        .optimize = .ReleaseSafe,
     });
     const download_jar_exe = b.addExecutable(.{
         .name = "mc_downloader",

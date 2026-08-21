@@ -6,3 +6,4 @@ players.csv
 out*
 datagen_run
 *.nbt
+.mccache
