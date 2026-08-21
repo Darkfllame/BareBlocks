@@ -1,0 +1,32 @@
+{
+	"zig:this_file": {
+		"prefix": "This File",
+		"body": "const ${1:$TM_FILENAME_BASE} = @This();",
+		"include": "*.zig",
+	},
+	"zig:self_struct": {
+		"prefix": "Self",
+		"body": "const ${1:Self} = @This();",
+		"include": "*.zig",
+	},
+	"zig:u8eql": {
+		"prefix": ["streql", "eqlu8"],
+		"body": "std.mem.eql(u8, ${1:a}, ${2:b})",
+		"include": "*.zig",
+	},
+	// "zig:Allocator": {
+	// 	"prefix": "Allocator",
+	// 	"body": "const Allocator = std.mem.Allocator;",
+	// 	"include": "*.zig",
+	// },
+	"zig:Io": {
+		"prefix": "Io",
+		"body": "const Io = std.Io;",
+		"include": "*.zig",
+	},
+	"zig:import": {
+		"prefix": "import",
+		"body": "const $1 = @import(\"${2:$1}.zig\");",
+		"include": "*.zig",
+	}
+}
