@@ -4,6 +4,6 @@ zig-pkg
 *.s
 players.csv
 out*
-datagen_run
+run_datagen_*
 *.nbt
 .mccache

@@ -63,6 +63,21 @@ pub fn build(b: *Build) !void {
     }).module("coroutines");
 
     const mc_version = b.option([]const u8, "mcver", "Version of minecraft (default: latest)") orelse "latest";
+    const old_datagen_cmd = blk: {
+        if (std.mem.startsWith(u8, mc_version, "latest")) break :blk false;
+
+        var split = std.mem.splitScalar(u8, mc_version, '.');
+        const first_num = std.fmt.parseInt(u8, split.next() orelse @panic("Malformed Version"), 10) catch break :blk true;
+        const second_num = std.fmt.parseInt(u8, split.next() orelse @panic("Malformed Version"), 10) catch @panic("Malformed Version");
+        if (split.next()) |patch_str| {
+            _ = std.fmt.parseInt(u8, patch_str, 10) catch @panic("Malfromed Version");
+            if (first_num != 1) @panic("Malformed Version");
+            break :blk second_num >= 18;
+        } else {
+            break :blk false;
+        }
+    };
+    if (old_datagen_cmd) @panic("Minecraft version too old (must be at least 1.18)");
 
     const config = b.addOptions();
     config.addOption(std.SemanticVersion, "version", version);
@@ -91,7 +106,7 @@ pub fn build(b: *Build) !void {
         run_cmd.addArg(mc_version);
         break :blk out_dir;
     };
-    const mc_generated = mcDatagenDir(b, mc26_2_jar);
+    const mc_generated = mcDatagenDir(b, mc26_2_jar, mc_version);
 
     const math_mod = b.createModule(.{ .root_source_file = b.path("src/math/math.zig") });
     const utils_mod = b.createModule(.{
@@ -216,14 +231,15 @@ fn downloadMCExec(b: *Build) *Step.Compile {
     return download_jar_exe;
 }
 
-fn mcDatagenDir(b: *Build, jar_path: LazyPath) LazyPath {
+fn mcDatagenDir(b: *Build, jar_path: LazyPath, _version: []const u8) LazyPath {
+    const data_gen_dir = mkdir(b, b.path("."), b.fmt("run_datagen_{s}", .{_version}));
     const run_mc = b.addSystemCommand(&.{ "java", "-DbundlerMainClass=net.minecraft.data.Main", "-jar" });
-    run_mc.setCwd(mkdir(b, b.path("."), "datagen_run"));
+    run_mc.setCwd(data_gen_dir);
+    run_mc.addFileArg(jar_path);
     _ = run_mc.captureStdOut(.{});
     _ = run_mc.captureStdErr(.{});
-    run_mc.addFileArg(jar_path);
     run_mc.addArgs(&.{ "--all", "--output" });
-    return run_mc.addOutputFileArg("generated");
+    return run_mc.addOutputDirectoryArg("generated");
 }
 
 fn mkdir(b: *Build, root: LazyPath, path: []const u8) LazyPath {

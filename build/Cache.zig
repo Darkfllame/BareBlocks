@@ -159,7 +159,9 @@ fn streamFromUri(
     };
 
     progress.setCompletedItems(0);
-    progress.setEstimatedTotalItems(resp.head.content_length orelse 0);
+    // This is a workaround until https://codeberg.org/ziglang/zig/issues/36598 is fixed
+    const estimated = resp.head.content_length orelse 0;
+    progress.setEstimatedTotalItems(if (estimated > (std.math.maxInt(u32) / 100)) 0 else estimated);
 
     var name_writer = Io.Writer.fixed(name_buffer);
 
@@ -539,9 +541,9 @@ fn streamCacheFile(
             });
             continue;
         }
-    }
 
-    self.saveHashes() catch {};
+        break;
+    }
 
     return ret;
 }
@@ -901,7 +903,7 @@ pub fn init(self: *Cache, io: Io, allocator: Allocator, cache_path: []const u8) 
         .files = .empty,
     });
     self.max_retries = 5;
-    
+
     self.http_client = .{ .io = io, .allocator = allocator };
     errdefer self.http_client.deinit();
     self.exec_group = .init;
@@ -942,13 +944,14 @@ pub fn deinit(self: *Cache) void {
 }
 
 pub fn saveHashes(self: *Cache) !void {
-    var fr = self.lock_hash.writer(self.io, &self.write_buffer);
+    var fw = self.lock_hash.writer(self.io, &self.write_buffer);
+    try fw.seekToUnbuffered(0);
 
-    self.writeHashes(&fr.interface) catch |e| switch (e) {
-        error.WriteFailed => return fr.err.?,
+    self.writeHashes(&fw.interface) catch |e| switch (e) {
+        error.WriteFailed => return fw.err.?,
     };
 
-    try fr.flush();
+    try fw.flush();
 }
 
 pub fn getManifest(self: *Cache, arena: Allocator, progress: std.Progress.Node, extra_info: bool) !Manifest {
@@ -1058,7 +1061,9 @@ pub fn getJarSha1(
     };
     defer self.allocator.free(url_buffer);
 
-    return self.streamCacheFile(.jar, sha1, gpa, uri, progress, extra_info);
+    const ret = try self.streamCacheFile(.jar, sha1, gpa, uri, progress, extra_info);
+    self.saveHashes() catch {};
+    return ret;
 }
 
 pub fn copyAssets(self: *Cache, out_dir: Io.Dir, idx: AssetsIndex, max_retries: u32, progress: std.Progress.Node) !void {
