@@ -5,7 +5,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
-fn BigInt(comptime Element: type) type {
+pub fn BigInt(comptime Element: type) type {
     const info = switch (@typeInfo(Element)) {
         .int => |i| i,
         inline else => |_, tag| @compileError("BigInt: Element must be an int type, got: " ++ @tagName(tag)),
