@@ -207,7 +207,7 @@ fn downloadMCExec(b: *Build) *Step.Compile {
     const download_jar_mod = b.createModule(.{
         .root_source_file = b.path("build/mc_downloader.zig"),
         .target = b.resolveTargetQuery(.{}),
-        .optimize = .ReleaseSafe,
+        .optimize = .Debug,
     });
     const download_jar_exe = b.addExecutable(.{
         .name = "mc_downloader",

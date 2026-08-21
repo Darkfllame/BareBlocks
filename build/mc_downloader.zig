@@ -10,6 +10,8 @@ const startsWith = std.mem.startsWith;
 const DownloadMode = enum { jar, assets };
 const JarMode = enum { client, server };
 
+var draw_buffer: [10240]u8 = undefined;
+
 /// Command line:\
 /// `<exe> <cache_path> jar [client/server] <out_file> (<version>)`\
 /// `<exe> <cache_path> assets <out_dir> (<version>)`\
@@ -19,8 +21,8 @@ pub fn main(init: std.process.Init) !void {
     const cache = try init.gpa.create(Cache);
     defer init.gpa.destroy(cache);
 
-    const progress_draw_buffer = try init.gpa.alloc(u8, 10240);
-    defer init.gpa.free(progress_draw_buffer);
+    // const progress_draw_buffer = try init.gpa.alloc(u8, 10240);
+    // defer init.gpa.free(progress_draw_buffer);
 
     var args_it = try init.minimal.args.iterateAllocator(arena);
     defer args_it.deinit();
@@ -34,7 +36,7 @@ pub fn main(init: std.process.Init) !void {
         return error.BadArgument;
 
     const root_prog = std.Progress.start(init.io, .{
-        .draw_buffer = progress_draw_buffer,
+        .draw_buffer = &draw_buffer,
     });
     defer root_prog.end();
 

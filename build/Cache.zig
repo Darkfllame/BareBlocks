@@ -184,7 +184,7 @@ fn streamFromUri(
         if (amt == 0) continue;
         offset += amt;
         bytes_received += amt;
-        progress.setCompletedItems(@intCast(offset));
+        progress.setCompletedItems(offset); // crashes if over 42.9 millions
 
         now = Io.Timestamp.now(self.io, .boot);
         const dt = last_time.durationTo(now);
@@ -513,7 +513,8 @@ fn streamCacheFile(
     for (0..self.max_retries) |i| {
         try fw.seekToUnbuffered(0);
         progress.setCompletedItems(0);
-        
+        progress.setEstimatedTotalItems(0);
+
         var hw = fw.interface.hashed(Sha1.init(.{}), &self.write_buffer);
 
         _ = self.streamFromUriBufless(
@@ -899,6 +900,8 @@ pub fn init(self: *Cache, io: Io, allocator: Allocator, cache_path: []const u8) 
         .rw_lock = .init,
         .files = .empty,
     });
+    self.max_retries = 5;
+    
     self.http_client = .{ .io = io, .allocator = allocator };
     errdefer self.http_client.deinit();
     self.exec_group = .init;
