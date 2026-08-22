@@ -558,6 +558,7 @@ pub const Type = union(enum) {
                             subs[0], subs[1], tag, subs[@intFromEnum(tag)].formatted(v),
                         }),
                     },
+                    .lpvec3 => try value.format(writer),
                 }
             }
         };
@@ -796,7 +797,7 @@ pub const Type = union(enum) {
                             return error.InvalidLength;
                         }
                         if (len == 0) break :sw &.{};
-                        if (arr.sub != .custom and @sizeOf(Sub) == 1) {
+                        if (arr.sub.* != .custom and @sizeOf(Sub) == 1) {
                             const array = try arena.alloc(Sub, @intCast(len));
                             errdefer arena.free(array);
 
@@ -1240,6 +1241,7 @@ pub const Type = union(enum) {
             .id_set => try writer.writeAll("IdSet"),
             .either => |subs| try writer.print("XorY({f}, {f})", .{ subs[0], subs[1] }),
             .game_profile => try writer.writeAll("GameProfile"),
+            .lpvec3 => try writer.writeAll("LPVec3"),
         }
     }
 };
@@ -1322,7 +1324,7 @@ pub fn readVarIntMax(reader: *Reader, comptime T: type, max_val: T) Reader.TakeL
 pub fn readString(alloc: Allocator, reader: *Reader, may_max_cps: ?u15) (Reader.TakeLeb128Error || Reader.ReadAllocError || error{ InvalidUTF8, InvalidLength })![]const u8 {
     const max_cps = may_max_cps orelse std.math.maxInt(u15);
     const len = try readVarIntMax(reader, u32, @as(u32, max_cps) * 3);
-    
+
     const buf = if (reader.buffer.len <= len)
         try reader.take(len)
     else
