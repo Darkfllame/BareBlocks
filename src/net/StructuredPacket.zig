@@ -605,7 +605,6 @@ pub const Type = union(enum) {
         return self.write(.failing, .failing, writer, val);
     }
 
-    /// Data given with `reader` MUST be all available without any rebasing.
     pub fn read(comptime self: Type, gpa: Allocator, arena: Allocator, reader: *Reader, parent: anytype, ret: *self.getZigType()) ReadError!void {
         if (@typeInfo(@TypeOf(parent)) != .@"struct") @compileError("Parent argument must be a struct type");
         ret.* = sw: switch (self) {
@@ -649,14 +648,15 @@ pub const Type = union(enum) {
                 const Int = @Int(.unsigned, bits);
                 break :sw @bitCast(try readVarIntMax(reader, Int, std.math.maxInt(Int)));
             },
-            .string => |may_max_cps| try readString(reader, may_max_cps),
+            .string => |may_max_cps| try readString(arena, reader, may_max_cps),
             .json => |may_sub| {
                 const Sub = may_sub orelse utils.serial.Value;
                 if (true) @compileError("TODO: Make json serial reader");
-                const str = try readString(reader, null);
+                const str = try readString(gpa, reader, null);
+                defer gpa.free(str);
 
                 const value = json.parseFromSliceLeaky(Sub, arena, str, .{
-                    .allocate = .alloc_if_needed,
+                    .allocate = .alloc_always,
                 }) catch |e| {
                     logger.err("Error parsing JSON value of {any}: {t}", .{ Sub, e });
                     return error.InvalidJSON;
@@ -664,7 +664,7 @@ pub const Type = union(enum) {
                 break :sw value;
             },
             .identifier => {
-                const str = try readString(reader, null);
+                const str = try readString(arena, reader, null);
                 break :sw Identifier.validate(str) catch |e| {
                     logger.err("Invalid identifier: [{s}]", .{str});
                     return e;
@@ -1319,10 +1319,16 @@ pub fn readVarIntMax(reader: *Reader, comptime T: type, max_val: T) Reader.TakeL
 /// microshitstem wanted utf16 strings in java.
 ///
 /// Though I will use UTF8 instead as it'll be easier for me.
-pub fn readString(reader: *Reader, may_max_cps: ?u15) (Reader.TakeLeb128Error || Reader.ReadAllocError || error{ InvalidUTF8, InvalidLength })![]const u8 {
+pub fn readString(alloc: Allocator, reader: *Reader, may_max_cps: ?u15) (Reader.TakeLeb128Error || Reader.ReadAllocError || error{ InvalidUTF8, InvalidLength })![]const u8 {
     const max_cps = may_max_cps orelse std.math.maxInt(u15);
     const len = try readVarIntMax(reader, u32, @as(u32, max_cps) * 3);
-    const buf = try reader.take(len);
+    
+    const buf = if (reader.buffer.len <= len)
+        try reader.take(len)
+    else
+        try reader.readAlloc(alloc, len);
+    errdefer if (reader.buffer.len > len) alloc.free(buf);
+
     var it = utils.Utf8Iterator.init(buf);
     var utf16_cp: usize = 0;
     while (try it.nextCodepoint()) |cp| {

@@ -415,9 +415,6 @@ pub const Connection = struct {
     ///
     /// The memory allocated by the arena allocator passed in this function will only stay valid for this call
     /// **only**. Any data that is wished to stay persitent must be copied to a new location.
-    ///
-    /// Note: `error.ReadFailed` is technically impossible, but is here mainly for convenience, so you can
-    /// just call functions within `reader` with `try` directly.
     pub const ReadCallbackFn = fn (conn: *Connection, reader: *Io.Reader, apair: AllocPair) ReadCallbackError!void;
     pub const DisconnectCallbackFn = fn (conn: *Connection, reason: *const TextComponent) Allocator.Error!void;
 
