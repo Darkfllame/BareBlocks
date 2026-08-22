@@ -150,17 +150,15 @@ pub fn build(b: *Build) !void {
     };
 
     b.installArtifact(main_exe);
-    // if (false) {
-    //     b.getInstallStep().dependOn(&b.addInstallBinFile(mc_manifest, "manifest.json").step);
-    //     b.getInstallStep().dependOn(&b.addInstallBinFile(mc26_2_meta, "meta.json").step);
-    b.getInstallStep().dependOn(&b.addInstallBinFile(mc26_2_jar, "minecraft.jar").step);
-    b.getInstallStep().dependOn(&b.addInstallDirectory(.{
-        .source_dir = mc_generated,
-        .install_dir = .bin,
-        .install_subdir = "generated",
-        .include_extensions = &.{".json"},
-    }).step);
-    // }
+    if (false) {
+        b.getInstallStep().dependOn(&b.addInstallBinFile(mc26_2_jar, "minecraft.jar").step);
+        b.getInstallStep().dependOn(&b.addInstallDirectory(.{
+            .source_dir = mc_generated,
+            .install_dir = .bin,
+            .install_subdir = "generated",
+            .include_extensions = &.{".json"},
+        }).step);
+    }
 
     const run_exe = b.addRunArtifact(main_exe);
     run_exe.step.dependOn(b.getInstallStep());
