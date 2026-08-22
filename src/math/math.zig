@@ -1,13 +1,14 @@
 const std = @import("std");
 
+pub const log10_2 = 0.301029995663981195213738894724493027;
+
 pub const big_int = @import("big_int.zig");
 pub const lm = @import("lm.zig");
 
-pub const BigInt = big_int.BigInt;
+pub const BigUInt = big_int.BigUInt;
 pub const Vec = lm.Vec;
 pub const Mat = lm.Mat;
 pub const Quat = lm.Quat;
-//#region LM quick types
 pub const Vec2b = lm.Vec2b;
 pub const Vec2s = lm.Vec2s;
 pub const Vec2i = lm.Vec2i;
@@ -45,4 +46,3 @@ pub const Mat4f = lm.Mat4f;
 pub const Mat4d = lm.Mat4d;
 pub const Quatf = lm.Quatf;
 pub const Quatd = lm.Quatd;
-//#endregion
