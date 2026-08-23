@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 
 pub const serial = @import("serial.zig");
 pub const translation = @import("translation.zig");
@@ -16,6 +17,7 @@ pub const NBT = @import("NBT.zig");
 pub const Selector = @import("Selector.zig");
 pub const TextComponent = @import("TextComponent.zig");
 pub const UUID = @import("uuid.zig").UUID;
+pub const Xoroshiro128PlusPLus = @import("Xoroshiro128PlusPlus.zig");
 
 pub const max_registry_id = std.math.maxInt(i32);
 
@@ -52,6 +54,48 @@ pub fn Registry(comptime T: type) type {
             if (gop.found_existing) return error.DuplicateEntry;
             gop.value_ptr.* = value;
             return @enumFromInt(new_id);
+        }
+    };
+}
+
+pub fn Range(comptime T: type) type {
+    const minT, const maxT = switch (@typeInfo(T)) {
+        .int => .{ std.math.minInt(T), std.math.maxInt(T) },
+        .float => .{ std.math.floatMin(T), std.math.floatMax(T) },
+        else => @compileError("Unkown numeric type: " ++ @typeName(T)),
+    };
+    return struct {
+        min: T = minT,
+        max: T = maxT,
+
+        pub fn init(min: ?T, max: ?T) @This() {
+            const real_min = min orelse minT;
+            const real_max = max orelse maxT;
+            assert(real_min <= real_max);
+
+            return .{ .min = real_min, .max = real_max };
+        }
+
+        pub inline fn clamp(self: @This(), v: T) T {
+            return std.math.clamp(v, self.min, self.max);
+        }
+
+        pub inline fn inRange(self: @This(), v: T) bool {
+            return self.min <= v and v <= self.max;
+        }
+
+        pub fn cast(self: @This(), comptime NewT: type) Range(NewT) {
+            return .{
+                .min = std.math.cast(NewT, self.min).?,
+                .max = std.math.cast(NewT, self.max).?,
+            };
+        }
+
+        pub fn castLossy(self: @This(), comptime NewT: type) Range(NewT) {
+            return .{
+                .min = std.math.lossyCast(NewT, self.min),
+                .max = std.math.lossyCast(NewT, self.max),
+            };
         }
     };
 }
@@ -93,6 +137,115 @@ pub const Utf8Iterator = struct {
         }
 
         return it.bytes[original_i..end_ix];
+    }
+};
+
+pub const RandomPair = struct {
+    rnd: std.Random,
+    next_next_gaussian: ?f64 = null,
+
+    pub const float_unit: f32 = 5.9604645e-8;
+    pub const double_unit: f64 = 1.110223e-16;
+
+    pub fn new(rnd: std.Random) RandomPair {
+        return .{ .rnd = rnd };
+    }
+
+    pub fn nextGaussian(self: *RandomPair) f64 {
+        if (self.next_next_gaussian) |res| {
+            self.next_next_gaussian = null;
+            return res;
+        }
+
+        var x: f64, var y: f64, var radius_squared: f64 = .{ undefined, undefined, undefined };
+        while (true) {
+            x = 2 * self.float(f64) - 1;
+            y = 2 * self.float(f64) - 1;
+            radius_squared = x * x + y * y;
+            if (radius_squared >= 1 or radius_squared == 0) continue;
+            break;
+        }
+
+        const multiplier = @sqrt(-2 * @log(radius_squared) / radius_squared);
+        self.next_next_gaussian = y * multiplier;
+        return x * multiplier;
+    }
+
+    pub fn normal(self: *RandomPair, mean: f32, deviation: f32) f32 {
+        return mean + @as(f32, @floatCast(self.nextGaussian())) * deviation;
+    }
+
+    pub fn bytes(self: *const RandomPair, buf: []u8) void {
+        return self.rnd.bytes(buf);
+    }
+    pub fn array(self: *const RandomPair, comptime E: type, comptime N: usize) [N]E {
+        return self.rnd.array(E, N);
+    }
+    pub fn boolean(self: *const RandomPair) bool {
+        return self.rnd.boolean();
+    }
+    pub fn enumValue(self: *const RandomPair, comptime EnumType: type) EnumType {
+        return self.rnd.enumValue(EnumType);
+    }
+    pub fn enumValueWithIndex(self: *const RandomPair, comptime EnumType: type, comptime Index: type) EnumType {
+        return self.rnd.enumValueWithIndex(EnumType, Index);
+    }
+    pub fn int(self: *const RandomPair, comptime T: type) T {
+        return self.rnd.int(T);
+    }
+    pub fn uintLessThanBiased(self: *const RandomPair, comptime T: type, less_than: T) T {
+        return self.rnd.uintLessThanBiased(T, less_than);
+    }
+    pub fn uintLessThan(self: *const RandomPair, comptime T: type, less_than: T) T {
+        return self.rnd.uintLessThan(T, less_than);
+    }
+    pub fn uintAtMostBiased(self: *const RandomPair, comptime T: type, at_most: T) T {
+        return self.rnd.uintAtMostBiased(T, at_most);
+    }
+    pub fn uintAtMost(self: *const RandomPair, comptime T: type, at_most: T) T {
+        return self.rnd.uintAtMost(T, at_most);
+    }
+    pub fn intRangeLessThanBiased(self: *const RandomPair, comptime T: type, at_least: T, less_than: T) T {
+        return self.rnd.intRangeLessThanBiased(T, at_least, less_than);
+    }
+    pub fn intRangeLessThan(self: *const RandomPair, comptime T: type, at_least: T, less_than: T) T {
+        return self.rnd.intRangeLessThan(T, at_least, less_than);
+    }
+    pub fn intRangeAtMostBiased(self: *const RandomPair, comptime T: type, at_least: T, at_most: T) T {
+        return self.rnd.intRangeAtMostBiased(T, at_least, at_most);
+    }
+    pub fn intRangeAtMost(self: *const RandomPair, comptime T: type, at_least: T, at_most: T) T {
+        return self.rnd.intRangeAtMost(T, at_least, at_most);
+    }
+    /// Implemented in the same way vanilla minecraft does instead
+    /// of how zig did
+    pub fn float(self: *const RandomPair, comptime T: type) T {
+        switch (T) {
+            f32 => {
+                const rand = self.rnd.int(u64) >> (64 - 24);
+                return @as(f32, @floatFromInt(rand)) * float_unit;
+            },
+            f64 => {
+                const rand = self.rnd.int(u64) >> (64 - 53);
+                return @as(f64, @floatFromInt(rand)) * double_unit;
+            },
+            else => @compileError("unknown floating point type"),
+        }
+    }
+    pub fn floatNorm(self: *const RandomPair, comptime T: type) T {
+        return self.rnd.floatNorm(T);
+    }
+    pub fn floatExp(self: *const RandomPair, comptime T: type) T {
+        return self.rnd.floatExp(T);
+    }
+    pub fn shuffle(self: *const RandomPair, comptime T: type, buf: []T) void {
+        return self.rnd.shuffle(T, buf);
+    }
+    pub fn shuffleWithIndex(self: *const RandomPair, comptime T: type, buf: []T, comptime Index: type) void {
+        return self.rnd.shuffleWithIndex(T, buf, Index);
+    }
+    pub fn weightedIndex(self: *const RandomPair, comptime T: type, proportions: []const T) usize {
+        return self.rnd.weightedIndex(T, proportions);
     }
 };
 

@@ -187,7 +187,8 @@ const FormatContext = struct {
             .score,
             .selector,
             .nbt,
-            => @panic("Not Yet Implemented"), // TODO: TextComponent::format<content.(score, selector, nbt)>
+            => try writer.print("(TODO: Implement TextComponent::format<content.{t}>)", .{self.content}),
+            // TODO: TextComponent::format<content.(score, selector, nbt)>
         }
 
         for (self.children) |*tc| {
@@ -823,7 +824,6 @@ pub fn deserialize(_arena: Allocator, mapr: *utils.serial.MapReader) utils.seria
                             else => return error.UnexpectedToken,
                         }
                     }
-    
                 } else if (eql(u8, name, "score")) {
                     score_f = try gatherScoreValue(_arena, mapr);
                     first.maybeSet(.score);

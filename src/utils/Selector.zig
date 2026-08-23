@@ -4,7 +4,7 @@ const Identifier = @import("Identifier.zig");
 
 const math = std.math;
 const Allocator = std.mem.Allocator;
-const minInt = math.minInt;
+const Range = @import("utils.zig").Range;
 const maxInt = math.maxInt;
 const floatMin = math.floatMin;
 const floatMax = math.floatMax;
@@ -116,34 +116,6 @@ pub const Arguments = struct {
         }
     };
 };
-
-pub fn Range(comptime T: type) type {
-    const minT, const maxT = switch (@typeInfo(T)) {
-        .int => .{ minInt(T), maxInt(T) },
-        .float => .{ floatMin(T), floatMax(T) },
-        else => @compileError("Unkown numeric type: " ++ @typeName(T)),
-    };
-    return struct {
-        min: T = minT,
-        max: T = maxT,
-
-        pub fn init(min: ?T, max: ?T) @This() {
-            const real_min = min orelse minT;
-            const real_max = max orelse maxT;
-            assert(real_min <= real_max);
-
-            return .{ .min = real_min, .max = real_max };
-        }
-
-        pub inline fn clamp(self: @This(), v: T) T {
-            return math.clamp(v, self.min, self.max);
-        }
-
-        pub inline fn inRange(self: @This(), v: T) bool {
-            return self.min <= v and v <= self.max;
-        }
-    };
-}
 
 pub fn deinit(self: Selector, gpa: Allocator) void {
     self.arena_state.promote(gpa).deinit();

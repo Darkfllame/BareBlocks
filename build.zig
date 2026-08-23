@@ -35,6 +35,24 @@ pub fn build(b: *Build) !void {
     const optimize = b.standardOptimizeOption(.{});
 
     const use_llvm = b.option(bool, "use_llvm", "Force the use of LLVM");
+    const mc_version = b.option([]const u8, "mcver", "Version of minecraft (default: latest)") orelse "latest";
+    const force_mc_cache_reload = b.option(bool, "mccache_reload", "Force reloading minecraft cache (default: false)") orelse false;
+
+    const old_datagen_cmd = blk: {
+        if (std.mem.startsWith(u8, mc_version, "latest")) break :blk false;
+
+        var split = std.mem.splitScalar(u8, mc_version, '.');
+        const first_num = std.fmt.parseInt(u8, split.next() orelse @panic("Malformed Version"), 10) catch break :blk true;
+        const second_num = std.fmt.parseInt(u8, split.next() orelse @panic("Malformed Version"), 10) catch @panic("Malformed Version");
+        if (split.next()) |patch_str| {
+            _ = std.fmt.parseInt(u8, patch_str, 10) catch @panic("Malfromed Version");
+            if (first_num != 1) @panic("Malformed Version");
+            break :blk second_num >= 18;
+        } else {
+            break :blk false;
+        }
+    };
+    if (old_datagen_cmd) @panic("Minecraft version too old (must be at least 1.18)");
 
     // const vk_headers = b.dependency("vulkan_headers", .{});
     // const sdl_dep = b.dependency("sdl", .{
@@ -62,23 +80,6 @@ pub fn build(b: *Build) !void {
         .optimize = optimize,
     }).module("coroutines");
 
-    const mc_version = b.option([]const u8, "mcver", "Version of minecraft (default: latest)") orelse "latest";
-    const old_datagen_cmd = blk: {
-        if (std.mem.startsWith(u8, mc_version, "latest")) break :blk false;
-
-        var split = std.mem.splitScalar(u8, mc_version, '.');
-        const first_num = std.fmt.parseInt(u8, split.next() orelse @panic("Malformed Version"), 10) catch break :blk true;
-        const second_num = std.fmt.parseInt(u8, split.next() orelse @panic("Malformed Version"), 10) catch @panic("Malformed Version");
-        if (split.next()) |patch_str| {
-            _ = std.fmt.parseInt(u8, patch_str, 10) catch @panic("Malfromed Version");
-            if (first_num != 1) @panic("Malformed Version");
-            break :blk second_num >= 18;
-        } else {
-            break :blk false;
-        }
-    };
-    if (old_datagen_cmd) @panic("Minecraft version too old (must be at least 1.18)");
-
     const config = b.addOptions();
     config.addOption(std.SemanticVersion, "version", version);
     const config_mod = config.createModule();
@@ -88,8 +89,10 @@ pub fn build(b: *Build) !void {
 
     const mc26_2_jar = blk: {
         const run_cmd = b.addRunArtifact(mc_downloader);
-        run_cmd.has_side_effects = true;
-        run_cmd.stdio = .inherit;
+        if (force_mc_cache_reload) {
+            run_cmd.has_side_effects = true;
+            run_cmd.stdio = .inherit;
+        }
         run_cmd.addDirectoryArg(mcd_cache);
         run_cmd.addArgs(&.{ "jar", "server" });
         const out_jar = run_cmd.addOutputFileArg("minecraft.jar");
@@ -98,8 +101,10 @@ pub fn build(b: *Build) !void {
     };
     const mc26_2_assets = blk: {
         const run_cmd = b.addRunArtifact(mc_downloader);
-        run_cmd.has_side_effects = true;
-        run_cmd.stdio = .inherit;
+        if (force_mc_cache_reload) {
+            run_cmd.has_side_effects = true;
+            run_cmd.stdio = .inherit;
+        }
         run_cmd.addDirectoryArg(mcd_cache);
         run_cmd.addArg("assets");
         const out_dir = run_cmd.addOutputFileArg("minecraft.jar");
@@ -150,15 +155,6 @@ pub fn build(b: *Build) !void {
     };
 
     b.installArtifact(main_exe);
-    if (false) {
-        b.getInstallStep().dependOn(&b.addInstallBinFile(mc26_2_jar, "minecraft.jar").step);
-        b.getInstallStep().dependOn(&b.addInstallDirectory(.{
-            .source_dir = mc_generated,
-            .install_dir = .bin,
-            .install_subdir = "generated",
-            .include_extensions = &.{".json"},
-        }).step);
-    }
 
     const run_exe = b.addRunArtifact(main_exe);
     run_exe.step.dependOn(b.getInstallStep());
@@ -173,6 +169,14 @@ pub fn build(b: *Build) !void {
         .source_dir = mc26_2_assets,
         .install_dir = .bin,
         .install_subdir = "assets",
+    }).step);
+
+    const generated_step = b.step("generated", "Install minecraft generated data");
+    generated_step.dependOn(&b.addInstallDirectory(.{
+        .source_dir = mc_generated,
+        .install_dir = .bin,
+        .install_subdir = "generated",
+        .include_extensions = &.{".json"},
     }).step);
 
     const test_step = b.step("test", "Run test untis");

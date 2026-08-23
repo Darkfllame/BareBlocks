@@ -1,3 +1,4 @@
 #!/usr/bin/bash
 
 rm -rf */**/.zig-cache */**/zig-out */**/zig-pkg ./.mccache $@
+rm -rf .zig-cache zig-out zig-pkg .mccache
