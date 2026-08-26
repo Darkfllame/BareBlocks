@@ -13,6 +13,7 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const Writer = std.Io.Writer;
 const Reader = std.Io.Reader;
 const json = std.json;
+const serial = utils.serial;
 const assert = std.debug.assert;
 const eql = std.mem.eql;
 
@@ -282,29 +283,10 @@ fn fromContent(content: Content, options: CreateCommonOptions) TextComponent {
     };
 }
 
-fn nextDupeExpectString(allocator: Allocator, mapr: *utils.serial.MapReader) utils.serial.MapReader.ReadError![]u8 {
-    const value = try mapr.next();
-    if (value != .string) return error.UnexpectedToken;
-    return allocator.dupe(u8, value.string);
-}
+fn gatherScoreValue(_arena: Allocator, mapr: *serial.MapReader, out: anytype) serial.MapReader.ReadError!void {
+    _ = _arena;
 
-fn nextDecodeBool(mapr: *utils.serial.MapReader) utils.serial.MapReader.ReadError!bool {
-    const tok = try mapr.next();
-    return switch (tok) {
-        .string => |s| if (eql(u8, s, "false"))
-            false
-        else if (eql(u8, s, "true"))
-            true
-        else
-            error.UnexpectedToken,
-        .boolean => |b| b,
-        .byte, .short, .int, .long => |i| i != 0,
-        else => error.UnexpectedToken,
-    };
-}
-
-fn gatherScoreValue(_arena: Allocator, mapr: *utils.serial.MapReader) utils.serial.MapReader.ReadError!@FieldType(Content, "score") {
-    if (try mapr.next() != .aggregate_start) return error.UnexpectedToken;
+    try mapr.nextExpect(.aggregate_start);
 
     var name_f: ?[]const u8 = null;
     var objective_f: ?[]const u8 = null;
@@ -314,10 +296,10 @@ fn gatherScoreValue(_arena: Allocator, mapr: *utils.serial.MapReader) utils.seri
         switch (token) {
             .string => |s| {
                 if (eql(u8, s, "name")) {
-                    name_f = try nextDupeExpectString(_arena, mapr);
+                    name_f = try mapr.nextDupeExpectString();
                 } else if (eql(u8, s, "objective")) {
-                    objective_f = try nextDupeExpectString(_arena, mapr);
-                }
+                    objective_f = try mapr.nextDupeExpectString();
+                } else try mapr.skipValue();
             },
             .aggregate_end => break,
             else => return error.UnexpectedToken,
@@ -326,7 +308,7 @@ fn gatherScoreValue(_arena: Allocator, mapr: *utils.serial.MapReader) utils.seri
 
     if (name_f == null or objective_f == null) return error.MissingField;
 
-    return .{
+    out.* = @FieldType(Content, "score"){
         .name = if (eql(u8, name_f.?, "*"))
             .reader
         else
@@ -334,6 +316,33 @@ fn gatherScoreValue(_arena: Allocator, mapr: *utils.serial.MapReader) utils.seri
         // .{ .selector = try Selector.parse(name_f.?) },
         .objective = objective_f.?,
     };
+}
+
+fn gatherShadowColor(_arena: Allocator, mapr: *serial.MapReader, out: anytype) serial.MapReader.ReadError!void {
+    _ = _arena;
+    switch (try mapr.next()) {
+        .int => |v| out.* = @bitCast(v),
+        .long => |v| out.* = @truncate(@as(u64, @bitCast(v))),
+        .array_start => |arr| {
+            if (arr.length) |l| {
+                if (l != 4) return error.LengthMismatch;
+            }
+            if (arr.type) |t| {
+                if (t != .float) return error.UnexpectedToken;
+            }
+            var values: [4]f32 = @splat(0);
+            inline for (&values) |*v| {
+                v.* = @floatCast(try mapr.nextAsFloat());
+            }
+            try mapr.nextExpect(.array_end);
+            var res: u32 = 0;
+            inline for (values, 0..) |v, i| {
+                res |= @as(u32, @as(u8, @intFromFloat(@max(0, @min(v, 1)) * 255))) << ((values.len - i - 1) * 8);
+            }
+            out.* = res;
+        },
+        else => return error.UnexpectedToken,
+    }
 }
 
 // This is actually really useful for comptime computing :D
@@ -552,7 +561,7 @@ pub fn format(self: TextComponent, writer: *Writer) Writer.Error!void {
     try FormatContext.format(.{ .self = &self }, writer);
 }
 
-pub fn serialize(self: *const TextComponent, mapw: *utils.serial.MapWriter) utils.serial.MapWriter.WriteError!void {
+pub fn serialize(self: *const TextComponent, mapw: *serial.MapWriter) serial.MapWriter.WriteError!void {
     if (self.isSimpleText()) {
         return mapw.writeString(self.content.text);
     }
@@ -729,17 +738,59 @@ pub fn serialize(self: *const TextComponent, mapw: *utils.serial.MapWriter) util
     }
 }
 
-pub fn deserialize(_arena: Allocator, mapr: *utils.serial.MapReader) utils.serial.MapReader.ReadError!TextComponent {
-    // May be more of a "hack" than any real expected behaviour but
-    // it works so idc
-    const gpa = mapr.arena.child_allocator;
+pub fn deserialize(mapr: *serial.MapReader) serial.MapReader.ReadError!TextComponent {
+    const gpa = mapr.getAlloctor();
+    const _arena = mapr.getArena();
 
     var current: TextComponent = undefined;
     switch (try mapr.next()) {
         .string => |s| return .text(s, .{}),
         .aggregate_start => {
             current = .empty;
-            var type_f: ?[]const u8 = null;
+
+            var fg = serial.FieldGatherer(&.{
+                .{ .name = "type", .type = .string },
+
+                .{ .name = "text", .type = .string },
+
+                .{ .name = "translate", .type = .string },
+                .{ .name = "fallback", .type = .string },
+                .{ .name = "with", .type = .{ .array = &.{ .deserializeable = TextComponent } } },
+
+                .{ .name = "score", .type = .{ .custom = .{
+                    .type = @FieldType(Content, "score"),
+                    .read = gatherScoreValue,
+                } } },
+
+                .{ .name = "selector", .type = .string },
+                .{ .name = "separator", .type = .{ .copy = &.{ .deserializeable = TextComponent } } }, // both used for selector and nbt
+
+                .{ .name = "keybind", .type = .string },
+
+                .{ .name = "source", .type = .string },
+                .{ .name = "nbt", .type = .string },
+                .{ .name = "interpret", .type = .string },
+                .{ .name = "plain", .type = .string },
+                .{ .name = "entity", .type = .string },
+                .{ .name = "block", .type = .string },
+                .{ .name = "storage", .type = .string },
+
+                .{ .name = "font", .type = .string },
+                .{ .name = "bold", .type = .boolean },
+                .{ .name = "italic", .type = .boolean },
+                .{ .name = "underlined", .type = .boolean },
+                .{ .name = "strikethrough", .type = .boolean },
+                .{ .name = "obfuscated", .type = .boolean },
+                .{ .name = "shadow_color", .type = .{ .custom = .{ .type = u32, .read = gatherShadowColor } } },
+                .{ .name = "insertion", .type = .string },
+                .{ .name = "click_event", .type = .string },
+                .{ .name = "hover_event", .type = .string },
+                .{ .name = "extra", .type = .{ .array = &.{ .deserializeable = TextComponent } } },
+            }){ .opts = .{
+                .duplicate_field_mode = .use_last,
+                .ignore_unknown_fields = true,
+            } };
+            defer fg.deinit(gpa);
 
             var first: enum {
                 none,
@@ -755,144 +806,27 @@ pub fn deserialize(_arena: Allocator, mapr: *utils.serial.MapReader) utils.seria
                 }
             } = .none;
 
-            var text_f: ?[]const u8 = null;
+            while (try fg.next(gpa, _arena, mapr)) |chosen| {
+                switch (chosen) {
+                    else => {},
 
-            var translate_f: ?[]const u8 = null;
-            var fallback_f: ?[]const u8 = null;
-            var with_f: std.ArrayList(TextComponent) = .empty;
-            defer with_f.deinit(gpa);
-
-            var score_f: ?@FieldType(Content, "score") = null;
-
-            var selector_f: ?[]const u8 = null;
-            // both used for selector and nbt
-            var separator_f: ?*TextComponent = null;
-            defer if (separator_f) |s| gpa.destroy(s);
-
-            var keybind_f: ?[]const u8 = null;
-
-            var source_f: ?[]const u8 = null;
-            var nbt_f: ?[]const u8 = null;
-            var interpret_f: ?bool = null;
-            var plain_f: ?bool = null;
-            var entity_f: ?[]const u8 = null;
-            var block_f: ?[]const u8 = null;
-            var storage_f: ?[]const u8 = null;
-
-            // formatting
-            var font_f: ?[]const u8 = null;
-            var bold_f: ?bool = null;
-            var italic_f: ?bool = null;
-            var underlined_f: ?bool = null;
-            var strikethrough_f: ?bool = null;
-            var obfuscated_f: ?bool = null;
-            var shadow_color_f: ?u32 = null;
-            var insertion_f: ?[]const u8 = null;
-            // var click_event_f: ?[]const u8 = null;
-            // var hover_event_f: ?[]const u8 = null;
-            var extra_f: std.ArrayList(TextComponent) = .empty;
-            defer extra_f.deinit(gpa);
-
-            // gather fields values
-            while (true) {
-                const token = try mapr.next();
-                const name = switch (token) {
-                    .string => |s| s,
-                    .aggregate_end => break,
-                    else => return error.UnexpectedToken,
-                };
-                if (eql(u8, name, "type")) {
-                    type_f = try nextDupeExpectString(_arena, mapr);
-                } else if (eql(u8, name, "text")) {
-                    text_f = try nextDupeExpectString(_arena, mapr);
-                    first.maybeSet(.text);
-                } else if (eql(u8, name, "translate")) {
-                    translate_f = try nextDupeExpectString(_arena, mapr);
-                    first.maybeSet(.translatable);
-                } else if (eql(u8, name, "fallback")) {
-                    fallback_f = try nextDupeExpectString(_arena, mapr);
-                } else if (eql(u8, name, "with")) {
-                    var tok = try mapr.next();
-                    if (tok != .array_start) return error.UnexpectedToken;
-                    with_f.clearRetainingCapacity();
-                    try with_f.ensureUnusedCapacity(gpa, tok.array_start.length orelse 0);
-                    while (true) {
-                        tok = try mapr.next();
-                        switch (tok) {
-                            .string, .aggregate_start, .array_start => try with_f.append(gpa, try deserialize(_arena, mapr)),
-                            .array_end => break,
-                            else => return error.UnexpectedToken,
-                        }
-                    }
-                } else if (eql(u8, name, "score")) {
-                    score_f = try gatherScoreValue(_arena, mapr);
-                    first.maybeSet(.score);
-                } else if (eql(u8, name, "selector")) {
-                    selector_f = try nextDupeExpectString(_arena, mapr);
-                } else if (eql(u8, name, "separator")) {
-                    const sep_ptr = try gpa.create(TextComponent);
-                    errdefer gpa.destroy(sep_ptr);
-                    sep_ptr.* = try deserialize(_arena, mapr);
-
-                    if (separator_f) |sep| gpa.destroy(sep);
-                    separator_f = separator_f;
-                } else if (eql(u8, name, "keybind")) {
-                    keybind_f = try nextDupeExpectString(_arena, mapr);
-                    first.maybeSet(.keybind);
-                } else if (eql(u8, name, "nbt")) {
-                    nbt_f = try nextDupeExpectString(_arena, mapr);
-                    first.maybeSet(.nbt);
-                } else if (eql(u8, name, "source")) {
-                    source_f = try nextDupeExpectString(_arena, mapr);
-                } else if (eql(u8, name, "entity")) {
-                    entity_f = try nextDupeExpectString(_arena, mapr);
-                } else if (eql(u8, name, "block")) {
-                    block_f = try nextDupeExpectString(_arena, mapr);
-                } else if (eql(u8, name, "storage")) {
-                    storage_f = try nextDupeExpectString(_arena, mapr);
-                } else if (eql(u8, name, "interpret")) {
-                    interpret_f = try nextDecodeBool(mapr);
-                } else if (eql(u8, name, "plain")) {
-                    plain_f = try nextDecodeBool(mapr);
-                } else if (eql(u8, name, "font")) {
-                    font_f = try nextDupeExpectString(_arena, mapr);
-                } else if (eql(u8, name, "bold")) {
-                    bold_f = try nextDecodeBool(mapr);
-                } else if (eql(u8, name, "italic")) {
-                    italic_f = try nextDecodeBool(mapr);
-                } else if (eql(u8, name, "underlined")) {
-                    underlined_f = try nextDecodeBool(mapr);
-                } else if (eql(u8, name, "strikethrough")) {
-                    strikethrough_f = try nextDecodeBool(mapr);
-                } else if (eql(u8, name, "obfuscated")) {
-                    obfuscated_f = try nextDecodeBool(mapr);
-                } else if (eql(u8, name, "shadow_color")) {
-                    switch (try mapr.next()) {
-                        .int, .long => |v| shadow_color_f = @truncate(@as(u64, @bitCast(v))),
-                        .array_start => |arr| {
-                            if (arr.length) |l| {
-                                if (l != 4) return error.UnexpectedToken;
-                            }
-                            if (arr.type) |t| {
-                                if (t != .float) return error.UnexpectedToken;
-                            }
-                        },
-                        else => return error.UnexpectedToken,
-                    }
-                } else if (eql(u8, name, "insertion")) {
-                    insertion_f = try nextDupeExpectString(_arena, mapr);
+                    .text => first.maybeSet(.text),
+                    .translate => first.maybeSet(.translatable),
+                    .score => first.maybeSet(.score),
+                    .keybind => first.maybeSet(.keybind),
+                    .nbt => first.maybeSet(.nbt),
                 }
             }
 
             const ContentType = @typeInfo(Content).@"union".tag_type.?;
 
             const real_type: ContentType = blk: {
-                if (type_f) |typ| notype: {
+                if (fg.get(.type)) |typ| notype: {
                     break :blk switch (std.meta.stringToEnum(ContentType, typ) orelse break :notype) {
                         .int, .float => break :notype,
                         else => |v| v,
                     };
-                }
+                } else |_| {}
 
                 switch (first) {
                     .none => return .empty,
@@ -902,22 +836,22 @@ pub fn deserialize(_arena: Allocator, mapr: *utils.serial.MapReader) utils.seria
 
             switch (real_type) {
                 .int, .float => unreachable,
-                .text => current.content = .{ .text = text_f orelse return error.MissingField },
+                .text => current.content = .{ .text = try fg.get(.text) },
                 .translatable => current.content = .{ .translatable = .{
-                    .id = translate_f orelse return error.MissingField,
-                    .fallback = fallback_f,
-                    .with = try _arena.dupe(TextComponent, with_f.items),
+                    .id = try fg.get(.translate),
+                    .fallback = fg.getNullable(.fallback),
+                    .with = try _arena.dupe(TextComponent, fg.getNullable(.with) orelse &.{}),
                 } },
-                .score => current.content = .{ .score = score_f orelse return error.MissingField },
+                .score => current.content = .{ .score = try fg.get(.score) },
                 .selector => {
                     @panic("Selector parsing not yet implemented");
                     //     current.content = .{ .selector = .{
-                    //     .value = try Selector.parse(selector_f orelse return error.MissingField),
+                    //     .value = try Selector.parsetry fg.get((.selector)),
                     //     .separator = separator_f,
                     // } }
                 },
                 .keybind => {
-                    const kb_translation = keybind_f orelse return error.MissingField;
+                    const kb_translation = try fg.get(.keybind);
                     if (kb_translation.len < 4 or kb_translation.len > Keybind.max_formatted_len) {
                         return error.LengthMismatch;
                     }
@@ -948,7 +882,7 @@ pub fn deserialize(_arena: Allocator, mapr: *utils.serial.MapReader) utils.seria
         .array_start => |arr| {
             var next_token = try mapr.peek();
             switch (next_token) {
-                .string, .aggregate_start, .array_start => current = try deserialize(_arena, mapr),
+                .string, .aggregate_start, .array_start => current = try deserialize(mapr),
                 .array_end => return .empty,
                 else => return error.UnexpectedToken,
             }
@@ -959,7 +893,7 @@ pub fn deserialize(_arena: Allocator, mapr: *utils.serial.MapReader) utils.seria
             while (true) {
                 next_token = try mapr.peek();
                 switch (next_token) {
-                    .string, .aggregate_start, .array_start => try list.append(gpa, try deserialize(_arena, mapr)),
+                    .string, .aggregate_start, .array_start => try list.append(gpa, try deserialize(mapr)),
                     .array_end => break,
                     else => return error.UnexpectedToken,
                 }

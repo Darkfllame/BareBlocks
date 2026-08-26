@@ -172,6 +172,8 @@ pub const SerialWriter = struct {
         self.* = .{
             .mapw = .{
                 .writer = writer,
+                // generally if you tell it to be minified you want to use as less space as possible
+                .output_type = if (jsopt.whitespace != .minified) .human_readable else .text,
                 .vtable = &vtable,
             },
             .jss = .{

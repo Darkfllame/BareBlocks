@@ -1,7 +1,5 @@
-// TODO: JSON Reader/Writer
-// TODO: NBT Reader/Writer
+// TODO: JSON Reader
 // TODO: Comptime generic interface, for metadata-based serializing
-// TODO: Replace old uses of json/nbt by these
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -12,6 +10,57 @@ const IoReader = std.Io.Reader;
 const IoWriter = std.Io.Writer;
 
 const is_debug = builtin.mode == .Debug;
+
+const assert = std.debug.assert;
+
+fn castIntToFloat(comptime F: type, v: anytype) ?F {
+    const V = @TypeOf(v);
+    _ = @typeInfo(V).int;
+    const max_F: comptime_int = @trunc(std.math.floatMax(F) - 1) + 1;
+    const min_F: comptime_int = @trunc(std.math.floatMin(F) - 1) + 1;
+
+    if (min_F <= v and v <= max_F) {
+        return @floatFromInt(v);
+    }
+    return null;
+}
+
+fn castFloatToInt(comptime I: type, v: anytype) ?I {
+    const V = @TypeOf(v);
+    _ = @typeInfo(V).float;
+    const max_I: V = @floatFromInt(std.math.maxInt(I));
+    const min_I: V = @floatFromInt(std.math.minInt(I));
+
+    if (min_I <= v and v <= max_I) {
+        return @intFromFloat(v);
+    }
+    return null;
+}
+
+fn parseBool(s: []const u8) ?bool {
+    return if (std.mem.eql(u8, s, "false"))
+        false
+    else if (std.mem.eql(u8, s, "true"))
+        true
+    else
+        null;
+}
+
+fn readPropsRaw(comptime ftype: FieldProperty.Type, arena: Allocator, mapr: *MapReader) !ftype.GetType() {
+    return switch (ftype) {
+        .string => try mapr.nextDupeExpectString(),
+        .boolean => try mapr.nextAsBool(),
+        .int => try mapr.nextAsInt(),
+        .float => try mapr.nextAsFloat(),
+        .custom => |c| {
+            var out: c.type = undefined;
+            try c.read(arena, mapr, &out);
+            return out;
+        },
+        .deserializeable => |T| try T.deserialize(mapr),
+        .external, .array, .copy => unreachable,
+    };
+}
 
 /// For security, the maximum size allocated to store a single string or number value is limited to 4MiB by default.
 /// This limit can be specified by calling `nextAllocMax()` instead of `nextAlloc()`.
@@ -117,16 +166,32 @@ pub const Value = union(BaseType) {
         }
     };
 
-    pub fn getInt(self: Value) ?i64 {
+    pub fn asInt(self: Value) ?i64 {
         return switch (self) {
+            .boolean => |v| @intFromBool(v),
             .byte, .short, .int, .long => |v| v,
+            .float, .double => |v| castFloatToInt(i64, v),
+            .string => |s| std.fmt.parseInt(i64, s, 0) catch null,
             else => null,
         };
     }
 
-    pub fn getFloat(self: Value) ?f64 {
+    pub fn asBool(self: Value) ?bool {
         return switch (self) {
+            .boolean => |b| b,
+            .byte, .short, .int, .long => |v| v != 0,
+            .float, .double => |v| v != 0,
+            .string => |s| parseBool(s),
+            else => null,
+        };
+    }
+
+    pub fn asFloat(self: Value) ?f64 {
+        return switch (self) {
+            .boolean => |v| @floatFromInt(@intFromBool(v)),
+            .byte, .short, .int, .long => |v| castIntToFloat(f64, v),
             .float, .double => |v| v,
+            .string => |s| std.fmt.parseFloat(f64, s) catch null,
             else => null,
         };
     }
@@ -157,6 +222,18 @@ pub const Token = union(TokenType) {
         return switch (self) {
             .boolean => |b| @intFromBool(b),
             .byte, .short, .int, .long => |v| v,
+            .float, .double => |v| castFloatToInt(i64, v),
+            .string => |s| std.fmt.parseInt(i64, s, 0) catch null,
+            else => null,
+        };
+    }
+    /// Same as `asInt` but doesn't extent sign bit.
+    pub fn asIntUnsigned(self: Token) ?u64 {
+        return switch (self) {
+            .boolean => |b| @intFromBool(b),
+            inline .byte, .short, .int, .long => |v| @as(u64, @as(@Int(.unsigned, @bitSizeOf(@TypeOf(v))), @bitCast(v))),
+            .float, .double => |v| castFloatToInt(u64, v),
+            .string => |s| std.fmt.parseInt(u64, s, 0) catch null,
             else => null,
         };
     }
@@ -166,13 +243,18 @@ pub const Token = union(TokenType) {
         return switch (self) {
             .boolean => |b| b,
             .byte, .short, .int, .long => |v| v != 0,
+            .float, .double => |v| v != 0,
+            .string => |s| parseBool(s),
             else => null,
         };
     }
 
-    pub fn getFloat(self: Token) ?f64 {
+    pub fn asFloat(self: Token) ?f64 {
         return switch (self) {
+            .boolean => |v| @floatFromInt(@intFromBool(v)),
+            .byte, .short, .int, .long => |v| castIntToFloat(f64, v),
             .float, .double => |v| v,
+            .string => |s| std.fmt.parseFloat(f64, s) catch null,
             else => null,
         };
     }
@@ -180,11 +262,23 @@ pub const Token = union(TokenType) {
 
 pub const MapWriter = struct {
     writer: *IoWriter,
+    /// This can help serializers to know which types to choose when serializing.
+    output_type: OutputType,
     vtable: *const VTable,
 
     /// `error.WriteError` can either be caused by the `writer` or and error within
     /// the underlaying implementation of this `MapWriter` value.
     pub const WriteError = IoWriter.Error;
+
+    pub const OutputType = enum {
+        /// A sub-mode for `text` that meant to specifically be presented to
+        /// a human being.
+        human_readable,
+        /// Means the serialized values will be written in plain text (json, snbt)
+        text,
+        /// Means the serialized values will be written in binary format (nbt)
+        binary,
+    };
 
     pub const VTable = struct {
         fieldName: *const fn (self: *MapWriter, name: []const u8) WriteError!void,
@@ -272,6 +366,8 @@ pub const MapReader = struct {
         LengthMismatch,
         InvalidCharacter,
         MissingField,
+        UnknownField,
+        DuplicateField,
     };
 
     pub const NestingType = enum(u1) { aggregate, list };
@@ -385,6 +481,34 @@ pub const MapReader = struct {
             if (self.stackHeight() == base_height) break;
         }
     }
+
+    pub fn nextDupeExpectString(self: *MapReader) ReadError![]u8 {
+        const value = try self.nextExpect(.string);
+        return self.getArena().dupe(u8, value);
+    }
+
+    pub fn nextAsInt(self: *MapReader) ReadError!i64 {
+        return Token.asInt(try self.next()) orelse error.UnexpectedToken;
+    }
+
+    /// Same as `nextAsInt` but extends the integer in an unsigned manner.
+    pub fn nextAsIntUnsigned(self: *MapReader) ReadError!u64 {
+        return Token.asIntUnsigned(try self.next()) orelse error.UnexpectedToken;
+    }
+
+    pub fn nextAsBool(self: *MapReader) ReadError!bool {
+        return Token.asBool(try self.next()) orelse error.UnexpectedToken;
+    }
+
+    pub fn nextAsFloat(self: *MapReader) ReadError!f64 {
+        return Token.asFloat(try self.next()) orelse error.UnexpectedToken;
+    }
+
+    pub fn nextExpect(self: *MapReader, comptime ttype: TokenType) ReadError!@FieldType(Token, @tagName(ttype)) {
+        const tok = try self.next();
+        if (tok != ttype) return error.UnexpectedToken;
+        return @field(tok, @tagName(ttype));
+    }
 };
 
 pub const nbt = struct {
@@ -396,6 +520,255 @@ pub const json = struct {
     pub const Writer = @import("serial/json.zig").SerialWriter;
     pub const Reader = @import("serial/json.zig").SerialReader;
 };
+
+pub const NextOptions = struct {
+    duplicate_field_mode: enum { use_first, @"error", use_last } = .use_first,
+    ignore_unknown_fields: bool = true,
+};
+
+pub const FieldProperty = struct {
+    name: []const u8,
+    type: Type,
+
+    pub const Type = union(enum) {
+        /// A UTF-8 string.
+        string,
+        /// A boolean field, can be either:
+        /// - Any number: In which case `0` will be treated as `false` and any  other
+        ///             value as `true`.
+        /// - A string: `"true"` -> `true`, `"false"` -> `false`, and any other value
+        ///             will result in an error.
+        /// - A boolean: No explanation
+        boolean,
+        int,
+        float,
+        /// Externally parsed.
+        external: type,
+        /// Uses the type's own `deserialize` function.
+        deserializeable: type,
+        /// Will be represented as an `std.ArrayList` internally. But
+        /// cleared each time the field is met.
+        array: *const Type,
+        custom: struct {
+            type: type,
+            read: fn (Allocator, *MapReader, anytype) MapReader.ReadError!void,
+        },
+        /// Will allocate a value of the subtype.
+        copy: *const Type,
+
+        fn isNestable(comptime self: Type) bool {
+            return switch (self) {
+                .string, .boolean, .int, .float, .deserializeable, .custom => true,
+                .external, .array, .copy => false,
+            };
+        }
+
+        fn GetType(comptime self: Type) type {
+            return switch (self) {
+                .string => []const u8,
+                .boolean => bool,
+                .int => i64,
+                .float => f64,
+                .deserializeable, .external => |T| T,
+                .array => |a| {
+                    assert(a.isNestable());
+                    return std.ArrayList(a.GetType());
+                },
+                .custom => |c| c.type,
+                .copy => |c| {
+                    assert(c.isNestable());
+                    return *c.GetType();
+                },
+            };
+        }
+
+        fn GetUseableType(comptime self: Type) type {
+            return switch (self) {
+                .string => []const u8,
+                .boolean => bool,
+                .int => i64,
+                .float => f64,
+                .deserializeable, .external => |T| T,
+                .array => |a| {
+                    assert(a.* != .copy);
+                    assert(a.* != .external);
+                    assert(a.* != .array);
+                    return []const a.GetType();
+                },
+                .custom => |c| c.type,
+                .copy => |c| {
+                    assert(c.* != .copy);
+                    assert(c.* != .external);
+                    assert(c.* != .array);
+                    return *c.GetType();
+                },
+            };
+        }
+    };
+};
+
+/// A generic struct that helps by improving reading aggregates. Simply
+/// define your fields to gather in the `fields` argument, and call `.next()`
+/// repetitively until `null` is returned. You can also add custom behaviour on certain
+/// fields with the non-null return value of `.next()`.
+///
+/// ```zig
+/// var fg = FieldGatherer(&.{
+///     .{ .name = "field_a", .type = .boolean },
+/// }){};
+/// defer fg.deinit(gpa);
+/// ```
+pub fn FieldGatherer(comptime fields: []const FieldProperty) type {
+    var names: [fields.len][]const u8 = undefined;
+    var types: [fields.len]type = undefined;
+    var attrs: [fields.len]std.builtin.Type.StructField.Attributes = undefined;
+    for (fields, 0..) |f, i| {
+        names[i] = f.name;
+        const T = f.type.GetType();
+        types[i] = if (f.type == .copy) ?T else T;
+        attrs[i] = .{ .default_value_ptr = @ptrCast(if (f.type == .copy) &@as(?T, null) else &@as(T, undefined)) };
+    }
+
+    const EnumInt = std.math.IntFittingRange(0, fields.len);
+    const Values = @Struct(.auto, null, &names, &types, &attrs);
+    const MaskStruct = @Struct(
+        .@"packed",
+        @Int(.unsigned, fields.len),
+        &names,
+        &@splat(bool),
+        &@splat(.{ .default_value_ptr = &false }),
+    );
+    const FieldEnum = @Enum(
+        EnumInt,
+        .nonexhaustive,
+        &names,
+        &std.simd.iota(EnumInt, fields.len),
+    );
+    return struct {
+        const Self = @This();
+
+        fn FieldType(comptime field: FieldEnum) type {
+            return fieldProps(field).type.GetUseableType();
+        }
+
+        fn fieldProps(comptime field: FieldEnum) FieldProperty {
+            const name = @tagName(field);
+            for (fields) |fp| {
+                if (std.mem.eql(u8, fp.name, name)) {
+                    return fp;
+                }
+            }
+            unreachable;
+        }
+
+        fn readValue(self: *Self, comptime field: FieldEnum, gpa: Allocator, arena: Allocator, mapr: *MapReader) !void {
+            const ftype = fieldProps(field).type;
+            const value_ptr = &@field(self.values, @tagName(field));
+            const mask_ptr = &@field(self.mask, @tagName(field));
+
+            switch (ftype) {
+                .string,
+                .boolean,
+                .custom,
+                .deserializeable,
+                .int,
+                .float,
+                => value_ptr.* = try readPropsRaw(ftype, arena, mapr),
+                .external => unreachable,
+                .array => |a| {
+                    var tok = try mapr.next();
+                    if (tok != .array_start) return error.UnexpectedToken;
+                    value_ptr.clearRetainingCapacity();
+                    try value_ptr.ensureUnusedCapacity(gpa, tok.array_start.length orelse 0);
+                    while (true) {
+                        tok = try mapr.next();
+                        if (tok == .array_end) break;
+                        try value_ptr.append(gpa, try readPropsRaw(a.*, arena, mapr));
+                    }
+                },
+                .copy => |c| value_ptr.*.?.* = try readPropsRaw(c.*, arena, mapr),
+            }
+            mask_ptr.* = true;
+        }
+
+        mask: MaskStruct = .{},
+        values: Values = .{},
+        opts: NextOptions = .{},
+
+        pub fn deinit(self: *Self, gpa: Allocator) void {
+            inline for (fields) |f| {
+                if (@field(self.mask, f.name)) switch (f.type) {
+                    .array => @field(self.values, f.name).deinit(gpa),
+                    .copy => if (@field(self.values, f.name)) |ptr| gpa.destroy(ptr),
+                    else => comptime continue,
+                };
+            }
+        }
+
+        pub fn next(self: *Self, gpa: Allocator, arena: Allocator, mapr: *MapReader) MapReader.ReadError!?FieldEnum {
+            const token = try mapr.next();
+            const name = switch (token) {
+                .string => |s| s,
+                .aggregate_end => return null,
+                else => return error.UnexpectedToken,
+            };
+            inline for (fields) |fp| {
+                if (std.mem.eql(u8, fp.name, name)) {
+                    const field_enum = comptime @field(FieldEnum, fp.name);
+                    const value_ptr = &@field(self.values, fp.name);
+                    const mask_ptr = &@field(self.mask, fp.name);
+
+                    if (mask_ptr.*) switch (self.opts.duplicate_field_mode) {
+                        .use_first => break,
+                        .@"error" => return error.DuplicateField,
+                        .use_last => {},
+                    };
+
+                    switch (fp.type) {
+                        .external => return field_enum,
+                        // Make sure these types are valid.
+                        .array => if (!mask_ptr.*) {
+                            value_ptr.* = .empty;
+                        },
+                        .copy => |c| if (value_ptr.* == null) {
+                            value_ptr.* = try gpa.create(c.GetType());
+                        },
+                        else => {},
+                    }
+
+                    try self.readValue(field_enum, gpa, arena, mapr);
+                    return field_enum;
+                }
+            } else if (!self.opts.ignore_unknown_fields) return error.UnknownField;
+            try mapr.skipValue();
+            return @enumFromInt(fields.len); // always out of range
+        }
+
+        pub fn set(self: *const Self, comptime field: FieldEnum, value: @FieldType(Values, @tagName(field))) void {
+            comptime assert(fieldProps(field).type == .external);
+
+            const name = @tagName(field);
+            @field(self.values, name) = value;
+            @field(self.mask, name) = true;
+        }
+
+        /// Note: Pointer types (arrays and copy's) are `const`.
+        pub fn get(self: *const Self, comptime field: FieldEnum) error{MissingField}!FieldType(field) {
+            if (!@field(self.mask, @tagName(field))) return error.MissingField;
+            const v = @field(self.values, @tagName(field));
+            return switch (fieldProps(field).type) {
+                .array => v.items,
+                .copy => v.?,
+                else => v,
+            };
+        }
+
+        pub fn getNullable(self: *const Self, comptime field: FieldEnum) ?FieldType(field) {
+            if (!@field(self.mask, @tagName(field))) return null;
+            return self.get(field) catch unreachable;
+        }
+    };
+}
 
 test {
     std.testing.refAllDecls(@This());

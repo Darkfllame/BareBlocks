@@ -131,6 +131,8 @@ pub const AllocPair = struct {
     gpa: Allocator,
     arena: Allocator,
 
+    pub const no_alloc = new(.failing, .failing);
+
     pub fn new(gpa: Allocator, arena: Allocator) AllocPair {
         return .{ .gpa = gpa, .arena = arena };
     }
@@ -143,27 +145,32 @@ pub const AllocPair = struct {
         out_arena.* = .init(gpa);
         return .{ .gpa = gpa, .arena = out_arena.allocator() };
     }
-
-    pub fn read(self: *const AllocPair, comptime @"type": Type, reader: *Reader) Type.ReadError!@"type".getZigType() {
-        var ret: @"type".getZigType() = undefined;
-        try @"type".read(self.gpa, self.arena, reader, .{}, &ret);
-        return ret;
-    }
-
-    pub fn write(self: *const AllocPair, comptime @"type": Type, writer: *Writer, value: @"type".getZigType()) Type.WriteError!void {
-        return @"type".write(self.gpa, self.arena, writer, value);
-    }
 };
 
 pub const IdSet = union(enum) { tag: Identifier, ids: []u32 };
 
 pub const Type = union(enum) {
+    fn jsonFmtString(comptime T: type) []const u8 {
+        return switch (@typeInfo(T)) {
+            .comptime_int, .comptime_float, .int, .float => "{d}",
+            .@"struct", .@"union", .@"enum" => if (std.meta.hasMethod(T, "format")) "{f}" else "{any}",
+            .pointer => |ptr| switch (ptr.size) {
+                .one => jsonFmtString(ptr.child),
+                .slice => "{any}",
+                else => |tag| @compileError("Impossible to get formatting string for " ++
+                    @tagName(tag) ++ " pointer"),
+            },
+            .optional => |opt| "?" ++ jsonFmtString(opt.child),
+            else => "{any}",
+        };
+    }
+
     custom: struct {
         type: type,
         /// `out` is `*<.type>`
-        readFn: fn (gpa: Allocator, arena: Allocator, reader: *Reader, parent: anytype, out: anytype) ReadError!void,
+        readFn: fn (params: ReadParams, reader: *Reader, parent: anytype, out: anytype) ReadError!void,
         /// `val` is `<.type>`
-        writeFn: fn (gpa: Allocator, arena: Allocator, writer: *Writer, val: anytype) WriteError!void,
+        writeFn: fn (apair: AllocPair, writer: *Writer, val: anytype) WriteError!void,
     },
     structured: StructuredPacket,
     bool,
@@ -231,6 +238,17 @@ pub const Type = union(enum) {
     pub const max_string = Type{ .string = 0x7FFF };
     pub const nbt_text_component = Type{ .nbt = TextComponent };
     pub const json_text_component = Type{ .json = TextComponent };
+
+    pub const ReadError = Identifier.ValidationError || Reader.TakeLeb128Error || Reader.ReadAllocError || error{
+        InvalidUTF8,
+        InvalidLength,
+        InvalidJSON,
+        InvalidNBT,
+        InvalidEnumTag,
+        InvalidNumber,
+    };
+
+    pub const WriteError = Allocator.Error || Writer.Error || NBT.WriteError || error{InvalidUTF8};
 
     pub const TCSerialType = enum { nbt, json };
     pub const BackingInteger = enum {
@@ -325,16 +343,37 @@ pub const Type = union(enum) {
         }
     };
 
-    pub const ReadError = Identifier.ValidationError || Reader.TakeLeb128Error || Reader.ReadAllocError || error{
-        InvalidUTF8,
-        InvalidLength,
-        InvalidJSON,
-        InvalidNBT,
-        InvalidEnumTag,
-        InvalidNumber,
-    };
+    pub const ReadParams = struct {
+        fn getMaybeArena(self: ReadParams) ?Allocator {
+            return if (self.input_mode == .streamed) self.getArena() else null;
+        }
+        fn getMaybeGpa(self: ReadParams) ?Allocator {
+            return if (self.input_mode == .streamed) self.gpa else null;
+        }
+        fn getArena(self: ReadParams) Allocator {
+            return self.arena.allocator();
+        }
+        fn arenaDupe(self: ReadParams, comptime T: type, m: []const T) Allocator.Error![]const T {
+            return self.getArena().dupe(T, m);
+        }
 
-    pub const WriteError = Allocator.Error || Writer.Error || NBT.WriteError || error{InvalidUTF8};
+        const failing_arena = std.heap.ArenaAllocator.init(.failing);
+
+        gpa: Allocator,
+        arena: *std.heap.ArenaAllocator,
+        input_mode: enum { full, streamed },
+
+        // technically won't modify internal states, as the failing allocator would just return null.
+        pub const no_alloc = fullInput(.failing, @constCast(&failing_arena));
+
+        pub fn fullInput(gpa: Allocator, arena: *std.heap.ArenaAllocator) ReadParams {
+            return .{ .gpa = gpa, .arena = arena, .input_mode = .full };
+        }
+
+        pub fn streamedInput(gpa: Allocator, arena: Allocator) ReadParams {
+            return .{ .gpa = gpa, .arena = arena, .input_mode = .streamed };
+        }
+    };
 
     pub fn getZigType(comptime self: Type) type {
         return switch (self) {
@@ -403,21 +442,6 @@ pub const Type = union(enum) {
             .either => |subs| Either(subs[0], subs[1]),
             .game_profile => GameProfile,
             .lpvec3 => math.Vec3d,
-        };
-    }
-
-    fn jsonFmtString(comptime T: type) []const u8 {
-        return switch (@typeInfo(T)) {
-            .comptime_int, .comptime_float, .int, .float => "{d}",
-            .@"struct", .@"union", .@"enum" => if (std.meta.hasMethod(T, "format")) "{f}" else "{any}",
-            .pointer => |ptr| switch (ptr.size) {
-                .one => jsonFmtString(ptr.child),
-                .slice => "{any}",
-                else => |tag| @compileError("Impossible to get formatting string for " ++
-                    @tagName(tag) ++ " pointer"),
-            },
-            .optional => |opt| "?" ++ jsonFmtString(opt.child),
-            else => "{any}",
         };
     }
 
@@ -592,32 +616,31 @@ pub const Type = union(enum) {
         return .{ .array = .remaining(sub) };
     }
 
-    pub inline fn readRoot(comptime self: Type, gpa: Allocator, arena: Allocator, reader: *Reader) ReadError!self.getZigType() {
+    pub inline fn readRoot(comptime self: Type, params: ReadParams, reader: *Reader) ReadError!self.getZigType() {
         var ret: self.getZigType() = undefined;
-        try self.read(gpa, arena, reader, .{}, &ret);
+        try self.read(params, reader, .{}, &ret);
         return ret;
     }
 
     pub inline fn readNoAlloc(comptime self: Type, reader: *Reader) ReadError!self.getZigType() {
-        return self.readRoot(.failing, .failing, reader);
+        return self.readRoot(.no_alloc, reader);
     }
 
     pub inline fn writerNoAlloc(comptime self: Type, writer: *Writer, val: self.getZigType()) WriteError!void {
-        return self.write(.failing, .failing, writer, val);
+        return self.write(.no_alloc, writer, val);
     }
 
-    pub fn read(comptime self: Type, gpa: Allocator, arena: Allocator, reader: *Reader, parent: anytype, ret: *self.getZigType()) ReadError!void {
+    pub fn read(comptime self: Type, params: ReadParams, reader: *Reader, parent: anytype, ret: *self.getZigType()) ReadError!void {
         if (@typeInfo(@TypeOf(parent)) != .@"struct") @compileError("Parent argument must be a struct type");
         ret.* = sw: switch (self) {
             .custom => |c| {
-                try c.readFn(gpa, arena, reader, parent, ret);
+                try c.readFn(params, reader, parent, ret);
                 break :sw ret.*;
             },
             .structured => |desc| {
                 inline for (desc.fields) |field| {
                     try field.type.read(
-                        gpa,
-                        arena,
+                        params,
                         reader,
                         if (@typeInfo(@TypeOf(parent)).@"struct".fields.len == 0) // pass `ret` if current call is root
                             ret.*
@@ -649,15 +672,18 @@ pub const Type = union(enum) {
                 const Int = @Int(.unsigned, bits);
                 break :sw @bitCast(try readVarIntMax(reader, Int, std.math.maxInt(Int)));
             },
-            .string => |may_max_cps| try readString(arena, reader, may_max_cps),
+            .string => |may_max_cps| try readString(params.getMaybeArena(), reader, may_max_cps),
             .json => |may_sub| {
                 const Sub = may_sub orelse utils.serial.Value;
                 if (true) @compileError("TODO: Make json serial reader");
-                const str = try readString(gpa, reader, null);
-                defer gpa.free(str);
+                const str = try readString(params.getMaybeGpa(), reader, null);
+                defer if (params.getMaybeGpa()) |gpa| gpa.free(str);
 
-                const value = json.parseFromSliceLeaky(Sub, arena, str, .{
-                    .allocate = .alloc_always,
+                const value = json.parseFromSliceLeaky(Sub, params.getArena(), str, .{
+                    .allocate = if (params.input_mode == .streamed)
+                        .alloc_always
+                    else
+                        .alloc_if_needed,
                 }) catch |e| {
                     logger.err("Error parsing JSON value of {any}: {t}", .{ Sub, e });
                     return error.InvalidJSON;
@@ -665,7 +691,7 @@ pub const Type = union(enum) {
                 break :sw value;
             },
             .identifier => {
-                const str = try readString(arena, reader, null);
+                const str = try readString(params.getArena(), reader, null);
                 break :sw Identifier.validate(str) catch |e| {
                     logger.err("Invalid identifier: [{s}]", .{str});
                     return e;
@@ -677,10 +703,13 @@ pub const Type = union(enum) {
             .nbt => |may_sub| {
                 const T = may_sub orelse utils.serial.Value;
                 var nbt_sr: utils.serial.nbt.Reader = undefined;
-                nbt_sr.init(gpa, reader, false);
-                defer nbt_sr.deinit();
+                nbt_sr.initWithArena(params.arena, reader, false);
+                defer {
+                    nbt_sr.redeemArena(params.arena);
+                    nbt_sr.deinit();
+                }
 
-                break :sw @as(utils.serial.MapReader.ReadError!T, T.deserialize(arena, &nbt_sr.mapr)) catch |e| return switch (e) {
+                break :sw @as(utils.serial.MapReader.ReadError!T, T.deserialize(&nbt_sr.mapr)) catch |e| return switch (e) {
                     error.ValueTooLong => error.InvalidLength,
                     error.UnexpectedToken => error.InvalidNBT,
                     error.OutOfMemory => error.OutOfMemory,
@@ -715,7 +744,7 @@ pub const Type = union(enum) {
                     }
                     if (num_longs == 0) break :sw .{};
                     const bits = @as(u32, @bitCast(num_longs)) * 64;
-                    const bs = try std.DynamicBitSetUnmanaged.initEmpty(arena, bits);
+                    const bs = try std.DynamicBitSetUnmanaged.initEmpty(params.getArena(), bits);
                     try reader.readSliceAll(@ptrCast(bs.masks[0 .. num_longs / 64]));
                 }
             },
@@ -746,7 +775,7 @@ pub const Type = union(enum) {
                 };
                 if (!has_value) break :sw null;
                 var val: opt.sub.getZigType() = undefined;
-                try opt.sub.read(arena, reader, parent, &val);
+                try opt.sub.read(params, reader, parent, &val);
                 break :sw val;
             },
             .array => |arr| {
@@ -754,40 +783,37 @@ pub const Type = union(enum) {
                 switch (arr.size) {
                     .remaining => switch (self) {
                         inline .byte, .short, .int, .long, .float, .double, .uuid => {
-                            var alloc_w = try Writer.Allocating.initCapacity(
-                                arena,
-                                reader.buffer.end - reader.seek,
-                            );
+                            var alloc_w = Writer.Allocating.initAligned(params.gpa, .of(Sub));
                             defer alloc_w.deinit();
+                            try alloc_w.ensureTotalCapacity(reader.buffer.end - reader.seek);
 
                             reader.streamRemaining(&alloc_w.writer) catch |e| return switch (e) {
                                 error.WriteFailed => error.OutOfMemory,
                                 error.ReadFailed => error.ReadFailed,
                             };
+                            const written = alloc_w.written();
                             if (@sizeOf(Sub) != 1) {
                                 if (alloc_w.writer.end % @sizeOf(Sub) != 0) {
                                     return error.InvalidLength;
                                 }
-                                std.mem.byteSwapAllElements(Sub, @ptrCast(alloc_w.written()));
+                                std.mem.byteSwapAllElements(Sub, @ptrCast(written));
                             }
 
-                            ret.* = @ptrCast(try alloc_w.toOwnedSlice());
+                            break :sw try params.arenaDupe(Sub, @ptrCast(@alignCast(written)));
                         },
                         else => {
                             var array = std.ArrayList(Sub).empty;
-                            defer array.deinit(arena);
+                            defer array.deinit(params.gpa);
 
                             while (true) {
-                                const elem = try array.addOne(arena);
-                                arr.sub.read(arena, reader, parent, elem) catch |e| switch (e) {
+                                const elem = try array.addOne(params.arena);
+                                arr.sub.read(params, reader, parent, elem) catch |e| switch (e) {
                                     error.EndOfStream => break,
                                     else => |err| return err,
                                 };
                             }
 
-                            ret.* = try array.toOwnedSlice(arena);
-
-                            break :sw ret.*;
+                            break :sw try params.arenaDupe(Sub, array.items);
                         },
                     },
                     .prefixed => {
@@ -798,8 +824,8 @@ pub const Type = union(enum) {
                         }
                         if (len == 0) break :sw &.{};
                         if (arr.sub.* != .custom and @sizeOf(Sub) == 1) {
-                            const array = try arena.alloc(Sub, @intCast(len));
-                            errdefer arena.free(array);
+                            const array = try params.getArena().alloc(Sub, @intCast(len));
+                            errdefer params.getArena().free(array);
 
                             try reader.readSliceAll(@ptrCast(array));
 
@@ -807,25 +833,21 @@ pub const Type = union(enum) {
                         }
 
                         var array = try std.ArrayList(Sub)
-                            .initCapacity(arena, @intCast(len));
-                        defer array.deinit(arena);
+                            .initCapacity(params.gpa, @intCast(len));
+                        defer array.deinit(params.gpa);
 
                         for (0..array.capacity) |_| {
-                            const val = array.addOneAssumeCapacity(arena);
+                            const val = array.addOneAssumeCapacity(params.gpa);
                             errdefer _ = array.pop();
-                            try arr.sub.read(arena, reader, parent, val);
+                            try arr.sub.read(params, reader, parent, val);
                         }
 
-                        break :sw try array.toOwnedSlice(arena);
+                        break :sw try params.arenaDupe(Sub, array.items);
                     },
                     .fixed => return switch (arr.sub.*) {
                         .byte => try reader.readSliceAll(ret),
-                        .short, .int, .long, .float, .double => try reader.readSliceEndian(
-                            Sub,
-                            ret,
-                            .big,
-                        ),
-                        else => for (ret) |*val| try arr.sub.read(arena, reader, parent, val),
+                        .short, .int, .long, .float, .double => try reader.readSliceEndian(Sub, ret, .big),
+                        else => for (ret) |*val| try arr.sub.read(params, reader, parent, val),
                     },
                 }
                 comptime unreachable;
@@ -874,7 +896,7 @@ pub const Type = union(enum) {
                 }
                 if (id == 0) {
                     ret.* = .{ .value = undefined };
-                    try sub.read(arena, reader, parent, &ret.value);
+                    try sub.read(params, reader, parent, &ret.value);
                     break :sw ret.*;
                 }
                 break :sw .{ .id = @bitCast(id -% 1) };
@@ -893,8 +915,8 @@ pub const Type = union(enum) {
                 }
 
                 const len: usize = @intCast(_type - 1);
-                const ids = try arena.alloc(u32, len);
-                errdefer arena.free(ids);
+                const ids = try params.getArena().alloc(u32, len);
+                errdefer params.getArena().free(ids);
 
                 for (ids, 0..) |*val, i| {
                     const id = try readVarIntMax(reader, i32, std.math.maxInt(i32));
@@ -912,16 +934,16 @@ pub const Type = union(enum) {
                 const which = try reader.takeByte();
                 if (which == 0) {
                     ret.* = .{ .a = undefined };
-                    try subs[0].read(arena, reader, parent, &ret.a);
+                    try subs[0].read(params, reader, parent, &ret.a);
                 } else {
                     ret.* = .{ .b = undefined };
-                    try subs[1].read(arena, reader, parent, &ret.b);
+                    try subs[1].read(params, reader, parent, &ret.b);
                 }
                 break :sw ret.*;
             },
             .game_profile => {
                 const uuid = UUID{ .value = try reader.takeInt(u128, .big) };
-                const username = try readString(reader, 16);
+                const username = try readString(params.getMaybeArena(), reader, 16);
                 for (username) |c| {
                     if (c <= 32 or c >= 127) return error.InvalidCharacter;
                 }
@@ -930,12 +952,12 @@ pub const Type = union(enum) {
                     return error.Overflow;
                 };
 
-                const props = try arena.alloc(GameProfile.Property, prop_count);
+                const props = try params.getArena().alloc(GameProfile.Property, prop_count);
                 for (props) |*pout| {
-                    const name = try readString(reader, 64);
-                    const value = try readString(reader, 0x7FFF);
+                    const name = try readString(params.getMaybeArena(), reader, 64);
+                    const value = try readString(params.getMaybeArena(), reader, 0x7FFF);
                     const sig = if (try reader.takeByte() != 0)
-                        try readString(reader, 1024)
+                        try readString(params.getMaybeArena(), reader, 1024)
                     else
                         null;
 
@@ -981,11 +1003,11 @@ pub const Type = union(enum) {
         };
     }
 
-    pub fn write(comptime self: Type, gpa: Allocator, arena: Allocator, writer: *Writer, val: self.getZigType()) WriteError!void {
+    pub fn write(comptime self: Type, apair: AllocPair, writer: *Writer, val: self.getZigType()) WriteError!void {
         switch (self) {
-            .custom => |c| try c.writeFn(gpa, arena, writer, val),
+            .custom => |c| try c.writeFn(apair, writer, val),
             .structured => |desc| inline for (desc.fields) |field| {
-                try field.type.write(gpa, arena, writer, @field(val, field.name));
+                try field.type.write(apair, writer, @field(val, field.name));
             },
             .bool => try writer.writeByte(@intFromBool(val)),
             .byte => try writer.writeByte(@bitCast(val)),
@@ -998,11 +1020,11 @@ pub const Type = union(enum) {
             .string => try writeString(writer, val),
             .json => |may_sub| {
                 const T = may_sub orelse utils.serial.Value;
-                var alloc_w = Writer.Allocating.init(gpa);
+                var alloc_w = Writer.Allocating.init(apair.gpa);
                 defer alloc_w.deinit();
 
                 var json_sw: utils.serial.json.Writer = undefined;
-                json_sw.init(gpa, &alloc_w.writer);
+                json_sw.init(apair.gpa, &alloc_w.writer);
                 defer json_sw.deinit();
 
                 @as(utils.serial.MapWriter.WriteError!void, T.serialize(&json_sw.mapw)) catch {
@@ -1022,7 +1044,7 @@ pub const Type = union(enum) {
             .nbt => |may_sub| {
                 const T = may_sub orelse utils.serial.Value;
                 var nbt_sw: utils.serial.nbt.Writer = undefined;
-                nbt_sw.init(gpa, writer);
+                nbt_sw.init(apair.gpa, writer);
                 defer nbt_sw.deinit();
 
                 @as(utils.serial.MapWriter.WriteError!void, T.serialize(&nbt_sw.mapw)) catch {
@@ -1052,7 +1074,7 @@ pub const Type = union(enum) {
             .optional => |opt| {
                 if (val) |value| {
                     if (opt.condition == .prefixed) try writer.writeByte(1);
-                    try opt.sub.write(arena, writer, value);
+                    try opt.sub.write(apair.arena, writer, value);
                 } else try writer.writeByte(0);
             },
             .array => |arr| blk: {
@@ -1074,7 +1096,7 @@ pub const Type = union(enum) {
                         break :blk;
                     },
                 }
-                for (val) |item| try arr.sub.write(arena, writer, item);
+                for (val) |item| try arr.sub.write(apair, writer, item);
             },
             .@"enum" => |ib| switch (ib.backing) {
                 .var_int, .var_long => try writeVarInt(writer, @intFromEnum(val)),
@@ -1101,7 +1123,7 @@ pub const Type = union(enum) {
                 .id => |id| try writeVarInt(writer, id + 1),
                 .value => |_val| {
                     try writer.writeByte(0);
-                    try sub.write(arena, writer, _val);
+                    try sub.write(apair, writer, _val);
                 },
             },
             .id_set => {
@@ -1119,11 +1141,11 @@ pub const Type = union(enum) {
             .either => |subs| switch (val) {
                 .a => |v| {
                     try writer.writeByte(0);
-                    try subs[0].write(arena, writer, v);
+                    try subs[0].write(apair, writer, v);
                 },
                 .b => |v| {
                     try writer.writeByte(1);
-                    try subs[1].write(arena, writer, v);
+                    try subs[1].write(apair, writer, v);
                 },
             },
             .game_profile => {
@@ -1321,15 +1343,15 @@ pub fn readVarIntMax(reader: *Reader, comptime T: type, max_val: T) Reader.TakeL
 /// microshitstem wanted utf16 strings in java.
 ///
 /// Though I will use UTF8 instead as it'll be easier for me.
-pub fn readString(alloc: Allocator, reader: *Reader, may_max_cps: ?u15) (Reader.TakeLeb128Error || Reader.ReadAllocError || error{ InvalidUTF8, InvalidLength })![]const u8 {
+pub fn readString(allocator: ?Allocator, reader: *Reader, may_max_cps: ?u15) (Reader.TakeLeb128Error || Reader.ReadAllocError || error{ InvalidUTF8, InvalidLength })![]const u8 {
     const max_cps = may_max_cps orelse std.math.maxInt(u15);
     const len = try readVarIntMax(reader, u32, @as(u32, max_cps) * 3);
 
-    const buf = if (reader.buffer.len <= len)
-        try reader.take(len)
+    const buf = if (allocator) |alloc|
+        try reader.readAlloc(alloc, len)
     else
-        try reader.readAlloc(alloc, len);
-    errdefer if (reader.buffer.len > len) alloc.free(buf);
+        try reader.take(len);
+    errdefer if (allocator) |alloc| alloc.free(buf);
 
     var it = utils.Utf8Iterator.init(buf);
     var utf16_cp: usize = 0;

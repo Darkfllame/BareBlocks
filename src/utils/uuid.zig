@@ -21,6 +21,7 @@ comptime {
 pub const UUID = extern union {
     value: u128,
     u64s: [2]u64,
+    u32s: [4]u32,
     bytes: [16]u8,
     v1: packed struct(u128) {
         time_low: u32,
@@ -109,21 +110,50 @@ pub const UUID = extern union {
     }
 
     pub fn serialize(self: UUID, mapw: *utils.serial.MapWriter) utils.serial.MapWriter.WriteError!void {
-        var buf: [stringified_length]u8 = undefined;
-        self.stringify(&buf);
-        try mapw.writeString(&buf);
+        switch (mapw.output_type) {
+            .human_readable => {
+                var buf: [stringified_length]u8 = undefined;
+                self.stringify(&buf);
+                try mapw.writeString(&buf);
+            },
+            .text, .binary => {
+                try mapw.beginArray(4);
+                inline for (self.u32s) |v| {
+                    try mapw.writeInt(@bitCast(v));
+                }
+                try mapw.endArray();
+            },
+        }
     }
 
-    pub fn deserialize(allocator: std.mem.Allocator, mapr: *utils.serial.MapReader) utils.serial.MapReader.ReadError!UUID {
-        _ = allocator;
-        const str = switch (try mapr.next()) {
-            .string => |s| s,
+    pub fn deserialize(mapr: *utils.serial.MapReader) utils.serial.MapReader.ReadError!UUID {
+        switch (try mapr.next()) {
+            .string => |str| {
+                if (str.len != stringified_length) return error.LengthMismatch;
+
+                return parse(str[0..stringified_length]);
+            },
+            .array_start => |arr| {
+                if (arr.type) |t| {
+                    if (t != .int) return error.UnexpectedToken;
+                }
+                if (arr.length) |len| {
+                    if (len != 4) return error.UnexpectedToken;
+                }
+
+                var res: UUID = .null;
+                for (&res.u32s) |*o| {
+                    const v = try mapr.nextAsIntUnsigned();
+                    if (v > std.math.maxInt(u32)) return error.UnexpectedToken;
+                    o.* = @truncate(v);
+                }
+
+                try mapr.nextExpect(.array_end);
+
+                return res;
+            },
             else => return error.UnexpectedToken,
-        };
-
-        if (str.len != stringified_length) return error.LengthMismatch;
-
-        return parse(str[0..stringified_length]);
+        }
     }
 
     pub fn withAttributes(self: UUID, version: u4, variant: enum { variant1, variant2 }) UUID {

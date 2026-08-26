@@ -761,6 +761,7 @@ pub const SerialWriter = struct {
         self.* = .{
             .mapw = .{
                 .writer = output,
+                .output_type = .binary,
                 .vtable = &vtable,
             },
             .top_node = .{

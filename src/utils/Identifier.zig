@@ -116,12 +116,9 @@ pub fn eql(a: Identifier, b: Identifier) bool {
         std.mem.eql(u8, a.path(), b.path());
 }
 
-pub fn deserialize(arena: std.mem.Allocator, mapr: *MapReader) MapReader.ReadError!Identifier {
-    const tok = try mapr.next();
-    if (tok != .string) return error.UnexpectedToken;
-
-    const tok_cpy = try arena.dupe(u8, tok.string);
-    errdefer arena.free(tok_cpy);
+pub fn deserialize(mapr: *MapReader) MapReader.ReadError!Identifier {
+    const tok_cpy = try mapr.nextDupeExpectString();
+    errdefer mapr.getArena().free(tok_cpy);
     
     return validate(tok_cpy) catch error.UnexpectedToken;
 }

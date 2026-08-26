@@ -59,21 +59,36 @@ pub fn Registry(comptime T: type) type {
 }
 
 pub fn Range(comptime T: type) type {
-    const minT, const maxT = switch (@typeInfo(T)) {
-        .int => .{ std.math.minInt(T), std.math.maxInt(T) },
-        .float => .{ std.math.floatMin(T), std.math.floatMax(T) },
+    const minT, const maxT, const epsilon = switch (@typeInfo(T)) {
+        .int => .{ std.math.minInt(T), std.math.maxInt(T), 1 },
+        .comptime_int => .{ std.math.minInt(i64), std.math.maxInt(i64), 1 },
+        .float => .{ std.math.floatMin(T), std.math.floatMax(T), std.math.floatEps(T) },
+        .comptime_float => .{ std.math.floatMin(f128), std.math.floatMax(f128), std.math.floatEps(f128) },
         else => @compileError("Unkown numeric type: " ++ @typeName(T)),
     };
     return struct {
         min: T = minT,
         max: T = maxT,
 
+        pub const max_range = @This(){};
+        pub const positive = @This(){ .min = 0 };
+        pub const negative = @This(){ .max = 0 };
+        pub const positive_nz = @This(){ .min = epsilon };
+        pub const negative_nz = @This(){ .max = -epsilon };
+
         pub fn init(min: ?T, max: ?T) @This() {
             const real_min = min orelse minT;
             const real_max = max orelse maxT;
+            if (@inComptime() and real_min > real_max) {
+                @compileError(std.fmt.comptimePrint("Range({s}): {d} is smaller than {d}", .{ @typeName(T), real_min, real_max }));
+            }
             assert(real_min <= real_max);
 
             return .{ .min = real_min, .max = real_max };
+        }
+
+        pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
+            return writer.print("[{d}, {d}]", .{ self.min, self.max });
         }
 
         pub inline fn clamp(self: @This(), v: T) T {
@@ -96,6 +111,10 @@ pub fn Range(comptime T: type) type {
                 .min = std.math.lossyCast(NewT, self.min),
                 .max = std.math.lossyCast(NewT, self.max),
             };
+        }
+
+        pub fn fitInOther(self: @This(), other: @This()) bool {
+            return other.min <= self.min and self.max <= other.max;
         }
     };
 }
