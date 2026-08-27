@@ -86,6 +86,7 @@ pub fn build(b: *Build) !void {
 
     const mc_downloader = downloadMCExec(b);
     const mcd_cache = mkdir(b, b.path("."), ".mccache");
+    const mc_gendata = genDataMCExec(b);
 
     const mc26_2_jar = blk: {
         const run_cmd = b.addRunArtifact(mc_downloader);
@@ -107,11 +108,17 @@ pub fn build(b: *Build) !void {
         }
         run_cmd.addDirectoryArg(mcd_cache);
         run_cmd.addArg("assets");
-        const out_dir = run_cmd.addOutputFileArg("minecraft.jar");
+        const out_dir = run_cmd.addOutputFileArg("assets");
         run_cmd.addArg(mc_version);
         break :blk out_dir;
     };
-    const mc_generated = mcDatagenDir(b, mc26_2_jar, mc_version);
+    const mc_generated = try mcDatagenDir(b, mc26_2_jar, mc_version);
+    const mc_generated_data = blk: {
+        const run_exe = b.addRunArtifact(mc_gendata);
+        run_exe.addDirectoryArg(mc_generated);
+        break :blk run_exe.addOutputFileArg("registries.zig");
+    };
+    const registries_mod = b.createModule(.{ .root_source_file = mc_generated_data });
 
     const math_mod = b.createModule(.{ .root_source_file = b.path("src/math/math.zig") });
     const utils_mod = b.createModule(.{
@@ -133,6 +140,36 @@ pub fn build(b: *Build) !void {
         .error_tracing = true,
     });
 
+    net_mod.addImport("coro", coro_mod);
+    net_mod.addImport("core", core_mod);
+    net_mod.addImport("utils", utils_mod);
+    net_mod.addImport("config", config_mod);
+
+    core_mod.addImport("coro", coro_mod);
+    core_mod.addImport("core", core_mod);
+    core_mod.addImport("utils", utils_mod);
+    core_mod.addImport("math", math_mod);
+    core_mod.addImport("net", net_mod);
+    core_mod.addImport("config", config_mod);
+    core_mod.addImport("registries", registries_mod);
+
+    main_mod.addImport("coro", coro_mod);
+    main_mod.addImport("core", core_mod);
+    main_mod.addImport("utils", utils_mod);
+    main_mod.addImport("math", math_mod);
+    main_mod.addImport("net", net_mod);
+    main_mod.addImport("config", config_mod);
+
+    mc_gendata.root_module.addImport("utils", utils_mod);
+    mc_gendata.root_module.addAnonymousImport("net", .{
+        .root_source_file = net_mod.root_source_file.?,
+        .imports = &.{
+            .{ .name = "coro", .module = coro_mod },
+            .{ .name = "utils", .module = utils_mod },
+            .{ .name = "config", .module = config_mod },
+        },
+    });
+
     const main_exe = b.addExecutable(.{
         .name = "bare_blocks",
         .root_module = main_mod,
@@ -140,18 +177,13 @@ pub fn build(b: *Build) !void {
         .use_lld = use_llvm,
     });
 
-    const local_imports = [_]Module.Import{
+    const test_modules = [_]Module.Import{
         .{ .name = "main", .module = main_mod },
         .{ .name = "coro", .module = coro_mod },
         .{ .name = "core", .module = core_mod },
         .{ .name = "utils", .module = utils_mod },
         .{ .name = "math", .module = math_mod },
         .{ .name = "net", .module = net_mod },
-    };
-    const all_imports = local_imports ++ [_]Module.Import{
-        // .{ .name = "vulkan", .module = vulkan_mod },
-        // .{ .name = "sdl", .module = sdl_mod },
-        .{ .name = "config", .module = config_mod },
     };
 
     b.installArtifact(main_exe);
@@ -181,21 +213,12 @@ pub fn build(b: *Build) !void {
 
     const test_step = b.step("test", "Run test untis");
     const check_step = b.step("check", "Run semantic analysis");
-    for (local_imports) |imp| {
-        imp.module.import_table.ensureUnusedCapacity(b.allocator, all_imports.len) catch @panic("OOM");
-        for (all_imports) |imp2| {
-            imp.module.addImport(imp2.name, imp2.module);
-        }
+    for (test_modules) |imp| {
+        const module = b.allocator.create(Module) catch @panic("OOM");
+        module.init(b, .{ .existing = imp.module });
+        module.resolved_target = imp.module.resolved_target orelse target;
+        module.optimize = imp.module.optimize orelse optimize;
 
-        const module = if (imp.module.resolved_target == null or imp.module.optimize == null)
-            b.createModule(.{
-                .root_source_file = imp.module.root_source_file,
-                .target = target,
-                .optimize = optimize,
-                .imports = &all_imports,
-            })
-        else
-            imp.module;
         const test_exe = b.addTest(.{
             .name = b.fmt("test-{s}", .{imp.name}),
             .root_module = module,
@@ -232,8 +255,20 @@ fn downloadMCExec(b: *Build) *Step.Compile {
     });
     return download_jar_exe;
 }
+fn genDataMCExec(b: *Build) *Step.Compile {
+    const gendata_mod = b.createModule(.{
+        .root_source_file = b.path("build/gen_data.zig"),
+        .target = b.resolveTargetQuery(.{}),
+        .optimize = .Debug,
+    });
+    const gendata_exe = b.addExecutable(.{
+        .name = "gen_data",
+        .root_module = gendata_mod,
+    });
+    return gendata_exe;
+}
 
-fn mcDatagenDir(b: *Build, jar_path: LazyPath, _version: []const u8) LazyPath {
+fn mcDatagenDir(b: *Build, jar_path: LazyPath, _version: []const u8) !LazyPath {
     const data_gen_dir = mkdir(b, b.path("."), b.fmt("run_datagen_{s}", .{_version}));
     const run_mc = b.addSystemCommand(&.{ "java", "-DbundlerMainClass=net.minecraft.data.Main", "-jar" });
     run_mc.setCwd(data_gen_dir);
@@ -245,10 +280,14 @@ fn mcDatagenDir(b: *Build, jar_path: LazyPath, _version: []const u8) LazyPath {
 }
 
 fn mkdir(b: *Build, root: LazyPath, path: []const u8) LazyPath {
-    const mkdir_cmd = b.addSystemCommand(&.{ "mkdir", "-p" });
-    mkdir_cmd.setCwd(root);
-    mkdir_cmd.addArg(path);
-    const gen = b.allocator.create(Build.GeneratedFile) catch @panic("OOM");
-    gen.* = .{ .step = &mkdir_cmd.step, .path = path };
-    return .{ .generated = .{ .file = gen } };
+    b.root.createDirPath(b.graph.io, path) catch @panic("Failed to make path");
+    if (true) return b.path(path);
+    if (false) {
+        const mkdir_cmd = b.addSystemCommand(&.{ "mkdir", "-p" });
+        mkdir_cmd.setCwd(root);
+        mkdir_cmd.addArg(path);
+        const gen = b.allocator.create(Build.GeneratedFile) catch @panic("OOM");
+        gen.* = .{ .step = &mkdir_cmd.step, .path = path };
+        return .{ .generated = .{ .file = gen } };
+    }
 }
