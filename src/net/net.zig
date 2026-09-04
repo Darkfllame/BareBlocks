@@ -10,6 +10,7 @@ const flate = std.compress.flate;
 const math = std.math;
 const TextComponent = utils.TextComponent;
 const AllocPair = StructuredPacket.AllocPair;
+const ReadParams = PacketType.ReadParams;
 const logger = std.log.scoped(.net);
 
 const assert = std.debug.assert;
@@ -168,8 +169,8 @@ pub const Connection = struct {
         assert(dest[0].len > 0);
         const start_time = Io.Timestamp.now(static_io, .boot);
         const n = io.vtable.netRead(io.userdata, conn.stream_handle, dest) catch |err| {
-            conn.read_error = err;
-            return error.ReadFailed;
+                    conn.read_error = err;
+                    return error.ReadFailed;
         };
         if (start_time.untilNow(static_io, .boot).nanoseconds >= conn.timeout.nanoseconds) {
             conn.read_error = error.Timeout;
@@ -190,8 +191,8 @@ pub const Connection = struct {
         const io = conn.write_coro.any.io();
         const buffered = io_w.buffered();
         const n = io.vtable.netWrite(io.userdata, conn.stream_handle, buffered, data, splat) catch |err| {
-            conn.write_error = err;
-            return error.WriteFailed;
+                    conn.write_error = err;
+                    return error.WriteFailed;
         };
         return io_w.consume(n);
     }
@@ -214,7 +215,7 @@ pub const Connection = struct {
                 logger.warn("Failed to reset arena allocator for {f}", .{self.ip_address});
             }
         }) {
-            self.readConnection(allocator, read_arena.allocator()) catch |e| switch (e) {
+            self.readConnection(allocator, &read_arena) catch |e| switch (e) {
                 error.ReadFailed => return switch (self.read_error.?) {
                     error.SocketUnconnected, error.Canceled => break,
                     error.NetworkDown => error.Disconnected,
@@ -258,10 +259,12 @@ pub const Connection = struct {
         }
     }
 
-    fn readConnection(self: *Connection, gpa: Allocator, arena: Allocator) !void {
-        const apair = StructuredPacket.AllocPair{
+    fn readConnection(self: *Connection, gpa: Allocator, arena_alloc: *std.heap.ArenaAllocator) !void {
+        const arena = arena_alloc.allocator();
+        var rparams = ReadParams{
             .gpa = gpa,
-            .arena = arena,
+            .arena = arena_alloc,
+            .input_mode = .full,
         };
 
         const reader = &self.reader;
@@ -292,6 +295,7 @@ pub const Connection = struct {
             };
             if (uncompressed_length < 0) return error.InvalidLength;
             if (uncompressed_length == 0) break :blk &raw_reader;
+            rparams.input_mode = .streamed;
 
             decomp = .init(&raw_reader, .zlib, &comp.buffer);
             break :blk &decomp.reader;
@@ -312,7 +316,7 @@ pub const Connection = struct {
             return error.InvalidPacketID;
         const entry = self.packet_registry.getEntry(self.target_side, self.phase, pid);
 
-        entry.callback(self, packet_reader, apair) catch |e| {
+        entry.callback(self, packet_reader, rparams) catch |e| {
             const err = switch (e) {
                 error.ReadFailed => {
                     self.compression.?.decompression_error = decomp.err;
@@ -324,6 +328,7 @@ pub const Connection = struct {
             self.parsing_error = err;
             return err;
         };
+        if (raw_reader.end != length or packet_reader.bufferedLen() != 0) return error.PacketTooLarge;
     }
 
     fn writeConnection(self: *Connection, co: *coro.AnyCoroutine, allocator: Allocator) Io.Writer.Error!void {
@@ -415,7 +420,7 @@ pub const Connection = struct {
     ///
     /// The memory allocated by the arena allocator passed in this function will only stay valid for this call
     /// **only**. Any data that is wished to stay persitent must be copied to a new location.
-    pub const ReadCallbackFn = fn (conn: *Connection, reader: *Io.Reader, apair: AllocPair) ReadCallbackError!void;
+    pub const ReadCallbackFn = fn (conn: *Connection, reader: *Io.Reader, params: ReadParams) ReadCallbackError!void;
     pub const DisconnectCallbackFn = fn (conn: *Connection, reason: *const TextComponent) Allocator.Error!void;
 
     pub const RateLimited = struct {
@@ -474,8 +479,8 @@ pub const Connection = struct {
     pub const ReconfigureOptions = struct {
         fn empty(self: ReconfigureOptions) bool {
             inline for (@typeInfo(ReconfigureOptions).@"struct".fields) |f| {
-                comptime if (@typeInfo(f.type) != .optional) continue;
-                if (@field(self, f.name) != null) return false;
+                    comptime if (@typeInfo(f.type) != .optional) continue;
+                    if (@field(self, f.name) != null) return false;
             }
             return true;
         }
@@ -640,7 +645,7 @@ pub const Connection = struct {
             rl.sent = 0;
             rl.received = 0;
             if (@as(RateLimited.Count, @trunc(rl.average_received)) >= rl.limit) {
-                logger.warn("[{f}] Exceeded rate-limit (sent {d} packets per seconds)", .{self, rl.average_received});
+                logger.warn("[{f}] Exceeded rate-limit (sent {d} packets per seconds)", .{ self, rl.average_received });
                 try self.disconnect_callback(self, &.exceeded_packet_rate);
                 try self.shutdown(.recv);
             }

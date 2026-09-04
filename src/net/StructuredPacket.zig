@@ -2,6 +2,7 @@ const StructuredPacket = @This();
 const std = @import("std");
 const utils = @import("utils");
 const math = @import("math");
+const core = @import("core");
 const TextComponent = utils.TextComponent;
 const UUID = utils.UUID;
 const Identifier = utils.Identifier;
@@ -14,6 +15,7 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const json = std.json;
 const NBT = utils.NBT;
+const BlockPosition = core.BlockPosition;
 
 const logger = std.log.scoped(.packet);
 
@@ -110,16 +112,6 @@ pub const TeleportFlags = enum {
     ///
     /// I honest to god do not know what this bs means.
     rot_velocity,
-};
-
-pub const BlockPosition = packed struct(u64) {
-    x: u26,
-    z: u26,
-    y: u12,
-
-    pub fn format(self: BlockPosition, writer: *Writer) Writer.Error!void {
-        return writer.print("{{ {d}, {d}, {d}}}", .{ self.x, self.y, self.z });
-    }
 };
 
 pub const Field = struct {
