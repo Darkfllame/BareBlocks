@@ -33,6 +33,30 @@ fn checkCancel(ud: ?*anyopaque) Io.Cancelable!void {
     if (co.state.canceled) return error.Canceled;
 }
 
+fn operate(ud: ?*anyopaque, op: Io.Operation) Io.Cancelable!Io.Operation.Result {
+    const co: *AnyCoroutine = @ptrCast(@alignCast(ud));
+
+    switch (op) {
+        else => return Io.failingOperate(ud, op),
+        .net_read => |nr| {
+            const res = netRead(co, nr.socket_handle, nr.data) catch |e| switch (e) {
+                error.Canceled => return error.Canceled,
+                else => |err| err,
+            };
+
+            return .{ .net_read = res };
+        },
+        .net_write => |nw| {
+            const res = netWrite(co, nw.socket_handle, nw.header, nw.data, nw.splat) catch |e| switch (e) {
+                error.Canceled => return error.Canceled,
+                else => |err| err,
+            };
+
+            return .{ .net_write = res };
+        },
+    }
+}
+
 //#region Time
 fn now(_: ?*anyopaque, clock: Io.Clock) Io.Timestamp {
     const clock_id = clockToPosix(clock);
@@ -154,7 +178,7 @@ fn getSocketOption(fd: posix.fd_t, level: i32, opt_name: u32) !u32 {
 }
 
 fn openSocketPosix(family: posix.sa_family_t, options: IpAddress.BindOptions) !posix.socket_t {
-    if (options.ip6_only and posix.IPV6 == void) return error.OptionUnsupported;
+    if (options.ip6_only != null and posix.IPV6 == void) return error.OptionUnsupported;
 
     const mode, const protocol = try posixSocketModeProtocol(family, options.mode, options.protocol);
     const flags: u32 = mode | if (socket_flags_unsupported)
@@ -182,12 +206,12 @@ fn openSocketPosix(family: posix.sa_family_t, options: IpAddress.BindOptions) !p
     };
     errdefer closeFd(socket_fd);
 
-    if (options.ip6_only) {
+    if (options.ip6_only) |enabled| {
         try setSocketOption(
             socket_fd,
             posix.IPPROTO.IPV6,
             posix.IPV6.V6ONLY,
-            0,
+            @intFromBool(enabled),
         );
     }
 
@@ -599,8 +623,8 @@ fn netSocketCreatePair(_: ?*anyopaque, options: net.Socket.CreatePairOptions) ne
     }
 }
 
-fn netClose(_: ?*anyopaque, handles: []const net.Socket.Handle) void {
-    for (handles) |handle| closeFd(handle);
+fn netClose(_: ?*anyopaque, sockets: []const net.Socket) void {
+    for (sockets) |sock| closeFd(sock.handle);
 }
 
 fn netShutdown(_: ?*anyopaque, handle: net.Socket.Handle, how: net.ShutdownHow) net.ShutdownError!void {
@@ -624,9 +648,7 @@ fn netShutdown(_: ?*anyopaque, handle: net.Socket.Handle, how: net.ShutdownHow) 
     }
 }
 
-fn netRead(userdata: ?*anyopaque, fd: net.Socket.Handle, data: [][]u8) net.Stream.Reader.Error!usize {
-    const co: *AnyCoroutine = @ptrCast(@alignCast(userdata));
-
+fn netRead(co: *AnyCoroutine, fd: net.Socket.Handle, data: [][]u8) net.Stream.Reader.Error!usize {
     var iovecs_buffer: [Threaded.max_iovecs_len]posix.iovec = undefined;
     var i: usize = 0;
     for (data) |buf| {
@@ -653,7 +675,7 @@ fn netRead(userdata: ?*anyopaque, fd: net.Socket.Handle, data: [][]u8) net.Strea
             .NOBUFS, .NOMEM => error.SystemResources,
             .NOTCONN => error.SocketUnconnected,
             .CONNRESET => error.ConnectionResetByPeer,
-            .TIMEDOUT => error.Timeout,
+            .TIMEDOUT => error.ConnectionTimedOut,
             .PIPE => error.SocketUnconnected,
             .NETDOWN => error.NetworkDown,
             .INVAL, .FAULT, .BADF => |err| errnoBug(err), // File descriptor used after closed.
@@ -663,15 +685,7 @@ fn netRead(userdata: ?*anyopaque, fd: net.Socket.Handle, data: [][]u8) net.Strea
     }
 }
 
-fn netWrite(
-    userdata: ?*anyopaque,
-    fd: net.Socket.Handle,
-    header: []const u8,
-    data: []const []const u8,
-    splat: usize,
-) net.Stream.Writer.Error!usize {
-    const co: *AnyCoroutine = @ptrCast(@alignCast(userdata));
-
+fn netWrite(co: *AnyCoroutine, fd: net.Socket.Handle, header: []const u8, data: []const []const u8, splat: usize) net.Stream.Writer.Error!usize {
     var iovecs: [Threaded.max_iovecs_len]posix.iovec_const = undefined;
     var msg: posix.msghdr_const = .{
         .name = null,
@@ -764,13 +778,7 @@ fn netWriteFileUnimplemented(
     @panic("TODO: Implement netWriteFile");
 }
 
-fn netSendUnimplemented(
-    userdata: ?*anyopaque,
-    handle: net.Socket.Handle,
-    messages: []net.OutgoingMessage,
-    flags: net.SendFlags,
-) struct { ?net.Socket.SendError, usize } {
-    const co: *AnyCoroutine = @ptrCast(@alignCast(userdata));
+fn netSendUnimplemented(co: *AnyCoroutine, handle: net.Socket.Handle, messages: []net.OutgoingMessage, flags: net.SendFlags) struct { ?net.Socket.SendError, usize } {
     _ = co;
     _ = handle;
     _ = messages;
@@ -849,129 +857,27 @@ fn netLookupUnimplemented(
 canceled: bool,
 max_sleep_time: i96,
 
-pub const vtable = Io.VTable{
-    .crashHandler = private.unreachIoFunc("crashHandler"),
-
-    .async = private.unreachIoFunc("async"),
-    .concurrent = private.unreachIoFunc("concurrent"),
-    .await = private.unreachIoFunc("await"),
-    .cancel = private.unreachIoFunc("cancel"),
-
-    .groupAsync = private.unreachIoFunc("groupAsync"),
-    .groupConcurrent = private.unreachIoFunc("groupConcurrent"),
-    .groupAwait = private.unreachIoFunc("groupAwait"),
-    .groupCancel = private.unreachIoFunc("groupCancel"),
-
-    .recancel = private.unreachIoFunc("recancel"),
-    .swapCancelProtection = private.unreachIoFunc("swapCancelProtection"),
-    .checkCancel = checkCancel,
-
-    .futexWait = private.unreachIoFunc("futexWait"),
-    .futexWaitUncancelable = private.unreachIoFunc("futexWaitUncancelable"),
-    .futexWake = private.unreachIoFunc("futexWake"),
-
-    .operate = private.unreachIoFunc("operate"),
-    .batchAwaitAsync = private.unreachIoFunc("batchAwaitAsync"),
-    .batchAwaitConcurrent = private.unreachIoFunc("batchAwaitConcurrent"),
-    .batchCancel = private.unreachIoFunc("batchCancel"),
-
-    .dirCreateDir = private.unreachIoFunc("dirCreateDir"),
-    .dirCreateDirPath = private.unreachIoFunc("dirCreateDirPath"),
-    .dirCreateDirPathOpen = private.unreachIoFunc("dirCreateDirPathOpen"),
-    .dirStat = private.unreachIoFunc("dirStat"),
-    .dirStatFile = private.unreachIoFunc("dirStatFile"),
-    .dirAccess = private.unreachIoFunc("dirAccess"),
-    .dirCreateFile = private.unreachIoFunc("dirCreateFile"),
-    .dirCreateFileAtomic = private.unreachIoFunc("dirCreateFileAtomic"),
-    .dirOpenFile = private.unreachIoFunc("dirOpenFile"),
-    .dirOpenDir = private.unreachIoFunc("dirOpenDir"),
-    .dirClose = private.unreachIoFunc("dirClose"),
-    .dirRead = private.unreachIoFunc("dirRead"),
-    .dirRealPath = private.unreachIoFunc("dirRealPath"),
-    .dirRealPathFile = private.unreachIoFunc("dirRealPathFile"),
-    .dirDeleteFile = private.unreachIoFunc("dirDeleteFile"),
-    .dirDeleteDir = private.unreachIoFunc("dirDeleteDir"),
-    .dirRename = private.unreachIoFunc("dirRename"),
-    .dirRenamePreserve = private.unreachIoFunc("dirRenamePreserve"),
-    .dirSymLink = private.unreachIoFunc("dirSymLink"),
-    .dirReadLink = private.unreachIoFunc("dirReadLink"),
-    .dirSetOwner = private.unreachIoFunc("dirSetOwner"),
-    .dirSetFileOwner = private.unreachIoFunc("dirSetFileOwner"),
-    .dirSetPermissions = private.unreachIoFunc("dirSetPermissions"),
-    .dirSetFilePermissions = private.unreachIoFunc("dirSetFilePermissions"),
-    .dirSetTimestamps = private.unreachIoFunc("dirSetTimestamps"),
-    .dirHardLink = private.unreachIoFunc("dirHardLink"),
-
-    .fileStat = private.unreachIoFunc("fileStat"),
-    .fileLength = private.unreachIoFunc("fileLength"),
-    .fileClose = private.unreachIoFunc("fileClose"),
-    .fileWritePositional = private.unreachIoFunc("fileWritePositional"),
-    .fileWriteFileStreaming = private.unreachIoFunc("fileWriteFileStreaming"),
-    .fileWriteFilePositional = private.unreachIoFunc("fileWriteFilePositional"),
-    .fileReadPositional = private.unreachIoFunc("fileReadPositional"),
-    .fileSeekBy = private.unreachIoFunc("fileSeekBy"),
-    .fileSeekTo = private.unreachIoFunc("fileSeekTo"),
-    .fileSync = private.unreachIoFunc("fileSync"),
-    .fileIsTty = private.unreachIoFunc("fileIsTty"),
-    .fileEnableAnsiEscapeCodes = private.unreachIoFunc("fileEnableAnsiEscapeCodes"),
-    .fileSupportsAnsiEscapeCodes = private.unreachIoFunc("fileSupportsAnsiEscapeCodes"),
-    .fileSetLength = private.unreachIoFunc("fileSetLength"),
-    .fileSetOwner = private.unreachIoFunc("fileSetOwner"),
-    .fileSetPermissions = private.unreachIoFunc("fileSetPermissions"),
-    .fileSetTimestamps = private.unreachIoFunc("fileSetTimestamps"),
-    .fileLock = private.unreachIoFunc("fileLock"),
-    .fileTryLock = private.unreachIoFunc("fileTryLock"),
-    .fileUnlock = private.unreachIoFunc("fileUnlock"),
-    .fileDowngradeLock = private.unreachIoFunc("fileDowngradeLock"),
-    .fileRealPath = private.unreachIoFunc("fileRealPath"),
-    .fileHardLink = private.unreachIoFunc("fileHardLink"),
-
-    .fileMemoryMapCreate = private.unreachIoFunc("fileMemoryMapCreate"),
-    .fileMemoryMapDestroy = private.unreachIoFunc("fileMemoryMapDestroy"),
-    .fileMemoryMapSetLength = private.unreachIoFunc("fileMemoryMapSetLength"),
-    .fileMemoryMapRead = private.unreachIoFunc("fileMemoryMapRead"),
-    .fileMemoryMapWrite = private.unreachIoFunc("fileMemoryMapWrite"),
-
-    .processExecutableOpen = private.unreachIoFunc("processExecutableOpen"),
-    .processExecutablePath = private.unreachIoFunc("processExecutablePath"),
-    .lockStderr = private.unreachIoFunc("lockStderr"),
-    .tryLockStderr = private.unreachIoFunc("tryLockStderr"),
-    .unlockStderr = private.unreachIoFunc("unlockStderr"),
-    .processCurrentPath = private.unreachIoFunc("processCurrentPath"),
-    .processSetCurrentDir = private.unreachIoFunc("processSetCurrentDir"),
-    .processSetCurrentPath = private.unreachIoFunc("processSetCurrentPath"),
-    .processReplace = private.unreachIoFunc("processReplace"),
-    .processReplacePath = private.unreachIoFunc("processReplacePath"),
-    .processSpawn = private.unreachIoFunc("processSpawn"),
-    .processSpawnPath = private.unreachIoFunc("processSpawnPath"),
-    .childWait = private.unreachIoFunc("childWait"),
-    .childKill = private.unreachIoFunc("childKill"),
-
-    .progressParentFile = private.unreachIoFunc("progressParentFile"),
-
-    .now = now,
-    .clockResolution = clockResolution,
-    .sleep = sleep,
-
-    .random = private.unreachIoFunc("random"),
-    .randomSecure = private.unreachIoFunc("randomSecure"),
-
-    .netListenIp = netListenIp,
-    .netListenUnix = netListenUnix,
-    .netAccept = netAccept,
-    .netBindIp = netBindIp,
-    .netConnectIp = netConnectIp,
-    .netConnectUnix = netConnectUnix,
-    .netSocketCreatePair = netSocketCreatePair,
-    .netClose = netClose,
-    .netShutdown = netShutdown,
-    .netRead = netRead,
-    .netWrite = netWrite,
-    .netWriteFile = netWriteFileUnimplemented,
-    .netSend = netSendUnimplemented,
-    .netInterfaceNameResolve = netInterfaceNameResolve,
-    .netInterfaceName = netInterfaceNameUnimplemented,
-    .netLookup = netLookupUnimplemented,
+pub const vtable = blk: {
+    var res: Io.VTable = Io.failing.vtable.*;
+    res.checkCancel = checkCancel;
+    res.operate = operate;
+    res.now = now;
+    res.clockResolution = clockResolution;
+    res.sleep = sleep;
+    res.netListenIp = netListenIp;
+    res.netListenUnix = netListenUnix;
+    res.netAccept = netAccept;
+    res.netBindIp = netBindIp;
+    res.netConnectIp = netConnectIp;
+    res.netConnectUnix = netConnectUnix;
+    res.netSocketCreatePair = netSocketCreatePair;
+    res.netClose = netClose;
+    res.netShutdown = netShutdown;
+    res.netWriteFile = netWriteFileUnimplemented;
+    res.netInterfaceNameResolve = netInterfaceNameResolve;
+    res.netInterfaceName = netInterfaceNameUnimplemented;
+    res.netLookup = netLookupUnimplemented;
+    break :blk res;
 };
 
 pub fn cancel(self: *@This()) void {

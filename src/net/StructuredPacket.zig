@@ -14,7 +14,6 @@ const Writer = Io.Writer;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const json = std.json;
-const NBT = utils.NBT;
 const BlockPosition = core.BlockPosition;
 
 const logger = std.log.scoped(.packet);
@@ -119,26 +118,6 @@ pub const Field = struct {
     type: Type,
 };
 
-pub const AllocPair = struct {
-    gpa: Allocator,
-    arena: Allocator,
-
-    pub const no_alloc = new(.failing, .failing);
-
-    pub fn new(gpa: Allocator, arena: Allocator) AllocPair {
-        return .{ .gpa = gpa, .arena = arena };
-    }
-
-    pub fn newWithArena(gpa: Allocator, arena: *std.heap.ArenaAllocator) AllocPair {
-        return .{ .gpa = gpa, .arena = arena.allocator() };
-    }
-
-    pub fn newFromGpa(gpa: Allocator, out_arena: *std.heap.ArenaAllocator) AllocPair {
-        out_arena.* = .init(gpa);
-        return .{ .gpa = gpa, .arena = out_arena.allocator() };
-    }
-};
-
 pub const IdSet = union(enum) { tag: Identifier, ids: []u32 };
 
 pub const Type = union(enum) {
@@ -240,7 +219,11 @@ pub const Type = union(enum) {
         InvalidNumber,
     };
 
-    pub const WriteError = Allocator.Error || Writer.Error || NBT.WriteError || error{InvalidUTF8};
+    pub const WriteError = Allocator.Error || Writer.Error || error{
+        InvalidUTF8,
+        InvalidLength,
+        InvalidEnumTag,
+    };
 
     pub const TCSerialType = enum { nbt, json };
     pub const BackingInteger = enum {
@@ -367,13 +350,33 @@ pub const Type = union(enum) {
         }
     };
 
+    pub const AllocPair = struct {
+        gpa: Allocator,
+        arena: Allocator,
+
+        pub const no_alloc = new(.failing, .failing);
+
+        pub fn new(gpa: Allocator, arena: Allocator) AllocPair {
+            return .{ .gpa = gpa, .arena = arena };
+        }
+
+        pub fn newWithArena(gpa: Allocator, arena: *std.heap.ArenaAllocator) AllocPair {
+            return .{ .gpa = gpa, .arena = arena.allocator() };
+        }
+
+        pub fn newFromGpa(gpa: Allocator, out_arena: *std.heap.ArenaAllocator) AllocPair {
+            out_arena.* = .init(gpa);
+            return .{ .gpa = gpa, .arena = out_arena.allocator() };
+        }
+    };
+
     pub fn getZigType(comptime self: Type) type {
         return switch (self) {
             .custom => |c| c.type,
             .structured => |desc| blk: {
                 var names: [desc.fields.len][]const u8 = undefined;
                 var types: [desc.fields.len]type = undefined;
-                var attrs: [desc.fields.len]std.builtin.Type.StructField.Attributes = undefined;
+                var attrs: [desc.fields.len]std.lang.Type.Struct.FieldAttributes = undefined;
 
                 for (desc.fields, 0..) |field, i| {
                     names[i] = field.name;
@@ -634,7 +637,7 @@ pub const Type = union(enum) {
                     try field.type.read(
                         params,
                         reader,
-                        if (@typeInfo(@TypeOf(parent)).@"struct".fields.len == 0) // pass `ret` if current call is root
+                        if (@typeInfo(@TypeOf(parent)).@"struct".field_names.len == 0) // pass `ret` if current call is root
                             ret.*
                         else
                             parent,

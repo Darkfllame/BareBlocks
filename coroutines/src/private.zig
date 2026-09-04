@@ -152,22 +152,22 @@ pub fn Args(comptime Fn: type) type {
             @compileError("'Fn' must be a pointer or pointer to a function, got: " ++ @typeName(Fn)),
         else => @compileError("'Fn' must be a pointer or pointer to a function, got: " ++ @typeName(Fn)),
     };
-    if (info.is_var_args) {
+    if (info.attrs.varargs) {
         @compileError("Function given to coroutine cannot be variadic");
     }
     if (info.is_generic) {
         @compileError("Function given to coroutine cannot be generic");
     }
-    const params = info.params;
-    if (params.len < 1 and params[0].type != *AnyCoroutine) {
+    const params = info.param_types;
+    if (params.len < 1 and params[0] != *AnyCoroutine) {
         @compileError("Function must have at least 1 argument; Function's first argument should be *AnyCoroutine");
     }
 
-    var types: [info.params.len - 1]type = undefined;
+    var types: [params.len - 1]type = undefined;
     for (params[1..], &types) |p, *t| {
-        t.* = p.type.?;
+        t.* = p.?;
     }
-    return std.meta.Tuple(&types);
+    return @Tuple(&types);
 }
 
 pub fn FnPtr(comptime Fn: type) type {
@@ -218,59 +218,59 @@ pub fn unreachIoFunc(comptime name: []const u8) @FieldType(std.Io.VTable, name) 
     const info = @typeInfo(@typeInfo(@FieldType(std.Io.VTable, name)).pointer.child).@"fn";
     const RetType = info.return_type.?;
 
-    return switch (info.params.len) {
+    return switch (info.param_types.len) {
         0 => &struct {
             fn inner() RetType {
                 unreachable;
             }
         }.inner,
         1 => &struct {
-            fn inner(_: info.params[0].type.?) RetType {
+            fn inner(_: info.param_types[0].?) RetType {
                 unreachable;
             }
         }.inner,
         2 => &struct {
-            fn inner(_: info.params[0].type.?, _: info.params[1].type.?) RetType {
+            fn inner(_: info.param_types[0].?, _: info.param_types[1].?) RetType {
                 unreachable;
             }
         }.inner,
         3 => &struct {
-            fn inner(_: info.params[0].type.?, _: info.params[1].type.?, _: info.params[2].type.?) RetType {
+            fn inner(_: info.param_types[0].?, _: info.param_types[1].?, _: info.param_types[2].?) RetType {
                 unreachable;
             }
         }.inner,
         4 => &struct {
-            fn inner(_: info.params[0].type.?, _: info.params[1].type.?, _: info.params[2].type.?, _: info.params[3].type.?) RetType {
+            fn inner(_: info.param_types[0].?, _: info.param_types[1].?, _: info.param_types[2].?, _: info.param_types[3].?) RetType {
                 unreachable;
             }
         }.inner,
         5 => &struct {
-            fn inner(_: info.params[0].type.?, _: info.params[1].type.?, _: info.params[2].type.?, _: info.params[3].type.?, _: info.params[4].type.?) RetType {
+            fn inner(_: info.param_types[0].?, _: info.param_types[1].?, _: info.param_types[2].?, _: info.param_types[3].?, _: info.param_types[4].?) RetType {
                 unreachable;
             }
         }.inner,
         6 => &struct {
-            fn inner(_: info.params[0].type.?, _: info.params[1].type.?, _: info.params[2].type.?, _: info.params[3].type.?, _: info.params[4].type.?, _: info.params[5].type.?) RetType {
+            fn inner(_: info.param_types[0].?, _: info.param_types[1].?, _: info.param_types[2].?, _: info.param_types[3].?, _: info.param_types[4].?, _: info.param_types[5].?) RetType {
                 unreachable;
             }
         }.inner,
         7 => &struct {
-            fn inner(_: info.params[0].type.?, _: info.params[1].type.?, _: info.params[2].type.?, _: info.params[3].type.?, _: info.params[4].type.?, _: info.params[5].type.?, _: info.params[6].type.?) RetType {
+            fn inner(_: info.param_types[0].?, _: info.param_types[1].?, _: info.param_types[2].?, _: info.param_types[3].?, _: info.param_types[4].?, _: info.param_types[5].?, _: info.param_types[6].?) RetType {
                 unreachable;
             }
         }.inner,
         8 => &struct {
-            fn inner(_: info.params[0].type.?, _: info.params[1].type.?, _: info.params[2].type.?, _: info.params[3].type.?, _: info.params[4].type.?, _: info.params[5].type.?, _: info.params[6].type.?, _: info.params[7].type.?) RetType {
+            fn inner(_: info.param_types[0].?, _: info.param_types[1].?, _: info.param_types[2].?, _: info.param_types[3].?, _: info.param_types[4].?, _: info.param_types[5].?, _: info.param_types[6].?, _: info.param_types[7].?) RetType {
                 unreachable;
             }
         }.inner,
         9 => &struct {
-            fn inner(_: info.params[0].type.?, _: info.params[1].type.?, _: info.params[2].type.?, _: info.params[3].type.?, _: info.params[4].type.?, _: info.params[5].type.?, _: info.params[6].type.?, _: info.params[7].type.?, _: info.params[8].type.?) RetType {
+            fn inner(_: info.param_types[0].?, _: info.param_types[1].?, _: info.param_types[2].?, _: info.param_types[3].?, _: info.param_types[4].?, _: info.param_types[5].?, _: info.param_types[6].?, _: info.param_types[7].?, _: info.param_types[8].?) RetType {
                 unreachable;
             }
         }.inner,
         10 => &struct {
-            fn inner(_: info.params[0].type.?, _: info.params[1].type.?, _: info.params[2].type.?, _: info.params[3].type.?, _: info.params[4].type.?, _: info.params[5].type.?, _: info.params[6].type.?, _: info.params[7].type.?, _: info.params[8].type.?, _: info.params[9].type.?) RetType {
+            fn inner(_: info.param_types[0].?, _: info.param_types[1].?, _: info.param_types[2].?, _: info.param_types[3].?, _: info.param_types[4].?, _: info.param_types[5].?, _: info.param_types[6].?, _: info.param_types[7].?, _: info.param_types[8].?, _: info.param_types[9].?) RetType {
                 unreachable;
             }
         }.inner,

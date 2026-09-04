@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const BitStack = @import("BitStack.zig");
+const BitStack = @import("utils").BitStack;
 
 const Allocator = std.mem.Allocator;
 const IoReader = std.Io.Reader;
@@ -61,6 +61,12 @@ fn readPropsRaw(comptime ftype: FieldProperty.Type, arena: Allocator, mapr: *Map
         .external, .array, .copy => unreachable,
     };
 }
+
+pub const NbtWriter = @import("NBT.zig").SerialWriter;
+pub const NbtReader = @import("NBT.zig").SerialReader;
+
+pub const JsonWriter = @import("json.zig").SerialWriter;
+pub const JsonReader = @import("json.zig").SerialReader;
 
 /// For security, the maximum size allocated to store a single string or number value is limited to 4MiB by default.
 /// This limit can be specified by calling `nextAllocMax()` instead of `nextAlloc()`.
@@ -511,16 +517,6 @@ pub const MapReader = struct {
     }
 };
 
-pub const nbt = struct {
-    pub const Writer = @import("NBT.zig").SerialWriter;
-    pub const Reader = @import("NBT.zig").SerialReader;
-};
-
-pub const json = struct {
-    pub const Writer = @import("serial/json.zig").SerialWriter;
-    pub const Reader = @import("serial/json.zig").SerialReader;
-};
-
 pub const NextOptions = struct {
     duplicate_field_mode: enum { use_first, @"error", use_last } = .use_first,
     ignore_unknown_fields: bool = true,
@@ -621,7 +617,7 @@ pub const FieldProperty = struct {
 pub fn FieldGatherer(comptime fields: []const FieldProperty) type {
     var names: [fields.len][]const u8 = undefined;
     var types: [fields.len]type = undefined;
-    var attrs: [fields.len]std.builtin.Type.StructField.Attributes = undefined;
+    var attrs: [fields.len]std.lang.Type.Struct.FieldAttributes = undefined;
     for (fields, 0..) |f, i| {
         names[i] = f.name;
         const T = f.type.GetType();
@@ -772,8 +768,6 @@ pub fn FieldGatherer(comptime fields: []const FieldProperty) type {
 
 test {
     std.testing.refAllDecls(@This());
-    std.testing.refAllDecls(nbt);
-    std.testing.refAllDecls(json);
     std.testing.refAllDecls(MapWriter);
     std.testing.refAllDecls(MapReader);
     std.testing.refAllDecls(Token);

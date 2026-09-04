@@ -1,6 +1,6 @@
 const Identifier = @This();
 const std = @import("std");
-const serial = @import("serial.zig");
+const serial = @import("serial");
 
 const json = std.json;
 const MapWriter = serial.MapWriter;

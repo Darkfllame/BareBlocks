@@ -1,25 +1,17 @@
+//! Basically my miscelaneous module for when I don't know where to put things lmaoo
+
 const std = @import("std");
 const builtin = @import("builtin");
 
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
-// fn compareVersion(op: std.math.CompareOperator, verstr: []const u8) bool {
-//     return builtin.zig_version.order(SemVer.parse(verstr) catch unreachable).compare(op);
-// }
-
-// pub const zig_version: ZigVer = blk: {
-//     if (compareVersion(.lte, "0.17.0-dev.0")) break :blk .v0_16_0;
-//     if (compareVersion(.lte, "0.18.0-dev.0")) break :blk .v0_17_0;
-//     @compileError("Add more zig version");
-// };
-pub const is_debug = builtin.mode == .Debug;
+pub const is_debug = builtin.mode == .debug;
 pub const is_safe = switch (builtin.mode) {
-    .Debug,.ReleaseSafe=>true,
-    .ReleaseSmall,.ReleaseFast=>false,
+    .debug,.safe=>true,
+    .small,.fast=>false,
 };
 
-pub const serial = @import("serial.zig");
 pub const translation = @import("translation.zig");
 
 pub const BitStack = @import("BitStack.zig");
@@ -29,7 +21,6 @@ pub const CountingAllocator = @import("CountingAllocator.zig");
 pub const GameProfile = @import("GameProfile.zig");
 pub const Identifier = @import("Identifier.zig");
 pub const Keybind = @import("keybinds.zig").Keybind;
-pub const NBT = @import("NBT.zig");
 pub const Selector = @import("Selector.zig");
 pub const TextComponent = @import("TextComponent.zig");
 pub const UUID = @import("uuid.zig").UUID;

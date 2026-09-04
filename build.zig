@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const Project = @import("build/Project.zig");
 const buildzigzon: struct {
     name: @EnumLiteral(),
     fingerprint: u64,
@@ -10,6 +11,7 @@ const buildzigzon: struct {
         vulkan: Dep,
         vulkan_headers: Dep,
         sdl: Dep,
+        openssl: Dep,
     },
     paths: []const []const u8,
 
@@ -29,10 +31,12 @@ const Step = Build.Step;
 const version = std.SemanticVersion.parse(buildzigzon.version) catch unreachable;
 
 pub fn build(b: *Build) !void {
-    const target = b.standardTargetOptions(.{ .whitelist = &.{
-        std.Target.Query{ .cpu_arch = .x86_64, .os_tag = .linux },
-    } });
+    const target = b.standardTargetOptions(.{ });
     const optimize = b.standardOptimizeOption(.{});
+
+    if (target.result.os.tag != .linux or target.result.cpu.arch != .x86_64) {
+        @panic("Target must be x86_64 linux");
+    }
 
     const use_llvm = b.option(bool, "use_llvm", "Force the use of LLVM");
     const mc_version = b.option([]const u8, "mcver", "Version of minecraft (default: latest)") orelse "latest";
@@ -75,6 +79,19 @@ pub fn build(b: *Build) !void {
     // const sdl_mod = sdl_c.createModule();
     // sdl_mod.linkLibrary(sdl_dep.artifact("SDL3"));
 
+    const ossl_dep = b.dependency("openssl", .{ .target = target, .optimize = optimize });
+    const crypto_mod = blk: {
+        const tc = b.addTranslateC(.{
+            .target = target,
+            .optimize = optimize,
+            .root_source_file = b.path("src/crypto_decls.h"),
+        });
+        tc.addIncludePath(ossl_dep.path("include/"));
+        const mod = tc.createModule();
+        mod.linkSystemLibrary("libcrypto", .{ .needed = true });
+        break :blk mod;
+    };
+
     const coro_mod = b.dependency("coroutines", .{
         .target = target,
         .optimize = optimize,
@@ -85,7 +102,7 @@ pub fn build(b: *Build) !void {
     const config_mod = config.createModule();
 
     const mc_downloader = downloadMCExec(b);
-    const mcd_cache = mkdir(b, b.path("."), ".mccache");
+    const mcd_cache = try mkdir(b, b.path("."), ".mccache");
     const mc_gendata = genDataMCExec(b);
 
     const mc26_2_jar = blk: {
@@ -120,45 +137,88 @@ pub fn build(b: *Build) !void {
     };
     const registries_mod = b.createModule(.{ .root_source_file = mc_generated_data });
 
-    const math_mod = b.createModule(.{ .root_source_file = b.path("src/math/math.zig") });
-    const utils_mod = b.createModule(.{
+    var proj = Project{
+        .arena = b.graph.arena,
+        .modules = .empty,
+    };
+
+    const math_mod = proj.createModule(b, .{
+        .name = "math",
+        .root_source_file = b.path("src/math/math.zig"),
+    });
+    _ = math_mod;
+    const utils_mod = proj.createModule(b, .{
+        .name = "utils",
         .root_source_file = b.path("src/utils/utils.zig"),
+        .local_imports = &.{"serial"},
         .imports = &.{
             .{ .name = "en_us", .module = b.createModule(.{
                 .root_source_file = b.path("assets/minecraft/assets/lang/en_us.json"),
             }) },
         },
     });
-    const net_mod = b.createModule(.{ .root_source_file = b.path("src/net/net.zig") });
-    const core_mod = b.createModule(.{ .root_source_file = b.path("src/core/core.zig") });
+    const net_mod = proj.createModule(b, .{
+        .name = "net",
+        .root_source_file = b.path("src/net/net.zig"),
+        .imports = &.{
+            .{ .name = "config", .module = config_mod },
+        },
+        .local_imports = &.{
+            "coro",
+            "core",
+            "utils",
+            "serial",
+        },
+    });
+    const core_mod = proj.createModule(b, .{
+        .name = "core",
+        .root_source_file = b.path("src/core/core.zig"),
+        .imports = &.{
+            .{ .name = "config", .module = config_mod },
+        },
+        .local_imports = &.{
+            "coro",
+            "core",
+            "utils",
+            "serial",
+            "math",
+            "net",
+            "registries",
+        },
+    });
+    _ = core_mod;
+    const serial_mod = proj.createModule(b, .{
+        .name = "serial",
+        .root_source_file = b.path("src/serial/serial.zig"),
+        .local_imports = &.{"utils"},
+    });
 
-    const main_mod = b.createModule(.{
+    const main_mod = proj.createModule(b, .{
+        .name = "main",
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = false,
         .error_tracing = true,
+        .imports = &.{
+            .{ .name = "crypto", .module = crypto_mod },
+            .{ .name = "config", .module = config_mod },
+        },
+        .local_imports = &.{
+            "coro",
+            "core",
+            "utils",
+            "serial",
+            "math",
+            "net",
+        },
     });
 
-    net_mod.addImport("coro", coro_mod);
-    net_mod.addImport("core", core_mod);
-    net_mod.addImport("utils", utils_mod);
-    net_mod.addImport("config", config_mod);
-
-    core_mod.addImport("coro", coro_mod);
-    core_mod.addImport("core", core_mod);
-    core_mod.addImport("utils", utils_mod);
-    core_mod.addImport("math", math_mod);
-    core_mod.addImport("net", net_mod);
-    core_mod.addImport("config", config_mod);
-    core_mod.addImport("registries", registries_mod);
-
-    main_mod.addImport("coro", coro_mod);
-    main_mod.addImport("core", core_mod);
-    main_mod.addImport("utils", utils_mod);
-    main_mod.addImport("math", math_mod);
-    main_mod.addImport("net", net_mod);
-    main_mod.addImport("config", config_mod);
+    proj.addModule(.{
+        .name = "registries",
+        .module = registries_mod,
+    });
+    proj.addModule(.{ .name = "coro", .module = coro_mod });
 
     mc_gendata.root_module.addImport("utils", utils_mod);
     mc_gendata.root_module.addAnonymousImport("net", .{
@@ -166,6 +226,7 @@ pub fn build(b: *Build) !void {
         .imports = &.{
             .{ .name = "coro", .module = coro_mod },
             .{ .name = "utils", .module = utils_mod },
+            .{ .name = "serial", .module = serial_mod },
             .{ .name = "config", .module = config_mod },
         },
     });
@@ -177,24 +238,17 @@ pub fn build(b: *Build) !void {
         .use_lld = use_llvm,
     });
 
-    const test_modules = [_]Module.Import{
-        .{ .name = "main", .module = main_mod },
-        .{ .name = "coro", .module = coro_mod },
-        .{ .name = "core", .module = core_mod },
-        .{ .name = "utils", .module = utils_mod },
-        .{ .name = "math", .module = math_mod },
-        .{ .name = "net", .module = net_mod },
-    };
-
     b.installArtifact(main_exe);
 
-    const run_exe = b.addRunArtifact(main_exe);
-    run_exe.step.dependOn(b.getInstallStep());
-    run_exe.addArgs(b.args orelse &.{});
-    run_exe.setCwd(b.path("."));
-
     const run_step = b.step("run", "Run the executable");
-    run_step.dependOn(&run_exe.step);
+    {
+        const run_exe = b.addRunArtifact(main_exe);
+        run_exe.step.dependOn(b.getInstallStep());
+        run_exe.addPassthruArgs();
+        run_exe.setCwd(b.path("."));
+
+        run_step.dependOn(&run_exe.step);
+    }
 
     const assets_step = b.step("assets", "Download assets from mojang's servers");
     assets_step.dependOn(&b.addInstallDirectory(.{
@@ -213,22 +267,9 @@ pub fn build(b: *Build) !void {
 
     const test_step = b.step("test", "Run test untis");
     const check_step = b.step("check", "Run semantic analysis");
-    for (test_modules) |imp| {
-        const module = b.allocator.create(Module) catch @panic("OOM");
-        module.init(b, .{ .existing = imp.module });
-        module.resolved_target = imp.module.resolved_target orelse target;
-        module.optimize = imp.module.optimize orelse optimize;
+    proj.makeTests(b, test_step, check_step);
 
-        const test_exe = b.addTest(.{
-            .name = b.fmt("test-{s}", .{imp.name}),
-            .root_module = module,
-        });
-
-        const run_test = b.addRunArtifact(test_exe);
-
-        test_step.dependOn(&run_test.step);
-        check_step.dependOn(&test_exe.step);
-    }
+    proj.resolveLocalImports();
 }
 
 fn compileShader(b: *Build, path: LazyPath) LazyPath {
@@ -269,7 +310,7 @@ fn genDataMCExec(b: *Build) *Step.Compile {
 }
 
 fn mcDatagenDir(b: *Build, jar_path: LazyPath, _version: []const u8) !LazyPath {
-    const data_gen_dir = mkdir(b, b.path("."), b.fmt("run_datagen_{s}", .{_version}));
+    const data_gen_dir = try mkdir(b, b.path("."), b.fmt("run_datagen_{s}", .{_version}));
     const run_mc = b.addSystemCommand(&.{ "java", "-DbundlerMainClass=net.minecraft.data.Main", "-jar" });
     run_mc.setCwd(data_gen_dir);
     run_mc.addFileArg(jar_path);
@@ -279,10 +320,10 @@ fn mcDatagenDir(b: *Build, jar_path: LazyPath, _version: []const u8) !LazyPath {
     return run_mc.addOutputDirectoryArg("generated");
 }
 
-fn mkdir(b: *Build, root: LazyPath, path: []const u8) LazyPath {
+fn mkdir(b: *Build, root: LazyPath, path: []const u8) !LazyPath {
     b.root.createDirPath(b.graph.io, path) catch @panic("Failed to make path");
     if (true) return b.path(path);
-    if (false) {
+    if (true) {
         const mkdir_cmd = b.addSystemCommand(&.{ "mkdir", "-p" });
         mkdir_cmd.setCwd(root);
         mkdir_cmd.addArg(path);
@@ -290,4 +331,5 @@ fn mkdir(b: *Build, root: LazyPath, path: []const u8) LazyPath {
         gen.* = .{ .step = &mkdir_cmd.step, .path = path };
         return .{ .generated = .{ .file = gen } };
     }
+    // unreachable;
 }

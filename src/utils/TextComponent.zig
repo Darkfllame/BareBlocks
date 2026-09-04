@@ -1,10 +1,10 @@
 const TextComponent = @This();
 const std = @import("std");
+const serial = @import("serial");
 const Color = @import("color.zig").Color;
 const Keybind = @import("keybinds.zig").Keybind;
 const Selector = @import("Selector.zig");
 const Identifier = @import("Identifier.zig");
-const NBT = @import("NBT.zig");
 const utils = @import("utils.zig");
 
 const translation = utils.translation;
@@ -12,8 +12,6 @@ const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const Writer = std.Io.Writer;
 const Reader = std.Io.Reader;
-const json = std.json;
-const serial = utils.serial;
 const assert = std.debug.assert;
 const eql = std.mem.eql;
 
@@ -47,15 +45,11 @@ const HoverEvent = union(enum) {
 const Formatting = struct {
     const MaskPacked = blk: {
         const info = @typeInfo(Formatting).@"struct";
-        var names: [info.fields.len][]const u8 = undefined;
-        for (info.fields, &names) |f, *out| {
-                out.* = f.name;
-        }
 
         break :blk @Struct(
             .@"packed",
-            @Int(.unsigned, info.fields.len),
-            &names,
+            @Int(.unsigned, info.field_names.len),
+            info.field_names,
             &@splat(bool),
             &@splat(.{ .default_value_ptr = &false }),
         );
@@ -637,18 +631,20 @@ pub fn serialize(self: *const TextComponent, mapw: *serial.MapWriter) serial.Map
         .nbt => @panic("Not Yet Implemented"), // TODO: TextComponent::serialize<content.nbt>
     }
 
-    inline for (@typeInfo(Formatting).@"struct".fields) |f| {
-        if (@field(self.formatting_mask.sub, f.name)) {
-            const value = @field(self.formatting, f.name);
-            try mapw.fieldName(f.name);
-            switch (f.type) {
+    const fmt_info = @typeInfo(Formatting).@"struct";
+
+    inline for (fmt_info.field_names, fmt_info.field_types) |fname, ftype| {
+        if (@field(self.formatting_mask.sub, fname)) {
+            const value = @field(self.formatting, fname);
+            try mapw.fieldName(fname);
+            switch (ftype) {
                 Color => switch (value) {
                     else => |tag| try mapw.writeString(@tagName(tag)),
                     _ => |tag| {
                         const w = try mapw.stringWriter(null, &string_buffer);
                         try w.print("#{x:0>6}", .{@intFromEnum(tag)});
                         try w.flush();
-        },
+                    },
                 },
                 Color.ARGB => try mapw.writeInt(@bitCast(value)),
                 bool => try mapw.writeBoolean(value),

@@ -54,7 +54,7 @@ pub const State = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
-        equal: *const fn (*State, *State) bool,
+        equal: *const fn (*const State, *const State) bool,
         free: *const fn (*State, Allocator) void,
     };
 

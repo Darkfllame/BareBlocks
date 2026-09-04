@@ -1,7 +1,7 @@
 const NBT = @This();
 const std = @import("std");
+const utils = @import("utils");
 const serial = @import("serial.zig");
-const utils = @import("utils.zig");
 
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;

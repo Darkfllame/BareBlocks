@@ -2,7 +2,7 @@
     .name = .bare_blocks,
     .fingerprint = 0xb1f619523bcf4010,
     .version = "0.0.1",
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0-dev.1978+c961124d9",
 
     .dependencies = .{
         .coroutines = .{ .path = "./coroutines" },
@@ -20,6 +20,10 @@
             .url = "git+https://github.com/castholm/SDL#21c6b79840d123e94a9f183f4b0fa1731668f48d",
             .hash = "sdl-0.5.0+3.4.8-SDL--k4DpgH323IfF6cEaGzKUdtUQv1azbBmmcv0RMAu",
             .lazy = true,
+        },
+        .openssl = .{
+            .url = "git+https://github.com/Darkfllame/openssl-zig.git#d236a43b0e6540bb8c3bb22a75b3d26237be0bf7",
+            .hash = "openssl-3.6.0-wZcA77Nn8QGiFQyxhn8CtckRlhgGXLYYWLMpmQMkiMVr",
         },
     },
 

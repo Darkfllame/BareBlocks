@@ -1,4 +1,5 @@
 const std = @import("std");
+const serial = @import("serial");
 const utils = @import("utils.zig");
 
 const assert = std.debug.assert;
@@ -109,7 +110,7 @@ pub const UUID = extern union {
         });
     }
 
-    pub fn serialize(self: UUID, mapw: *utils.serial.MapWriter) utils.serial.MapWriter.WriteError!void {
+    pub fn serialize(self: UUID, mapw: *serial.MapWriter) serial.MapWriter.WriteError!void {
         switch (mapw.output_type) {
             .human_readable => {
                 var buf: [stringified_length]u8 = undefined;
@@ -126,7 +127,7 @@ pub const UUID = extern union {
         }
     }
 
-    pub fn deserialize(mapr: *utils.serial.MapReader) utils.serial.MapReader.ReadError!UUID {
+    pub fn deserialize(mapr: *serial.MapReader) serial.MapReader.ReadError!UUID {
         switch (try mapr.next()) {
             .string => |str| {
                 if (str.len != stringified_length) return error.LengthMismatch;

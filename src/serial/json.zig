@@ -1,5 +1,5 @@
 const std = @import("std");
-const serial = @import("../serial.zig");
+const serial = @import("serial.zig");
 
 const Stringify = std.json.Stringify;
 const Scanner = std.json.Scanner;
