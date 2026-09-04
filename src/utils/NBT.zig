@@ -1,7 +1,7 @@
 const NBT = @This();
 const std = @import("std");
-const builtin = @import("builtin");
 const serial = @import("serial.zig");
+const utils = @import("utils.zig");
 
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
@@ -13,7 +13,7 @@ const MapReader = serial.MapReader;
 const assert = std.debug.assert;
 
 const logger = std.log.scoped(.NBT);
-const is_debug = builtin.mode == .Debug;
+const is_debug = utils.is_debug;
 
 const StreamedValue = union(ValueTag) {
     void,

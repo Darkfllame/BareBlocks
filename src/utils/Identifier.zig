@@ -65,13 +65,14 @@ pub fn validate(id: []const u8) ValidationError!Identifier {
         else
             continue,
     };
-    const path_off = colon_idx orelse return error.SeparatorNotFound;
+    var path_off = colon_idx orelse return error.SeparatorNotFound;
+    path_off += 1;
     if (id.len - path_off > std.math.maxInt(@FieldType(Identifier, "path_len")))
         return error.PathTooLong;
 
     return .{
         .namespace_ptr = id.ptr,
-        .namespace_len = @intCast(path_off),
+        .namespace_len = @intCast(path_off - 1),
         .path_ptr = id.ptr + path_off,
         .path_len = @intCast(id.len - path_off),
     };
@@ -119,13 +120,13 @@ pub fn eql(a: Identifier, b: Identifier) bool {
 pub fn deserialize(mapr: *MapReader) MapReader.ReadError!Identifier {
     const tok_cpy = try mapr.nextDupeExpectString();
     errdefer mapr.getArena().free(tok_cpy);
-    
+
     return validate(tok_cpy) catch error.UnexpectedToken;
 }
 
 pub fn serialize(self: Identifier, mapw: *MapWriter) MapWriter.WriteError!void {
     const w = try mapw.stringWriter(self.namespace_len + self.path_len + 1, &.{});
-    try w.print("{s}:{s}", .{self.namespace(),self.path()});
+    try w.print("{s}:{s}", .{ self.namespace(), self.path() });
     try w.flush();
 }
 

@@ -47,21 +47,17 @@ const HoverEvent = union(enum) {
 const Formatting = struct {
     const MaskPacked = blk: {
         const info = @typeInfo(Formatting).@"struct";
-        var types: [info.fields.len]type = undefined;
-        @memset(&types, bool);
         var names: [info.fields.len][]const u8 = undefined;
-        var attribs: [info.fields.len]std.builtin.Type.StructField.Attributes = undefined;
-        @memset(&attribs, .{ .default_value_ptr = &@as(bool, false) });
         for (info.fields, &names) |f, *out| {
-            out.* = f.name;
+                out.* = f.name;
         }
 
         break :blk @Struct(
             .@"packed",
             @Int(.unsigned, info.fields.len),
             &names,
-            &types,
-            &attribs,
+            &@splat(bool),
+            &@splat(.{ .default_value_ptr = &false }),
         );
     };
     const Mask = struct {
@@ -652,7 +648,7 @@ pub fn serialize(self: *const TextComponent, mapw: *serial.MapWriter) serial.Map
                         const w = try mapw.stringWriter(null, &string_buffer);
                         try w.print("#{x:0>6}", .{@intFromEnum(tag)});
                         try w.flush();
-                    },
+        },
                 },
                 Color.ARGB => try mapw.writeInt(@bitCast(value)),
                 bool => try mapw.writeBoolean(value),
@@ -775,7 +771,7 @@ pub fn deserialize(mapr: *serial.MapReader) serial.MapReader.ReadError!TextCompo
                 .{ .name = "block", .type = .string },
                 .{ .name = "storage", .type = .string },
 
-                .{ .name = "font", .type = .string },
+                .{ .name = "font", .type = .{ .deserializeable = Identifier } },
                 .{ .name = "bold", .type = .boolean },
                 .{ .name = "italic", .type = .boolean },
                 .{ .name = "underlined", .type = .boolean },
@@ -783,8 +779,8 @@ pub fn deserialize(mapr: *serial.MapReader) serial.MapReader.ReadError!TextCompo
                 .{ .name = "obfuscated", .type = .boolean },
                 .{ .name = "shadow_color", .type = .{ .custom = .{ .type = u32, .read = gatherShadowColor } } },
                 .{ .name = "insertion", .type = .string },
-                .{ .name = "click_event", .type = .string },
-                .{ .name = "hover_event", .type = .string },
+                // .{ .name = "click_event", .type = .string },
+                // .{ .name = "hover_event", .type = .string },
                 .{ .name = "extra", .type = .{ .array = &.{ .deserializeable = TextComponent } } },
             }){ .opts = .{
                 .duplicate_field_mode = .use_last,
@@ -878,6 +874,16 @@ pub fn deserialize(mapr: *serial.MapReader) serial.MapReader.ReadError!TextCompo
                     // } };
                 },
             }
+
+            current.formatting_mask.set(&current.formatting, .font, fg.getNullable(.font));
+            current.formatting_mask.set(&current.formatting, .bold, fg.getNullable(.bold));
+            current.formatting_mask.set(&current.formatting, .italic, fg.getNullable(.italic));
+            current.formatting_mask.set(&current.formatting, .underlined, fg.getNullable(.underlined));
+            current.formatting_mask.set(&current.formatting, .strikethrough, fg.getNullable(.strikethrough));
+            current.formatting_mask.set(&current.formatting, .obfuscated, fg.getNullable(.obfuscated));
+            if (fg.getNullable(.shadow_color)) |int|
+                current.formatting_mask.set(&current.formatting, .shadow_color, @bitCast(int));
+            current.insertion = fg.getNullable(.insertion);
         },
         .array_start => |arr| {
             var next_token = try mapr.peek();

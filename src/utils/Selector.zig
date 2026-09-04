@@ -1,10 +1,11 @@
 const Selector = @This();
 const std = @import("std");
 const Identifier = @import("Identifier.zig");
+const utils = @import("utils.zig");
 
 const math = std.math;
 const Allocator = std.mem.Allocator;
-const Range = @import("utils.zig").Range;
+const Range = utils.Range;
 const maxInt = math.maxInt;
 const floatMin = math.floatMin;
 const floatMax = math.floatMax;
@@ -36,21 +37,17 @@ pub const at_n = Selector{ .sort = .nearest };
 pub const ArgumentsMask = struct {
     const Packed = blk: {
         const info = @typeInfo(Arguments).@"struct";
-        var types: [info.fields.len]type = undefined;
-        @memset(&types, bool);
         var names: [info.fields.len][]const u8 = undefined;
-        var attribs: [info.fields.len]std.builtin.Type.StructField.Attributes = undefined;
-        @memset(&attribs, .{ .default_value_ptr = &@as(bool, false) });
         for (info.fields, &names) |f, *out| {
-            out.* = f.name;
+                out.* = f.name;
         }
 
         break :blk @Struct(
             .@"packed",
             @Int(.unsigned, info.fields.len),
             &names,
-            &types,
-            &attribs,
+            &@splat(bool),
+            &@splat(.{ .default_value_ptr = &false }),
         );
     };
 

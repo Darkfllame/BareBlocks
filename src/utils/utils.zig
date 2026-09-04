@@ -1,7 +1,23 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
+
+// fn compareVersion(op: std.math.CompareOperator, verstr: []const u8) bool {
+//     return builtin.zig_version.order(SemVer.parse(verstr) catch unreachable).compare(op);
+// }
+
+// pub const zig_version: ZigVer = blk: {
+//     if (compareVersion(.lte, "0.17.0-dev.0")) break :blk .v0_16_0;
+//     if (compareVersion(.lte, "0.18.0-dev.0")) break :blk .v0_17_0;
+//     @compileError("Add more zig version");
+// };
+pub const is_debug = builtin.mode == .Debug;
+pub const is_safe = switch (builtin.mode) {
+    .Debug,.ReleaseSafe=>true,
+    .ReleaseSmall,.ReleaseFast=>false,
+};
 
 pub const serial = @import("serial.zig");
 pub const translation = @import("translation.zig");
@@ -18,45 +34,6 @@ pub const Selector = @import("Selector.zig");
 pub const TextComponent = @import("TextComponent.zig");
 pub const UUID = @import("uuid.zig").UUID;
 pub const Xoroshiro128PlusPLus = @import("Xoroshiro128PlusPlus.zig");
-
-pub const max_registry_id = std.math.maxInt(i32);
-
-pub fn Registry(comptime T: type) type {
-    return struct {
-        const Self = @This();
-
-        map: std.ArrayHashMapUnmanaged(
-            Identifier,
-            T,
-            Identifier.HashCtx,
-            true,
-        ),
-
-        pub const empty = Self{
-            .map = .empty,
-            .current_id = 0,
-        };
-
-        pub const AddEntryError = Allocator.Error || error{ DuplicatedEntry, TooManyEntries };
-
-        pub const EntryID = enum(u32) {
-            fn isValid(self: EntryID) bool {
-                return @intFromEnum(self) <= max_registry_id;
-            }
-
-            _,
-        };
-
-        pub fn addEntry(self: *Self, allocator: Allocator, key: Identifier, value: T) AddEntryError!EntryID {
-            const new_id = self.map.count();
-            if (new_id > max_registry_id) return error.TooManyEntries;
-            const gop = try self.map.getOrPut(allocator, key);
-            if (gop.found_existing) return error.DuplicateEntry;
-            gop.value_ptr.* = value;
-            return @enumFromInt(new_id);
-        }
-    };
-}
 
 pub fn Range(comptime T: type) type {
     const minT, const maxT, const epsilon = switch (@typeInfo(T)) {
