@@ -46,6 +46,7 @@ const convertReturnType = private.convertReturnType;
 /// in this library. It is passed as the first argument of
 /// coroutines.
 pub const AnyCoroutine = @import("AnyCoroutine.zig");
+pub const polling = @import("polling.zig");
 
 pub const InitOptions = struct {
     stack_size: usize = default_stack_size,
