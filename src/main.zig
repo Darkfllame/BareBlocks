@@ -41,3 +41,7 @@ pub fn main(init: std.process.Init) !void {
     const bio_out_res = std.mem.sliceTo(data, 0);
     std.log.info("result: {d}/{d} \"{s}\"", .{ len, bio_out_res.len, bio_out_res });
 }
+
+test {
+    std.testing.refAllDecls(@This());
+}

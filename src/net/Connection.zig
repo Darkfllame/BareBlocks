@@ -597,3 +597,11 @@ pub fn tickSecond(self: *Connection) (Allocator.Error || Io.net.ShutdownError)!v
         }
     }
 }
+
+test {
+    std.testing.refAllDecls(@This());
+    std.testing.refAllDecls(PacketNode);
+    std.testing.refAllDecls(RateLimited);
+    std.testing.refAllDecls(Compression);
+    std.testing.refAllDecls(Encryption);
+}

@@ -205,7 +205,7 @@ pub const Type = union(enum) {
     pub const sound_event = Type{ .structured = .sound_event };
     pub const chat_type = Type{ .structured = .chat_type };
     pub const chat_decoration = Type{ .structured = .chat_decoration };
-    pub const teleport_flags = Type{ .enum_set = .of(TeleportFlags, .u32) };
+    pub const teleport_flags = Type{ .enum_set = .of(TeleportFlags, .i32) };
     pub const max_string = Type{ .string = 0x7FFF };
     pub const nbt_text_component = Type{ .nbt = TextComponent };
     pub const json_text_component = Type{ .json = TextComponent };
@@ -376,7 +376,7 @@ pub const Type = union(enum) {
             .structured => |desc| blk: {
                 var names: [desc.fields.len][]const u8 = undefined;
                 var types: [desc.fields.len]type = undefined;
-                var attrs: [desc.fields.len]std.lang.Type.Struct.FieldAttributes = undefined;
+                var attrs: [desc.fields.len]std.builtin.Type.StructField.Attributes = undefined;
 
                 for (desc.fields, 0..) |field, i| {
                     names[i] = field.name;
@@ -637,7 +637,7 @@ pub const Type = union(enum) {
                     try field.type.read(
                         params,
                         reader,
-                        if (@typeInfo(@TypeOf(parent)).@"struct".field_names.len == 0) // pass `ret` if current call is root
+                        if (@typeInfo(@TypeOf(parent)).@"struct".fields.len == 0) // pass `ret` if current call is root
                             ret.*
                         else
                             parent,
@@ -1367,4 +1367,6 @@ pub fn writeString(writer: *Writer, s: []const u8) (Writer.Error || error{Invali
 
 test {
     std.testing.refAllDecls(@This());
+    std.testing.refAllDecls(Type);
+    std.testing.refAllDecls(lpvec3);
 }

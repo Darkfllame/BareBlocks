@@ -1,10 +1,14 @@
 const std = @import("std");
 const utils = @import("utils");
+const serial = @import("serial");
 const StructuredPacket = @import("StructuredPacket.zig");
 const PacketType = StructuredPacket.Type;
 
 test {
     std.testing.refAllDecls(@This());
+    std.testing.refAllDecls(StatusResponse);
+    std.testing.refAllDecls(StatusResponse.PlayerEntry);
+    std.testing.refAllDecls(StatusResponse.Version);
 }
 
 pub const HandshakeIntent = enum(u2) { status = 1, login, transfer };
@@ -52,7 +56,7 @@ pub const StatusResponse = struct {
         }
     };
 
-    pub fn serialize(self: *const StatusResponse, mapw: *utils.serial.MapWriter) !void {
+    pub fn serialize(self: *const StatusResponse, mapw: *serial.MapWriter) !void {
         try mapw.beginAggregate();
 
         try mapw.fieldName("version");
@@ -72,7 +76,7 @@ pub const StatusResponse = struct {
             try mapw.writeInt(players.online);
             if (players.sample.len > 0) {
                 try mapw.fieldName("sample");
-                try mapw.beginArray();
+                try mapw.beginArray(players.sample.len);
                 for (players.sample) |entry| {
                     try mapw.beginAggregate();
                     try mapw.fieldName("name");

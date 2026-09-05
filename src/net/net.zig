@@ -107,9 +107,8 @@ pub const PacketRegistry = struct {
     }
 };
 
-
 test {
     std.testing.refAllDecls(@This());
+    std.testing.refAllDecls(NetworkingSide);
     std.testing.refAllDecls(PacketRegistry);
-    std.testing.refAllDecls(Connection);
 }
