@@ -152,20 +152,20 @@ pub fn Args(comptime Fn: type) type {
             @compileError("'Fn' must be a pointer or pointer to a function, got: " ++ @typeName(Fn)),
         else => @compileError("'Fn' must be a pointer or pointer to a function, got: " ++ @typeName(Fn)),
     };
-    if (info.attrs.varargs) {
+    if (info.is_var_args) {
         @compileError("Function given to coroutine cannot be variadic");
     }
     if (info.is_generic) {
         @compileError("Function given to coroutine cannot be generic");
     }
-    const params = info.param_types;
-    if (params.len < 1 and params[0] != *AnyCoroutine) {
+    const params = info.params;
+    if (params.len < 1 and params[0].type.? != *AnyCoroutine) {
         @compileError("Function must have at least 1 argument; Function's first argument should be *AnyCoroutine");
     }
 
     var types: [params.len - 1]type = undefined;
     for (params[1..], &types) |p, *t| {
-        t.* = p.?;
+        t.* = p.type.?;
     }
     return @Tuple(&types);
 }

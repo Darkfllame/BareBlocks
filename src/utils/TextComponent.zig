@@ -44,12 +44,13 @@ const HoverEvent = union(enum) {
 
 const Formatting = struct {
     const MaskPacked = blk: {
-        const info = @typeInfo(Formatting).@"struct";
+        // const info = @typeInfo(Formatting).@"struct";
+        const field_names = std.meta.fieldNames(Formatting);
 
         break :blk @Struct(
             .@"packed",
-            @Int(.unsigned, info.field_names.len),
-            info.field_names,
+            @Int(.unsigned, field_names.len),
+            field_names,
             &@splat(bool),
             &@splat(.{ .default_value_ptr = &false }),
         );
@@ -633,11 +634,11 @@ pub fn serialize(self: *const TextComponent, mapw: *serial.MapWriter) serial.Map
 
     const fmt_info = @typeInfo(Formatting).@"struct";
 
-    inline for (fmt_info.field_names, fmt_info.field_types) |fname, ftype| {
-        if (@field(self.formatting_mask.sub, fname)) {
-            const value = @field(self.formatting, fname);
-            try mapw.fieldName(fname);
-            switch (ftype) {
+    inline for (fmt_info.fields) |f| {
+        if (@field(self.formatting_mask.sub, f.name)) {
+            const value = @field(self.formatting, f.name);
+            try mapw.fieldName(f.name);
+            switch (f.type) {
                 Color => switch (value) {
                     else => |tag| try mapw.writeString(@tagName(tag)),
                     _ => |tag| {

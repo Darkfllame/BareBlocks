@@ -43,11 +43,18 @@ const CoroReadError = error{
     InvalidPacketID,
     OutOfMemory,
     Disconnected,
-    ConnectionTimedOut,
+    Timeout,
     InvalidLength,
     DecompressionFailed,
+    DecryptionFailed,
 };
-const CoroWriteError = error{ Disconnected, ConnectionResetByPeer, SystemResources,ConnectionTimedOut };
+const CoroWriteError = error{
+    Disconnected,
+    ConnectionResetByPeer,
+    SystemResources,
+    ConnectionTimedOut,
+    EncryptionFailed,
+};
 
 const PacketNode = struct {
     node: std.DoublyLinkedList.Node,
@@ -81,19 +88,23 @@ fn readVec(io_r: *Io.Reader, data: [][]u8) Io.Reader.Error!usize {
     const dest = iovecs_buffer[0..dest_n];
     assert(dest[0].len > 0);
     const start_time = Io.Timestamp.now(static_io, .boot);
-    const res = io.operate(.{ .net_read = .{
-        .socket_handle = conn.stream_handle,
-        .data = dest,
-    } }) catch |err| {
-        conn.read_error = err;
-        return error.ReadFailed;
-    };
-    const n = res.net_read catch |err| {
+    // const res = io.operate(.{ .net_read = .{
+    //     .socket_handle = conn.stream_handle,
+    //     .data = dest,
+    // } }) catch |err| {
+    //     conn.read_error = err;
+    //     return error.ReadFailed;
+    // };
+    // const n = res.net_read catch |err| {
+    //     conn.read_error = err;
+    //     return error.ReadFailed;
+    // };
+    const n = io.vtable.netRead(io.userdata, conn.stream_handle, dest) catch |err| {
         conn.read_error = err;
         return error.ReadFailed;
     };
     if (start_time.untilNow(static_io, .boot).nanoseconds >= conn.timeout.nanoseconds) {
-        conn.read_error = error.ConnectionTimedOut;
+        conn.read_error = error.Timeout;
         return error.ReadFailed;
     }
     if (n == 0) {
@@ -110,16 +121,20 @@ fn drain(io_w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Err
     const conn: *Connection = @alignCast(@fieldParentPtr("writer", io_w));
     const io = conn.write_coro.any.io();
     const buffered = io_w.buffered();
-    const res = io.operate(.{ .net_write = .{
-        .socket_handle = conn.stream_handle,
-        .header = buffered,
-        .data = data,
-        .splat = splat,
-    } }) catch |err| {
-        conn.write_error = err;
-        return error.WriteFailed;
-    };
-    const n = res.net_write catch |err| {
+    // const res = io.operate(.{ .net_write = .{
+    //     .socket_handle = conn.stream_handle,
+    //     .header = buffered,
+    //     .data = data,
+    //     .splat = splat,
+    // } }) catch |err| {
+    //     conn.write_error = err;
+    //     return error.WriteFailed;
+    // };
+    // const n = res.net_write catch |err| {
+    //     conn.write_error = err;
+    //     return error.WriteFailed;
+    // };
+    const n = io.vtable.netWrite(io.userdata, conn.stream_handle, buffered, data, splat) catch |err| {
         conn.write_error = err;
         return error.WriteFailed;
     };
@@ -148,7 +163,7 @@ fn coro_readConnection(co: *coro.AnyCoroutine, self: *Connection, allocator: All
             error.ReadFailed => return switch (self.read_error.?) {
                 error.SocketUnconnected, error.Canceled => break,
                 error.NetworkDown => error.Disconnected,
-                error.SystemResources, error.ConnectionResetByPeer, error.ConnectionTimedOut => |err| err,
+                error.SystemResources, error.ConnectionResetByPeer, error.Timeout => |err| err,
                 error.AccessDenied, error.Unexpected => unreachable,
             },
             error.DecompressionFailed,
@@ -181,7 +196,8 @@ fn coro_writeConnection(co: *coro.AnyCoroutine, self: *Connection, allocator: Al
                 error.SocketNotBound,
                 error.HostUnreachable,
                 => error.Disconnected,
-                error.ConnectionTimedOut, error.ConnectionResetByPeer, error.SystemResources => |err| err,
+                //error.ConnectionTimedOut,
+                error.ConnectionResetByPeer, error.SystemResources => |err| err,
                 error.AddressFamilyUnsupported, error.Unexpected, error.FastOpenAlreadyInProgress => unreachable,
             };
         };
@@ -408,9 +424,9 @@ pub const InitOptions = struct {
 pub const ReconfigureOptions = struct {
     fn empty(self: ReconfigureOptions) bool {
         const info = @typeInfo(ReconfigureOptions).@"struct";
-        inline for (info.field_names, info.field_types) |fname, ftype| {
-            comptime if (@typeInfo(ftype) != .optional) continue;
-            if (@field(self, fname) != null) return false;
+        inline for (info.fields) |f| {
+            comptime if (@typeInfo(f.type) != .optional) continue;
+            if (@field(self, f.name) != null) return false;
         }
         return true;
     }
@@ -471,10 +487,7 @@ pub fn deinit(self: *Connection, allocator: Allocator) void {
         logger.debug("[{f}] Error occured when closing connection: {t}", .{ self, e });
     };
     while (self.popPacket()) |packet| allocator.free(packet.getBytes());
-    static_io.vtable.netClose(static_io.userdata, &[_]Io.net.Socket{.{
-        .handle = self.stream_handle,
-        .address = self.ip_address,
-    }});
+    static_io.vtable.netClose(static_io.userdata, (&self.stream_handle)[0..1]);
 }
 
 /// Doesn't reallocate/duplicate anything.

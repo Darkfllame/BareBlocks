@@ -617,7 +617,7 @@ pub const FieldProperty = struct {
 pub fn FieldGatherer(comptime fields: []const FieldProperty) type {
     var names: [fields.len][]const u8 = undefined;
     var types: [fields.len]type = undefined;
-    var attrs: [fields.len]std.lang.Type.Struct.FieldAttributes = undefined;
+    var attrs: [fields.len]std.builtin.Type.StructField.Attributes = undefined;
     for (fields, 0..) |f, i| {
         names[i] = f.name;
         const T = f.type.GetType();

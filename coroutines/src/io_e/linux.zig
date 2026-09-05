@@ -178,7 +178,7 @@ fn getSocketOption(fd: posix.fd_t, level: i32, opt_name: u32) !u32 {
 }
 
 fn openSocketPosix(family: posix.sa_family_t, options: IpAddress.BindOptions) !posix.socket_t {
-    if (options.ip6_only != null and posix.IPV6 == void) return error.OptionUnsupported;
+    if (options.ip6_only and posix.IPV6 == void) return error.OptionUnsupported;
 
     const mode, const protocol = try posixSocketModeProtocol(family, options.mode, options.protocol);
     const flags: u32 = mode | if (socket_flags_unsupported)
@@ -206,12 +206,12 @@ fn openSocketPosix(family: posix.sa_family_t, options: IpAddress.BindOptions) !p
     };
     errdefer closeFd(socket_fd);
 
-    if (options.ip6_only) |enabled| {
+    if (options.ip6_only) {
         try setSocketOption(
             socket_fd,
             posix.IPPROTO.IPV6,
             posix.IPV6.V6ONLY,
-            @intFromBool(enabled),
+            1,
         );
     }
 
@@ -623,8 +623,8 @@ fn netSocketCreatePair(_: ?*anyopaque, options: net.Socket.CreatePairOptions) ne
     }
 }
 
-fn netClose(_: ?*anyopaque, sockets: []const net.Socket) void {
-    for (sockets) |sock| closeFd(sock.handle);
+fn netClose(_: ?*anyopaque, handles: []const net.Socket.Handle) void {
+    for (handles) |handle| closeFd(handle);
 }
 
 fn netShutdown(_: ?*anyopaque, handle: net.Socket.Handle, how: net.ShutdownHow) net.ShutdownError!void {
@@ -648,7 +648,9 @@ fn netShutdown(_: ?*anyopaque, handle: net.Socket.Handle, how: net.ShutdownHow) 
     }
 }
 
-fn netRead(co: *AnyCoroutine, fd: net.Socket.Handle, data: [][]u8) net.Stream.Reader.Error!usize {
+fn netRead(ud: ?*anyopaque, fd: net.Socket.Handle, data: [][]u8) net.Stream.Reader.Error!usize {
+    const co: *AnyCoroutine = @ptrCast(@alignCast(ud));
+
     var iovecs_buffer: [Threaded.max_iovecs_len]posix.iovec = undefined;
     var i: usize = 0;
     for (data) |buf| {
@@ -675,7 +677,7 @@ fn netRead(co: *AnyCoroutine, fd: net.Socket.Handle, data: [][]u8) net.Stream.Re
             .NOBUFS, .NOMEM => error.SystemResources,
             .NOTCONN => error.SocketUnconnected,
             .CONNRESET => error.ConnectionResetByPeer,
-            .TIMEDOUT => error.ConnectionTimedOut,
+            .TIMEDOUT => error.Timeout,
             .PIPE => error.SocketUnconnected,
             .NETDOWN => error.NetworkDown,
             .INVAL, .FAULT, .BADF => |err| errnoBug(err), // File descriptor used after closed.
@@ -685,7 +687,9 @@ fn netRead(co: *AnyCoroutine, fd: net.Socket.Handle, data: [][]u8) net.Stream.Re
     }
 }
 
-fn netWrite(co: *AnyCoroutine, fd: net.Socket.Handle, header: []const u8, data: []const []const u8, splat: usize) net.Stream.Writer.Error!usize {
+fn netWrite(ud: ?*anyopaque, fd: net.Socket.Handle, header: []const u8, data: []const []const u8, splat: usize) net.Stream.Writer.Error!usize {
+    const co: *AnyCoroutine = @ptrCast(@alignCast(ud));
+
     var iovecs: [Threaded.max_iovecs_len]posix.iovec_const = undefined;
     var msg: posix.msghdr_const = .{
         .name = null,
@@ -860,7 +864,7 @@ max_sleep_time: i96,
 pub const vtable = blk: {
     var res: Io.VTable = Io.failing.vtable.*;
     res.checkCancel = checkCancel;
-    res.operate = operate;
+    // res.operate = operate;
     res.now = now;
     res.clockResolution = clockResolution;
     res.sleep = sleep;
@@ -871,6 +875,8 @@ pub const vtable = blk: {
     res.netConnectIp = netConnectIp;
     res.netConnectUnix = netConnectUnix;
     res.netSocketCreatePair = netSocketCreatePair;
+    res.netRead = netRead;
+    res.netWrite = netWrite;
     res.netClose = netClose;
     res.netShutdown = netShutdown;
     res.netWriteFile = netWriteFileUnimplemented;

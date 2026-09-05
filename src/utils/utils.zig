@@ -6,10 +6,10 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
-pub const is_debug = builtin.mode == .debug;
+pub const is_debug = builtin.mode == .Debug;
 pub const is_safe = switch (builtin.mode) {
-    .debug,.safe=>true,
-    .small,.fast=>false,
+    .Debug, .ReleaseSafe => true,
+    .ReleaseSmall, .ReleaseFast => false,
 };
 
 pub const translation = @import("translation.zig");

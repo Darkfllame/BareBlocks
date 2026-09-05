@@ -161,6 +161,7 @@ pub fn build(b: *Build) !void {
         .name = "net",
         .root_source_file = b.path("src/net/net.zig"),
         .imports = &.{
+            .{ .name = "crypto", .module = crypto_mod },
             .{ .name = "config", .module = config_mod },
         },
         .local_imports = &.{
@@ -244,7 +245,7 @@ pub fn build(b: *Build) !void {
     {
         const run_exe = b.addRunArtifact(main_exe);
         run_exe.step.dependOn(b.getInstallStep());
-        run_exe.addPassthruArgs();
+        run_exe.addArgs(b.args orelse &.{});
         run_exe.setCwd(b.path("."));
 
         run_step.dependOn(&run_exe.step);
@@ -267,7 +268,7 @@ pub fn build(b: *Build) !void {
 
     const test_step = b.step("test", "Run test untis");
     const check_step = b.step("check", "Run semantic analysis");
-    proj.makeTests(b, test_step, check_step);
+    proj.makeTests(b, test_step, check_step, use_llvm);
 
     proj.resolveLocalImports();
 }
@@ -321,8 +322,8 @@ fn mcDatagenDir(b: *Build, jar_path: LazyPath, _version: []const u8) !LazyPath {
 }
 
 fn mkdir(b: *Build, root: LazyPath, path: []const u8) !LazyPath {
-    b.root.createDirPath(b.graph.io, path) catch @panic("Failed to make path");
-    if (true) return b.path(path);
+    // b.root.createDirPath(b.graph.io, path) catch @panic("Failed to make path");
+    // if (true) return b.path(path);
     if (true) {
         const mkdir_cmd = b.addSystemCommand(&.{ "mkdir", "-p" });
         mkdir_cmd.setCwd(root);
@@ -331,5 +332,5 @@ fn mkdir(b: *Build, root: LazyPath, path: []const u8) !LazyPath {
         gen.* = .{ .step = &mkdir_cmd.step, .path = path };
         return .{ .generated = .{ .file = gen } };
     }
-    // unreachable;
+    unreachable;
 }

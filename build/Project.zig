@@ -36,7 +36,7 @@ pub const CreateModuleOptions = struct {
     imports: []const Module.Import = &.{},
 
     target: ?std.Build.ResolvedTarget = null,
-    optimize: ?std.builtin.Optimize = null,
+    optimize: ?std.builtin.OptimizeMode = null,
 
     /// `true` requires a compilation that includes this Module to link libc.
     /// `false` causes a build failure if a compilation that includes this Module would link libc.
@@ -82,8 +82,8 @@ pub fn addModule(self: *Project, opt: AddModuleOptions) void {
 
 pub fn createModule(self: *Project, b: *Build, opt: CreateModuleOptions) *Module {
     var mcreate_opt: Module.CreateOptions = undefined;
-    inline for (@typeInfo(Module.CreateOptions).@"struct".field_names) |fname| {
-        @field(mcreate_opt, fname) = @field(opt, fname);
+    inline for (@typeInfo(Module.CreateOptions).@"struct".fields) |f| {
+        @field(mcreate_opt, f.name) = @field(opt, f.name);
     }
 
     const mod = self.arena.create(Module) catch @panic("OOM");
@@ -111,7 +111,7 @@ pub fn makeTests(self: *Project, b: *Build, test_step: *Build.Step, check_step: 
         const test_mod = b.createModule(.{
             .root_source_file = module.root_source_file,
             .target = target,
-            .optimize = .debug,
+            .optimize = .Debug,
             .link_libc = module.link_libc,
             .link_libcpp = module.link_libcpp,
             .single_threaded = module.single_threaded,
@@ -133,7 +133,7 @@ pub fn makeTests(self: *Project, b: *Build, test_step: *Build.Step, check_step: 
         });
         test_mod.import_table = module.import_table.clone(self.arena) catch @panic("OOM");
         test_mod.link_objects = module.link_objects.clone(self.arena) catch @panic("OOM");
-        
+
         copied_modules.put(self.arena, name, test_mod) catch @panic("OOM");
 
         const test_exe = b.addTest(.{
@@ -154,7 +154,7 @@ pub fn makeTests(self: *Project, b: *Build, test_step: *Build.Step, check_step: 
         const test_mod = copied_modules.get(name).?;
         for (tmod.imports) |in_name| {
             const in_mod = copied_modules.get(in_name) orelse
-                std.debug.panic("Couldn't find internal module for {q}: {q}", .{ name, in_name });
+                std.debug.panic("Couldn't find internal module for \"{s}\": \"{s}\"", .{ name, in_name });
             test_mod.import_table.put(self.arena, in_name, in_mod) catch @panic("OOM");
         }
     }
@@ -169,7 +169,7 @@ pub fn resolveLocalImports(self: *Project) void {
 
         for (tmod.imports) |in_name| {
             const in_mod = self.modules.get(in_name) orelse
-                std.debug.panic("Couldn't find internal module for {q}: {q}", .{ name, in_name });
+                std.debug.panic("Couldn't find internal module for \"{s}\": \"{s}\"", .{ name, in_name });
             tmod.module.import_table.put(self.arena, in_name, in_mod.module) catch @panic("OOM");
         }
     }

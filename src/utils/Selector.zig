@@ -36,12 +36,13 @@ pub const at_n = Selector{ .sort = .nearest };
 
 pub const ArgumentsMask = struct {
     const Packed = blk: {
-        const info = @typeInfo(Arguments).@"struct";
+        // const info = @typeInfo(Arguments).@"struct";
+        const field_names = std.meta.fieldNames(Arguments);
 
         break :blk @Struct(
             .@"packed",
-            @Int(.unsigned, info.field_names.len),
-            info.field_names,
+            @Int(.unsigned, field_names.len),
+            field_names,
             &@splat(bool),
             &@splat(.{ .default_value_ptr = &false }),
         );
