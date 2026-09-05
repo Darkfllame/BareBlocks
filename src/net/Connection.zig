@@ -6,6 +6,7 @@ const Connection = @This();
 const std = @import("std");
 const coro = @import("coro");
 const utils = @import("utils");
+const crypto = @import("crypto");
 const net = @import("net.zig");
 
 const Io = std.Io;
@@ -29,9 +30,15 @@ const reader_vtable = Io.Reader.VTable{
     .stream = streamImpl,
     .readVec = readVec,
 };
+const decrypt_reader_vtable = Io.Reader.VTable{
+    .stream = decryptStream,
+};
 const writer_vtable = Io.Writer.VTable{
     .drain = drain,
 };
+
+const reader_buffer_size = 128;
+const writer_buffer_size = 128;
 
 const CoroReadError = error{
     SystemResources,
@@ -55,6 +62,8 @@ const CoroWriteError = error{
     ConnectionTimedOut,
     EncryptionFailed,
 };
+const StreamReadError = Io.net.Stream.Reader.Error || error{DecryptionFailed};
+const StreamWriteError = Io.net.Stream.Writer.Error || error{EncryptionFailed};
 
 const PacketNode = struct {
     node: std.DoublyLinkedList.Node,
@@ -78,6 +87,32 @@ fn streamImpl(io_r: *Io.Reader, io_w: *Io.Writer, limit: Io.Limit) Io.Reader.Str
     return n;
 }
 
+fn decryptStream(io_r: *Io.Reader, io_w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
+    const conn: *Connection = @alignCast(@fieldParentPtr("decrypt_reader", io_r));
+    const enc = conn.encryption.?;
+    const dest = limit.slice(try io_w.writableSliceGreedy(1));
+    const tmp = limit.slice(io_r.buffer);
+
+    const tmp_n = try conn.reader.readSliceShort(tmp);
+    const len = @min(dest.len, tmp_n);
+
+    var c_n: c_int = undefined;
+    const res = crypto.EVP_DecryptUpdate(
+        enc.decrypt,
+        dest.ptr,
+        &c_n,
+        tmp.ptr,
+        @intCast(len),
+    );
+    if (res == 0) {
+        conn.read_error = error.DecryptionFailed;
+        return error.ReadFailed;
+    }
+    const n: usize = @intCast(c_n);
+    io_w.advance(n);
+    return n;
+}
+
 fn readVec(io_r: *Io.Reader, data: [][]u8) Io.Reader.Error!usize {
     const max_iovecs_len = 8;
 
@@ -87,19 +122,21 @@ fn readVec(io_r: *Io.Reader, data: [][]u8) Io.Reader.Error!usize {
     const dest_n, const data_size = try io_r.writableVector(&iovecs_buffer, data);
     const dest = iovecs_buffer[0..dest_n];
     assert(dest[0].len > 0);
+
     const start_time = Io.Timestamp.now(static_io, .boot);
     // const res = io.operate(.{ .net_read = .{
-    //     .socket_handle = conn.stream_handle,
-    //     .data = dest,
+    //     .socket_handle = self.stream_handle,
+    //     .data = data,
     // } }) catch |err| {
-    //     conn.read_error = err;
+    //     self.read_error = err;
     //     return error.ReadFailed;
     // };
-    // const n = res.net_read catch |err| {
-    //     conn.read_error = err;
+
+    // return res.net_read catch |err| {
+    //     self.read_error = err;
     //     return error.ReadFailed;
     // };
-    const n = io.vtable.netRead(io.userdata, conn.stream_handle, dest) catch |err| {
+    const n = io.vtable.netRead(io.userdata, conn.stream_handle, data) catch |err| {
         conn.read_error = err;
         return error.ReadFailed;
     };
@@ -117,38 +154,78 @@ fn readVec(io_r: *Io.Reader, data: [][]u8) Io.Reader.Error!usize {
     return n;
 }
 
-fn drain(io_w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
-    const conn: *Connection = @alignCast(@fieldParentPtr("writer", io_w));
-    const io = conn.write_coro.any.io();
-    const buffered = io_w.buffered();
-    // const res = io.operate(.{ .net_write = .{
-    //     .socket_handle = conn.stream_handle,
-    //     .header = buffered,
-    //     .data = data,
-    //     .splat = splat,
-    // } }) catch |err| {
-    //     conn.write_error = err;
-    //     return error.WriteFailed;
+fn netWrite(self: *Connection, header: []const u8, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
+    const io = self.write_coro.any.io();
+
+    // const n = blk: {
+    //     const res = io.operate(.{ .net_write = .{
+    //         .socket_handle = self.stream_handle,
+    //         .header = buffered,
+    //         .data = data,
+    //         .splat = splat,
+    //     } }) catch |err| {
+    //         self.write_error = err;
+    //         return error.WriteFailed;
+    //     };
+
+    //     break :blk res.net_write catch |err| {
+    //         self.write_error = err;
+    //         return error.WriteFailed;
+    //     };
     // };
-    // const n = res.net_write catch |err| {
-    //     conn.write_error = err;
-    //     return error.WriteFailed;
-    // };
-    const n = io.vtable.netWrite(io.userdata, conn.stream_handle, buffered, data, splat) catch |err| {
-        conn.write_error = err;
+    const n = io.vtable.netWrite(io.userdata, self.stream_handle, header, data, splat) catch |err| {
+        self.write_error = err;
         return error.WriteFailed;
     };
-    return io_w.consume(n);
+    return self.writer.consume(n);
+}
+
+fn drain(io_w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
+    const conn: *Connection = @alignCast(@fieldParentPtr("writer", io_w));
+    const buffered = io_w.buffered();
+
+    if (conn.encryption) |enc| {
+        var total_len: usize = 0;
+
+        var len: c_int = undefined;
+        var res = crypto.EVP_EncryptUpdate(
+            enc.encrypt,
+            &enc.encrypt_buffer,
+            &len,
+            buffered.ptr,
+            @intCast(buffered.len),
+        );
+        if (res == 0) {
+            conn.write_error = error.EncryptionFailed;
+            return error.WriteFailed;
+        }
+        total_len += @as(usize, @intCast(len));
+        for (data) |d| {
+            const available_len = enc.encrypt_buffer.len - total_len;
+            if (available_len == 0) break;
+
+            res = crypto.EVP_EncryptUpdate(
+                enc.encrypt,
+                @as([*]u8, &enc.encrypt_buffer)[total_len..],
+                &len,
+                d.ptr,
+                @intCast(available_len),
+            );
+            if (res == 0) {
+                conn.write_error = error.EncryptionFailed;
+                return error.WriteFailed;
+            }
+            total_len += @as(usize, @intCast(len));
+        }
+
+        return conn.netWrite(enc.encrypt_buffer[0..total_len], &.{}, 0);
+    }
+
+    return conn.netWrite(buffered, data, splat);
 }
 
 fn coro_readConnection(co: *coro.AnyCoroutine, self: *Connection, allocator: Allocator) CoroReadError!void {
     _ = co;
-    self.reader = .{
-        .vtable = &reader_vtable,
-        .buffer = &self.read_buffer,
-        .seek = 0,
-        .end = 0,
-    };
 
     var read_arena = std.heap.ArenaAllocator.init(allocator);
     defer read_arena.deinit();
@@ -163,7 +240,7 @@ fn coro_readConnection(co: *coro.AnyCoroutine, self: *Connection, allocator: All
             error.ReadFailed => return switch (self.read_error.?) {
                 error.SocketUnconnected, error.Canceled => break,
                 error.NetworkDown => error.Disconnected,
-                error.SystemResources, error.ConnectionResetByPeer, error.Timeout => |err| err,
+                error.SystemResources, error.ConnectionResetByPeer, error.Timeout, error.DecryptionFailed => |err| err,
                 error.AccessDenied, error.Unexpected => unreachable,
             },
             error.DecompressionFailed,
@@ -180,12 +257,6 @@ fn coro_readConnection(co: *coro.AnyCoroutine, self: *Connection, allocator: All
 }
 
 fn coro_writeConnection(co: *coro.AnyCoroutine, self: *Connection, allocator: Allocator) CoroWriteError!void {
-    self.writer = .{
-        .vtable = &writer_vtable,
-        .buffer = &self.write_buffer,
-        .end = 0,
-    };
-
     while (true) {
         self.writeConnection(co, allocator) catch {
             return switch (self.write_error.?) {
@@ -197,7 +268,7 @@ fn coro_writeConnection(co: *coro.AnyCoroutine, self: *Connection, allocator: Al
                 error.HostUnreachable,
                 => error.Disconnected,
                 //error.ConnectionTimedOut,
-                error.ConnectionResetByPeer, error.SystemResources => |err| err,
+                error.ConnectionResetByPeer, error.SystemResources, error.EncryptionFailed => |err| err,
                 error.AddressFamilyUnsupported, error.Unexpected, error.FastOpenAlreadyInProgress => unreachable,
             };
         };
@@ -212,7 +283,7 @@ fn readConnection(self: *Connection, gpa: Allocator, arena_alloc: *std.heap.Aren
         .input_mode = .full,
     };
 
-    const reader = &self.reader;
+    const reader = if (self.encryption != null) &self.decrypt_reader else &self.reader;
     if (self.phase == .handshake and (try reader.peekByte()) == 0xFE) { // legacy handshake
         return error.LegacyHandshake;
     }
@@ -242,7 +313,7 @@ fn readConnection(self: *Connection, gpa: Allocator, arena_alloc: *std.heap.Aren
         if (uncompressed_length == 0) break :blk &raw_reader;
         rparams.input_mode = .streamed;
 
-        decomp = .init(&raw_reader, .zlib, &comp.buffer);
+        decomp = .init(&raw_reader, .zlib, &comp.decompress_buffer);
         break :blk &decomp.reader;
     } else &raw_reader;
 
@@ -330,21 +401,23 @@ timeout: Io.Duration,
 rate_limited: ?*RateLimited,
 packet_registry: *const PacketRegistry,
 compression: ?*Compression,
+encryption: ?*Encryption,
 
 read_closed: bool,
 write_closed: bool,
 stream_handle: Io.net.Socket.Handle,
 ip_address: Io.net.IpAddress,
 
-read_buffer: [128]u8,
+read_buffer: [reader_buffer_size]u8,
 reader: Io.Reader,
-read_error: ?Io.net.Stream.Reader.Error,
+decrypt_reader: Io.Reader,
+read_error: ?StreamReadError,
 parsing_error: ?PacketType.ReadError,
 read_coro: coro.Coroutine(CoroReadError!void),
 
-write_buffer: [128]u8,
+write_buffer: [writer_buffer_size]u8,
 writer: Io.Writer,
-write_error: ?Io.net.Stream.Writer.Error,
+write_error: ?StreamWriteError,
 write_coro: coro.Coroutine(CoroWriteError!void),
 
 send_queue: std.DoublyLinkedList,
@@ -360,6 +433,7 @@ pub const WritePacketError = Allocator.Error || PacketType.WriteError || error{
     PacketIDNotFound,
     PacketTooLarge,
 };
+pub const SetEncryptionError = error{SetupFailed};
 
 /// The data in `reader` will never move, as such the `StructuredPacket` API is useable with it.
 ///
@@ -389,8 +463,55 @@ pub const RateLimited = struct {
 
 pub const Compression = struct {
     threshold: usize,
-    buffer: [flate.max_window_len]u8,
     decompression_error: ?flate.Decompress.Error,
+    decompress_buffer: [flate.max_window_len]u8,
+    compress_buffer: [flate.max_window_len]u8,
+};
+
+pub const Encryption = struct {
+    encrypt: *crypto.EVP_CIPHER_CTX,
+    decrypt: *crypto.EVP_CIPHER_CTX,
+    shared_secret: [16]u8,
+    // Should have more bytes, but AES128/CFB8 doesn't buffer, so encryption and decryption is
+    // N bytes for N bytes
+    encrypt_buffer: [writer_buffer_size]u8,
+    decrypt_buffer: [reader_buffer_size]u8,
+
+    pub fn init(self: *Encryption, shared_secret_src: union(enum) { random_secret: std.Random, fixed_secret }) SetEncryptionError!void {
+        self.encrypt = crypto.EVP_CIPHER_CTX_new() orelse return error.SetupFailed;
+        errdefer crypto.EVP_CIPHER_CTX_free(self.encrypt);
+
+        self.decrypt = crypto.EVP_CIPHER_CTX_new() orelse return error.SetupFailed;
+        errdefer crypto.EVP_CIPHER_CTX_free(self.decrypt);
+
+        if (shared_secret_src == .random_secret) {
+            shared_secret_src.random_secret.bytes(&self.shared_secret);
+        }
+
+        const cipher = crypto.EVP_aes_128_cfb8().?;
+
+        var res = crypto.EVP_EncryptInit_ex(
+            self.encrypt,
+            cipher,
+            null,
+            &self.shared_secret,
+            &self.shared_secret,
+        );
+        if (res == 0) return error.SetupFailed;
+        res = crypto.EVP_DecryptInit_ex(
+            self.decrypt,
+            cipher,
+            null,
+            &self.shared_secret,
+            &self.shared_secret,
+        );
+        if (res == 0) return error.SetupFailed;
+    }
+
+    pub fn deinit(self: *Encryption) void {
+        crypto.EVP_CIPHER_CTX_free(self.encrypt);
+        crypto.EVP_CIPHER_CTX_free(self.decrypt);
+    }
 };
 
 pub const InitOptions = struct {
@@ -419,6 +540,7 @@ pub const InitOptions = struct {
     /// Defaults with a callback that does nothing.
     disconnect_callback: *const DisconnectCallbackFn = &noDisconnectMessage,
     compression: ?*Compression = null,
+    encryption: ?*Encryption = null,
 };
 
 pub const ReconfigureOptions = struct {
@@ -437,6 +559,7 @@ pub const ReconfigureOptions = struct {
     rate_limited: ?*RateLimited = null,
     disconnect_callback: ?*const DisconnectCallbackFn = null,
     compression: ?*Compression = null,
+    encryption: ?*Encryption = null,
 };
 
 /// `allocator` must remain valid until this connection is deinitalized
@@ -447,6 +570,7 @@ pub fn init(self: *Connection, allocator: Allocator, options: InitOptions) Alloc
         .timeout = options.timeout,
         .rate_limited = options.rate_limited,
         .compression = options.compression,
+        .encryption = options.encryption,
 
         .packet_registry = options.packet_registry,
 
@@ -456,13 +580,28 @@ pub fn init(self: *Connection, allocator: Allocator, options: InitOptions) Alloc
         .ip_address = options.stream.socket.address,
 
         .read_buffer = undefined,
-        .reader = .failing,
+        .reader = .{
+            .vtable = &reader_vtable,
+            .buffer = &self.read_buffer,
+            .seek = 0,
+            .end = 0,
+        },
+        .decrypt_reader = if (options.encryption) |enc| .{
+            .buffer = &enc.decrypt_buffer,
+            .vtable = &decrypt_reader_vtable,
+            .seek = 0,
+            .end = 0,
+        } else .failing,
         .read_error = null,
         .parsing_error = null,
         .read_coro = undefined,
 
         .write_buffer = undefined,
-        .writer = .failing,
+        .writer = .{
+            .vtable = &writer_vtable,
+            .buffer = &self.write_buffer,
+            .end = 0,
+        },
         .write_error = null,
         .write_coro = undefined,
 
@@ -503,6 +642,15 @@ pub fn reconfigure(self: *Connection, options: ReconfigureOptions) void {
     if (options.rate_limited) |rl| self.rate_limited = rl;
     if (options.disconnect_callback) |cb| self.disconnect_callback = cb;
     if (options.compression) |c| self.compression = c;
+    if (options.encryption) |c| {
+        self.encryption = c;
+        self.decrypt_reader = .{
+            .buffer = &c.decrypt_buffer,
+            .vtable = &decrypt_reader_vtable,
+            .seek = 0,
+            .end = 0,
+        };
+    }
 }
 
 /// Allows this connection to be printed to `std.Io.Writer`s as: `[ip-or-name]<[phase]>->[target-side]`
@@ -554,7 +702,7 @@ pub fn sendPacket(
                 out_w.writer.writeAll(content) catch unreachable;
             } else {
                 PacketType.writerNoAlloc(.var_int, &out_w.writer, @intCast(content.len)) catch unreachable;
-                var compress = flate.Compress.init(&out_w.writer, &comp.buffer, .zlib, .default) catch
+                var compress = flate.Compress.init(&out_w.writer, &comp.compress_buffer, .zlib, .default) catch
                     return error.OutOfMemory;
 
                 compress.writer.writeAll(content) catch return error.OutOfMemory;

@@ -31,7 +31,7 @@ const Step = Build.Step;
 const version = std.SemanticVersion.parse(buildzigzon.version) catch unreachable;
 
 pub fn build(b: *Build) !void {
-    const target = b.standardTargetOptions(.{ });
+    const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
     if (target.result.os.tag != .linux or target.result.cpu.arch != .x86_64) {
