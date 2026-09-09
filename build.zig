@@ -184,6 +184,7 @@ pub fn build(b: *Build) !void {
         .name = "core",
         .root_source_file = b.path("src/core/core.zig"),
         .imports = &.{
+            .{ .name = "crypto", .module = crypto_mod },
             .{ .name = "config", .module = config_mod },
         },
         .local_imports = &.{
