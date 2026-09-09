@@ -12,6 +12,8 @@ const Io = std.Io;
 const Connection = net.Connection;
 const Allocator = std.mem.Allocator;
 
+const logger = std.log.scoped(.@"core/server");
+
 const static_io = coro.AnyCoroutine.static_io;
 const current_version = net.packets.StatusResponse.Version.@"26.2";
 
@@ -27,6 +29,9 @@ const CoroAccpetError = Allocator.Error || coro.polling.AddError || error{
     BlockedByFirewall,
     ProtocolFailure,
     Canceled,
+    SocketUnconnected,
+    Timeout,
+    Unexpected,
 };
 
 const LoginError = error{
@@ -42,6 +47,7 @@ const LoginError = error{
 
 const PolledInfo = union(enum) {
     server,
+    serverv6,
     client: *Connection,
 
     pub fn format(self: PolledInfo, writer: *Io.Writer) Io.Writer.Error!void {
@@ -101,12 +107,12 @@ const LoginConnection = struct {
         const ctx = crypto.EVP_PKEY_CTX_new(owner.rsa_key, null) orelse return error.EncryptionContextCreation;
         defer crypto.EVP_PKEY_CTX_free(ctx);
 
-        // std.log.debug("created ctx", .{});
+        // logger.debug("created ctx", .{});
 
         if (crypto.EVP_PKEY_decrypt_init(ctx) <= 0) return error.EncryptionContextCreation;
-        // std.log.debug("context reset", .{});
+        // logger.debug("context reset", .{});
         if (crypto.EVP_PKEY_CTX_set_rsa_padding(ctx, crypto.RSA_PKCS1_PADDING) <= 0) return error.EncryptionContextCreation;
-        // std.log.debug("padding set", .{});
+        // logger.debug("padding set", .{});
 
         var len: usize = shared_buffer.len;
         var res = crypto.EVP_PKEY_decrypt(
@@ -116,15 +122,15 @@ const LoginConnection = struct {
             in_shared_secret.ptr,
             in_shared_secret.len,
         );
-        // std.log.debug("key size: {d}", .{len});
+        // logger.debug("key size: {d}", .{len});
         if (res <= 0 or len != shared_secret.len) return error.KeyDecryption;
         @memcpy(shared_secret, shared_buffer[0..16]);
-        // std.log.debug("key decrypted", .{});
+        // logger.debug("key decrypted", .{});
 
         if (crypto.EVP_PKEY_decrypt_init(ctx) <= 0) return error.EncryptionContextCreation;
-        // std.log.debug("context reset", .{});
+        // logger.debug("context reset", .{});
         if (crypto.EVP_PKEY_CTX_set_rsa_padding(ctx, crypto.RSA_PKCS1_PADDING) <= 0) return error.EncryptionContextCreation;
-        // std.log.debug("padding set", .{});
+        // logger.debug("padding set", .{});
 
         len = shared_buffer.len;
         res = crypto.EVP_PKEY_decrypt(
@@ -135,7 +141,7 @@ const LoginConnection = struct {
             verify_token.len,
         );
         if (res <= 0 or len != self.verify_token.len) return error.KeyDecryption;
-        std.log.debug("challenge decrypted", .{});
+        // logger.debug("challenge decrypted", .{});
 
         if (!std.mem.eql(u8, shared_buffer[0..self.verify_token.len], &self.verify_token)) return error.Challenge;
 
@@ -172,12 +178,30 @@ const ConfigConnection = struct {
     compression: *Connection.Compression,
 };
 
-fn coro_acceptConnection(co: *coro.AnyCoroutine, self: *Server) CoroAccpetError!void {
+fn coro_acceptConnection(co: *coro.AnyCoroutine, self: *Server, which: enum { v4, v6 }) CoroAccpetError!void {
     const coio = co.io();
 
+    var sock: Io.net.Server = switch (which) {
+        .v4 => .{
+            .socket = .{
+                .handle = self.sockv4_handle,
+                .address = .{ .ip4 = self.ipv4 },
+            },
+            .options = self.accept_options,
+        },
+        .v6 => .{
+            .socket = .{
+                .handle = self.sockv6_handle,
+                .address = .{ .ip6 = self.ipv6 },
+            },
+            .options = self.accept_options,
+        },
+    };
+
     while (true) {
-        var stream: ?Io.net.Stream = self.sock.accept(coio) catch |err| switch (err) {
+        var stream: ?Io.net.Stream = sock.accept(coio) catch |err| switch (err) {
             error.Unexpected, error.WouldBlock => unreachable,
+            error.Canceled => break,
             error.ProcessFdQuotaExceeded,
             error.SystemFdQuotaExceeded,
             error.SystemResources,
@@ -186,7 +210,6 @@ fn coro_acceptConnection(co: *coro.AnyCoroutine, self: *Server) CoroAccpetError!
             error.ConnectionAborted,
             error.BlockedByFirewall,
             error.ProtocolFailure,
-            error.Canceled,
             => |e| return e,
         };
         errdefer if (stream) |s| s.close(coio);
@@ -202,11 +225,19 @@ fn coro_acceptConnection(co: *coro.AnyCoroutine, self: *Server) CoroAccpetError!
         };
         const conn = &owned.connection;
 
-        try conn.init(self.allocator, .{
+        conn.init(self.allocator, .{
             .packet_registry = self.packet_registry,
             .stream = stream.?,
             .target_side = .client,
-        });
+        }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => |e| {
+                logger.err("Couldn't add connection to {f}: {t}", .{stream.?.socket.address, e});
+                stream.?.close(coio);
+                self.allocator.destroy(owned);
+                continue;
+            },
+        };
         stream = null;
         errdefer conn.deinit(self.allocator);
 
@@ -214,7 +245,7 @@ fn coro_acceptConnection(co: *coro.AnyCoroutine, self: *Server) CoroAccpetError!
 
         const gop = self.connections.getOrPutAssumeCapacity(conn);
         if (gop.found_existing) {
-            std.log.debug("Threw {f}: duplicate connection", .{conn.ip_address});
+            logger.debug("Threw {f}: duplicate connection", .{conn.ip_address});
             self.destroyConnection(conn);
         }
     }
@@ -235,10 +266,16 @@ fn destroyConnection(self: *Server, conn: *Connection) void {
 packet_registry: *const net.PacketRegistry,
 allocator: Allocator,
 io: Io,
-sock: Io.net.Server,
+accept_options: Io.net.Server.AcceptOptions,
+v6_enabled: bool,
+sockv4_handle: Io.net.Socket.Handle,
+sockv6_handle: Io.net.Socket.Handle,
+ipv4: Io.net.Ip4Address,
+ipv6: Io.net.Ip6Address,
 connections: std.HashMapUnmanaged(*Connection, void, Connection.HashContext, std.hash_map.default_max_load_percentage),
 poller: coro.polling.Poller(PolledInfo),
 accept_coro: coro.Coroutine(CoroAccpetError!void),
+acceptv6_coro: coro.Coroutine(CoroAccpetError!void),
 
 server_id: [20]u8,
 rsa_key: *crypto.EVP_PKEY,
@@ -257,21 +294,43 @@ pub const InitOptions = struct {
     allocator: Allocator,
     io: Io,
     bind_port: u16 = 25565,
+    bind_port_v6: ?u16 = null,
     max_connections: u31 = Io.net.default_kernel_backlog,
     compression_threshold: u31 = 256,
 };
 
+pub const AddressAlt = struct {
+    v4: Io.net.Ip4Address,
+    v6: ?Io.net.Ip6Address,
+
+    pub fn format(self: *const AddressAlt, writer: *Io.Writer) Io.Writer.Error!void {
+        try self.v4.format(writer);
+        if (self.v6) |v6| {
+            try writer.print("({f})", .{v6});
+        }
+    }
+};
+
 pub fn init(self: *Server, options: InitOptions) InitError!void {
     const addr = Io.net.IpAddress{ .ip4 = .loopback(options.bind_port) };
-    var sock = try addr.listen(static_io, .{
+    const listen_opt = Io.net.IpAddress.ListenOptions{
         .kernel_backlog = options.max_connections,
         .reuse_address = true,
-    });
+    };
+    var sock = try addr.listen(static_io, listen_opt);
     errdefer sock.deinit(static_io);
+    var sockv6 = if (options.bind_port_v6) |port|
+        try Io.net.IpAddress.listen(&.{ .ip6 = .loopback(port) }, static_io, listen_opt)
+    else
+        null;
+    errdefer if (sockv6) |*s| s.deinit(static_io);
 
     var poller = try @FieldType(Server, "poller").init();
     errdefer poller.deinit(options.allocator);
     try poller.addSocket(options.allocator, sock.socket, .readonly, .server);
+    if (sockv6) |s| {
+        try poller.addSocket(options.allocator, s.socket, .readonly, .serverv6);
+    }
 
     const key_ctx = crypto.EVP_PKEY_CTX_new_id(crypto.EVP_PKEY_RSA, null) orelse return error.EncryptionSetupFailed;
     defer crypto.EVP_PKEY_CTX_free(key_ctx);
@@ -298,10 +357,16 @@ pub fn init(self: *Server, options: InitOptions) InitError!void {
         .packet_registry = &packets.registry,
         .allocator = options.allocator,
         .io = options.io,
-        .sock = sock,
+        .accept_options = sock.options,
+        .v6_enabled = sockv6 != null,
+        .sockv4_handle = sock.socket.handle,
+        .sockv6_handle = if (sockv6) |s| s.socket.handle else undefined,
+        .ipv4 = sock.socket.address.ip4,
+        .ipv6 = if (sockv6) |s| s.socket.address.ip6 else undefined,
         .connections = .empty,
         .poller = poller,
         .accept_coro = undefined,
+        .acceptv6_coro = undefined,
 
         .server_id = undefined,
         .rsa_key = key.?,
@@ -320,8 +385,14 @@ pub fn init(self: *Server, options: InitOptions) InitError!void {
         }
     }
 
-    try self.accept_coro.init(.{}, coro_acceptConnection, .{self});
+    try self.accept_coro.init(.{}, coro_acceptConnection, .{ self, .v4 });
     errdefer self.accept_coro.deinit();
+    if (self.v6_enabled) {
+        try self.acceptv6_coro.init(.{}, coro_acceptConnection, .{ self, .v6 });
+    } else {
+        self.acceptv6_coro = .initFinished({});
+    }
+    errdefer self.acceptv6_coro.deinit();
 }
 
 pub fn deinit(self: *Server) void {
@@ -329,7 +400,24 @@ pub fn deinit(self: *Server) void {
     crypto.EVP_PKEY_free(self.rsa_key);
     self.allocator.free(self.public_key_bytes);
 
-    self.sock.deinit(static_io);
+    self.accept_coro.await(.cancel) catch |e| {
+        logger.err("Caught error while closing server: {t}", .{e});
+    };
+    self.acceptv6_coro.await(.cancel) catch |e| {
+        logger.err("Caught error while closing server: {t}", .{e});
+    };
+
+    Io.net.Socket.close(&.{
+        .handle = self.sockv4_handle,
+        .address = .{ .ip4 = self.ipv4 },
+    }, static_io);
+    if (self.v6_enabled) {
+        Io.net.Socket.close(&.{
+            .handle = self.sockv6_handle,
+            .address = .{ .ip6 = self.ipv6 },
+        }, static_io);
+    }
+
     var conn_it = self.connections.keyIterator();
     while (conn_it.next()) |conn_ptr| {
         const conn = conn_ptr.*;
@@ -341,21 +429,24 @@ pub fn deinit(self: *Server) void {
 }
 
 pub fn tick(self: *Server) !void {
-    var it = try self.poller.wait(250);
+    var it = try self.poller.wait(1_000);
     while (it.next()) |ev| {
-        // std.log.debug("Event: {t}, {f}", .{ ev.data, ev.events });
+        // logger.debug("Event: {t}, {f}", .{ ev.data, ev.events });
         switch (ev.data) {
             .server => if (try self.accept_coro.@"resume"()) {
+                return error.ServerClosed;
+            },
+            .serverv6 => if (try self.acceptv6_coro.@"resume"()) {
                 return error.ServerClosed;
             },
             .client => |conn| {
                 const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
                 assert(owned.owner == self);
 
-                // std.log.debug("[{f}] Event: {f}", .{ conn, ev.events });
+                // logger.debug("[{f}] Event: {f}", .{ conn, ev.events });
                 if (ev.events.in) {
                     const res = conn.read_coro.@"resume"();
-                    // std.log.debug("[{f}] Read result: {!}", .{ conn, res });
+                    // logger.debug("[{f}] Read result: {!}", .{ conn, res });
                     if (res) |finished| {
                         assert(!finished or conn.read_closed);
                     } else |err| {
@@ -368,15 +459,17 @@ pub fn tick(self: *Server) !void {
                                     .login => |l| l.@"error".?,
                                 };
 
-                                std.log.err("[{f}] Connection closed: {t}", .{ conn, mixed_err });
+                                logger.err("[{f}] Connection closed: {t}", .{ conn, mixed_err });
                             },
-                            error.Disconnected => std.log.info("[{f}] Disconnected", .{conn}),
-                            else => std.log.err("[{f}] Connection closed: {t}", .{ conn, err2 }),
+                            error.Disconnected => logger.info("[{f}] Disconnected", .{conn}),
+                            else => logger.err("[{f}] Connection closed: {t}", .{ conn, err2 }),
                         }
 
                         conn.read_coro.deinit();
                         conn.read_coro = .initFinished({});
-                        try conn.shutdown(.recv);
+                        conn.shutdown(.recv) catch |e| {
+                            logger.err("[{f}] Failed to shutdown connection: {t}", .{conn, e});
+                        };
                     }
                 }
 
@@ -385,10 +478,12 @@ pub fn tick(self: *Server) !void {
                     if (conn.write_coro.@"resume"()) |finished| {
                         assert(!finished or conn.write_closed);
                     } else |err| {
-                        std.log.err("[{f}] Connection closed: {t}", .{ conn, err });
+                        logger.err("[{f}] Connection closed: {t}", .{ conn, err });
                         conn.write_coro.deinit();
                         conn.write_coro = .initFinished({});
-                        try conn.shutdown(.send);
+                        conn.shutdown(.send) catch |e| {
+                            logger.err("[{f}] Failed to shutdown connection: {t}", .{conn, e});
+                        };
                     }
                 }
 
@@ -396,7 +491,7 @@ pub fn tick(self: *Server) !void {
                 const timedout = time_since_last_packet.nanoseconds > conn.timeout.nanoseconds;
 
                 if (timedout) {
-                    std.log.err("[{f}] Disconnected: Timeout", .{conn});
+                    logger.err("[{f}] Disconnected: Timeout", .{conn});
                 }
 
                 if (ev.events.err or (conn.read_closed and conn.send_queue.last == null) or timedout) {
@@ -410,10 +505,17 @@ pub fn tick(self: *Server) !void {
     }
 }
 
+pub fn addressAlt(self: *const Server) AddressAlt {
+    return .{
+        .v4 = self.ipv4,
+        .v6 = if (self.v6_enabled) self.ipv6 else null,
+    };
+}
+
 pub fn handleHandshake(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
     const hs = net.packets.handshake_c2s;
     const pack = try hs.readRoot(params, reader);
-    std.log.debug("[{f}] Hanshake: {f}", .{ conn, hs.formatted(pack) });
+    logger.debug("[{f}] Hanshake: {f}", .{ conn, hs.formatted(pack) });
     switch (pack.intent) {
         .status => conn.reconfigure(.{
             .in_phase = .status,
@@ -439,7 +541,7 @@ pub fn handleHandshake(conn: *Connection, reader: *Io.Reader, params: net.Packet
 pub fn handleStatus(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
     const status = net.packets.status_request_c2s;
     const pack = try status.readRoot(params, reader);
-    std.log.debug("[{f}] Status: {f}", .{ conn, status.formatted(pack) });
+    logger.debug("[{f}] Status: {f}", .{ conn, status.formatted(pack) });
     const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
 
     try conn.sendPacket(
@@ -460,7 +562,7 @@ pub fn handleStatus(conn: *Connection, reader: *Io.Reader, params: net.PacketTyp
 pub fn handleStatusPing(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
     const ping = net.packets.ping_pong;
     const pack = try ping.readRoot(params, reader);
-    std.log.debug("[{f}] Ping: {f}", .{ conn, ping.formatted(pack) });
+    logger.debug("[{f}] Ping: {f}", .{ conn, ping.formatted(pack) });
 
     try conn.sendPacket(
         params.toAllocPair(),
@@ -473,7 +575,7 @@ pub fn handleStatusPing(conn: *Connection, reader: *Io.Reader, params: net.Packe
 pub fn handleLoginHello(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
     const hello = net.packets.login_start_c2s;
     const pack = try hello.readRoot(params, reader);
-    std.log.debug("[{f}] Login Start: {f}", .{ conn, hello.formatted(pack) });
+    logger.debug("[{f}] Login Start: {f}", .{ conn, hello.formatted(pack) });
 
     const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
     if (owned.data != .none) {
@@ -535,7 +637,7 @@ pub fn handleLoginKey(conn: *Connection, reader: *Io.Reader, params: net.PacketT
     const login_success = net.packets.login_success_s2c;
 
     const pack = try key.readRoot(params, reader);
-    std.log.debug("[{f}] Login Key: {f}", .{ conn, key.formatted(pack) });
+    logger.debug("[{f}] Login Key: {f}", .{ conn, key.formatted(pack) });
 
     const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
     const owner = owned.owner;
@@ -591,7 +693,7 @@ pub fn handleLoginKey(conn: *Connection, reader: *Io.Reader, params: net.PacketT
 pub fn handleLoginAck(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
     const ack = net.packets.login_acknowledged_c2s;
     const pack = try ack.readRoot(params, reader);
-    std.log.debug("[{f}] Login Ack: {f}", .{ conn, ack.formatted(pack) });
+    logger.debug("[{f}] Login Ack: {f}", .{ conn, ack.formatted(pack) });
 
     const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
     const owner = owned.owner;

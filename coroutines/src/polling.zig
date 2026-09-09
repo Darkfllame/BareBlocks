@@ -87,16 +87,17 @@ pub const Events = packed struct {
     pub const writeonly = Events{ .out = true };
 
     pub fn format(self: Events, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        const info = @typeInfo(Events).@"struct";
+        const info = @typeInfo(@This()).@"struct";
         const BackInt = info.backing_integer.?;
         const max_back = std.math.maxInt(BackInt);
         const bits: BackInt = @bitCast(self);
         try writer.writeAll("{ ");
         inline for (info.fields) |f| {
-            const offset = @bitOffsetOf(Events, f.name);
+            const offset = @bitOffsetOf(@This(), f.name);
             const rem_mask = (max_back << (offset + 1)) & max_back;
+            const can_have_next = (offset + 1) < @bitSizeOf(BackInt);
             if (@field(self, f.name)) try writer.writeAll(f.name);
-            if (bits & rem_mask != 0) try writer.writeAll(" | ");
+            if (can_have_next and bits & rem_mask != 0 and (bits >> (offset + 1)) & 1 != 0) try writer.writeAll(" | ");
         }
         if (bits != 0) try writer.writeByte(' ');
         try writer.writeByte('}');
@@ -296,10 +297,10 @@ pub fn EPoll(comptime Userdata: type) type {
     return struct {
         const Self = @This();
 
-        const elems_per_grow = 8;
-        const poll_block_size = 8;
+        const elems_per_grow = 128;
+        const poll_block_size = 128;
 
-        const CountInt = @Int(.unsigned, std.math.log2(poll_block_size));
+        const CountInt = @Int(.unsigned, std.math.log2(poll_block_size) + 1);
 
         fn fromLinuxEvents(ev: EventInt) Events {
             return .{
@@ -424,7 +425,8 @@ pub fn EPoll(comptime Userdata: type) type {
                         };
                     },
                     .wait => {
-                        it.count = @intCast(self.fd.wait(&it.events, it.timeout));
+                        const n = self.fd.wait(&it.events, it.timeout);
+                        it.count = @intCast(@min(n, poll_block_size));
                         it.iter = 0;
 
                         if (it.count > 0) continue :sw .loop;

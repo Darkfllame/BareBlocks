@@ -4,11 +4,13 @@
 //! TODO: doc
 const Connection = @This();
 const std = @import("std");
+const builtin = @import("builtin");
 const coro = @import("coro");
 const utils = @import("utils");
 const crypto = @import("crypto");
 const net = @import("net.zig");
 
+const posix = std.posix;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const logger = net.logger;
@@ -51,6 +53,29 @@ const PacketNode = struct {
         return @as([*]const u8, @ptrCast(self))[@sizeOf(PacketNode)..][0..self.length];
     }
 };
+
+/// Disable Naggle's algorithm, which consists of grouping small packets together
+/// to reduce inefficient networking. Kinda useless in our case since we already buffer small
+/// packets sent within the same tick together.
+fn setNoDelay(self: *Connection) error{ SocketUnconnected, Timeout, Unexpected }!void {
+    const value: [4]u8 = @bitCast(@as(u32, 1));
+    while (true) {
+        const res = posix.system.setsockopt(
+            self.stream_handle,
+            posix.IPPROTO.TCP,
+            posix.TCP.NODELAY,
+            &value,
+            4,
+        );
+        return switch (posix.errno(res)) {
+            .SUCCESS => {},
+            .INTR => continue,
+            .PIPE => error.SocketUnconnected,
+            .TIMEDOUT => error.Timeout,
+            else => |err| posix.unexpectedErrno(err),
+        };
+    }
+}
 
 fn streamImpl(io_r: *Io.Reader, io_w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
     const dest = limit.slice(try io_w.writableSliceGreedy(1));
@@ -490,6 +515,7 @@ pub const CoroWriteError = error{
 };
 pub const StreamReadError = Io.net.Stream.Reader.Error || error{DecryptionFailed};
 pub const StreamWriteError = Io.net.Stream.Writer.Error || error{EncryptionFailed};
+pub const InitError = Allocator.Error || error{ SocketUnconnected, Timeout, Unexpected };
 
 pub const ReadCallbackError = PacketType.ReadError || WritePacketError || Io.net.ShutdownError || error{CallbackHandlerFailed};
 pub const WritePacketError = Allocator.Error || PacketType.WriteError || error{
@@ -648,7 +674,7 @@ pub const VTable = struct {
 };
 
 /// `allocator` must remain valid until this connection is deinitalized
-pub fn init(self: *Connection, allocator: Allocator, options: InitOptions) Allocator.Error!void {
+pub fn init(self: *Connection, allocator: Allocator, options: InitOptions) InitError!void {
     self.* = .{
         .name = options.name,
         .in_phase = options.in_phase,
@@ -699,6 +725,8 @@ pub fn init(self: *Connection, allocator: Allocator, options: InitOptions) Alloc
 
         .vtable = options.vtable,
     };
+
+    try self.setNoDelay();
 
     try self.read_coro.init(.{}, coro_readConnection, .{ self, allocator });
     errdefer self.read_coro.deinit();

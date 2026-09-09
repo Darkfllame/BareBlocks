@@ -112,14 +112,16 @@ pub fn largestAllocation(self: *const CountingAllocator) usize {
 pub fn format(self: *const CountingAllocator, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     try writer.print("(total: {Bi}", .{self.total});
     if (self.count_largest) {
-        try writer.writeAll(", slots:\n");
+        try writer.print(", slots: {d}\n", .{self.allocs.items.len});
 
-        for (self.allocs.items, 0..) |ptr, i| {
-            if (ptr == null) continue;
+        for (self.allocs.items, 0..) |mptr, i| {
+            const ptr = mptr orelse continue;
+
+            const perth: f128 = @floatFromInt((ptr.len * 1000) / self.total);
+
             try writer.writeAll("  ");
-            try writer.print("{Bi} [{d}%]: {x}", .{
-                ptr.?.len, (ptr.?.len * 100) / self.total,
-                ptr.?,
+            try writer.print("{Bi} [{d:.1}%]: {x}", .{
+                ptr.len, perth / 10, ptr,
             });
             if (i + 1 < self.allocs.items.len) {
                 try writer.writeAll(",\n");
