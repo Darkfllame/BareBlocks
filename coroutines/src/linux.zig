@@ -32,7 +32,7 @@ pub const EPollFD = enum(posix.fd_t) {
 
     pub fn create(cloexec: bool) CreateError!EPollFD {
         while (true) {
-            const rc = system.epoll_create1(@intFromBool(cloexec) * linux.EPOLL.CLOEXEC);
+            const rc = system.epoll_create1(@as(c_uint, @intFromBool(cloexec)) * linux.EPOLL.CLOEXEC);
             return switch (errno(rc)) {
                 .SUCCESS => @enumFromInt(rc),
                 .INTR => continue,

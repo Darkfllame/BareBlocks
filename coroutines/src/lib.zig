@@ -170,6 +170,7 @@ pub fn Coroutine(comptime T: type) type {
                     const any: *AnyCoroutine = @alignCast(@fieldParentPtr("stack", co));
                     const _self: *Self = @fieldParentPtr("any", any);
                     const args_ptr: *@This() = @ptrCast(@alignCast(any.data));
+                    // private.StackState.printCurrentStack();
                     _self.ret = @call(
                         .auto,
                         args_ptr.ptr,

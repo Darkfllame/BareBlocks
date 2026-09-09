@@ -26,7 +26,7 @@ fn fromPosixEvents(ev: EventInt) Events {
         .pri = (ev & POLL.PRI) != 0,
 
         .hang_up = (ev & POLL.HUP) != 0,
-        .err = (ev & POLL.ERR) != 0,
+        .err = (ev & (POLL.ERR | POLL.NVAL)) != 0,
     };
 }
 
@@ -78,9 +78,29 @@ pub const Events = packed struct {
     /// available. This means that the user **MUST** read all
     /// data available greedily until `EndOfStream` or `WouldBlock` is
     /// returned.
-    /// 
+    ///
     /// Should be used with non-blocking sockets/files
     edge_triggered: bool = false,
+
+    pub const rw = Events{ .in = true, .out = true };
+    pub const readonly = Events{ .in = true };
+    pub const writeonly = Events{ .out = true };
+
+    pub fn format(self: Events, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        const info = @typeInfo(Events).@"struct";
+        const BackInt = info.backing_integer.?;
+        const max_back = std.math.maxInt(BackInt);
+        const bits: BackInt = @bitCast(self);
+        try writer.writeAll("{ ");
+        inline for (info.fields) |f| {
+            const offset = @bitOffsetOf(Events, f.name);
+            const rem_mask = (max_back << (offset + 1)) & max_back;
+            if (@field(self, f.name)) try writer.writeAll(f.name);
+            if (bits & rem_mask != 0) try writer.writeAll(" | ");
+        }
+        if (bits != 0) try writer.writeByte(' ');
+        try writer.writeByte('}');
+    }
 };
 
 pub fn PollEvent(comptime Userdata: type) type {
@@ -94,6 +114,7 @@ pub fn PollEvent(comptime Userdata: type) type {
 
 pub const Poller = switch (private.os_tag) {
     .linux => EPoll,
+    // .freebsd, .netbsd, .macos => PosixPoll,
     else => |tag| @compileError("Not Yet Implemented: " ++ @tagName(tag)),
 };
 
@@ -298,6 +319,20 @@ pub fn EPoll(comptime Userdata: type) type {
                 @as(EventInt, @intFromBool(ev.edge_triggered)) * EPOLL.ET;
         }
 
+        fn removeFdInner(self: *Self, fd: posix.fd_t) struct { usize, Userdata } {
+            var iter = self.used.iterator(.{});
+
+            while (iter.next()) |idx| {
+                const elem = self.datas.items[idx];
+                if (elem[0] != fd) continue;
+
+                self.used.unset(idx);
+                self.fd.control(.delete, fd, undefined) catch unreachable;
+
+                return .{ idx, elem[1] };
+            } else unreachable; // IO Object not found
+        }
+
         fd: linux_fd.EPollFD,
         used: std.DynamicBitSetUnmanaged = .{},
         datas: std.ArrayList(struct { posix.fd_t, Userdata }) = .empty,
@@ -310,7 +345,6 @@ pub fn EPoll(comptime Userdata: type) type {
         pub fn addFd(self: *Self, allocator: Allocator, fd: posix.fd_t, events: Events, data: Userdata) AddError!void {
             var search_it = self.used.iterator(.{ .kind = .unset });
             const idx = search_it.next() orelse grow: {
-                try self.fds.ensureUnusedCapacity(allocator, elems_per_grow);
                 try self.datas.ensureUnusedCapacity(allocator, elems_per_grow);
                 const idx = self.used.bit_length;
                 try self.used.resize(allocator, idx + elems_per_grow, false);
@@ -325,6 +359,7 @@ pub fn EPoll(comptime Userdata: type) type {
                 error.Duplicate, error.SystemResources => |err| return err,
             };
 
+            self.datas.items.len = @max(self.datas.items.len, idx + 1);
             self.datas.items[idx] = .{ fd, data };
             self.used.set(idx);
         }
@@ -355,17 +390,7 @@ pub fn EPoll(comptime Userdata: type) type {
 
         /// If `poller_type == .epoll`
         pub fn removeFd(self: *Self, fd: posix.fd_t) Userdata {
-            var iter = self.used.iterator(.{});
-
-            while (iter.next()) |idx| {
-                const elem = self.datas.items[idx];
-                if (elem[0] != fd) continue;
-
-                self.used.unset(idx);
-                self.fd.control(.delete, fd, undefined) catch unreachable;
-
-                return elem[1];
-            } else unreachable; // IO Object not found
+            return self.removeFdInner(fd)[1];
         }
 
         //#region Common API
@@ -377,7 +402,7 @@ pub fn EPoll(comptime Userdata: type) type {
             iter: CountInt = 0,
             count: CountInt = 0,
 
-            pub fn next(it: *EventIterator) ?*PollEvent(Userdata) {
+            pub fn next(it: *EventIterator) ?PollEvent(Userdata) {
                 const self = it.self;
 
                 const State = enum { loop, wait };
@@ -394,7 +419,7 @@ pub fn EPoll(comptime Userdata: type) type {
                         if (!self.used.isSet(idx)) continue :sw .loop;
 
                         return .{
-                            .data = self.datas.items[ev.data.ptr],
+                            .data = self.datas.items[ev.data.ptr][1],
                             .events = fromLinuxEvents(ev.events),
                         };
                     },

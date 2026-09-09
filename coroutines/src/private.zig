@@ -43,21 +43,35 @@ pub const StackState = extern struct {
     rip: *const anyopaque,
     top: *anyopaque,
     bottom: *anyopaque,
+    // switch_count: u16 = 0,
+
+    pub fn printCurrentStack() callconv(.c) void {
+        std.log.debug("current stack: {x}, {x}", .{
+            asm volatile (""
+                : [_] "={rbp}" (-> usize),
+            ),
+            asm volatile (""
+                : [_] "={rsp}" (-> usize),
+            ),
+        });
+    }
 
     pub inline fn switchStack(self: *StackState) void {
         if (is_windows) {
             const tib = &std.os.windows.teb().NtTib;
-            const old = tib.*;
-            tib.StackBase = self.bottom;
-            tib.StackLimit = self.top;
-            self.bottom = old.StackBase;
-            self.top = tib.StackLimit;
+            std.mem.swap(std.os.windows.PVOID, &tib.StackBase, &self.bottom);
+            std.mem.swap(std.os.windows.PVOID, &tib.StackLimit, &self.top);
         }
+        // self.switch_count +%= 1;
+        // std.log.debug("{*} switched: {d}", .{ self.bottom, self.switch_count });
+        // printCurrentStack();
+        // std.log.debug("{*} switching to {*}", .{ self.bottom, self.rip });
         asm volatile (
             \\ xchgq %%rsp, 0(%%rdi)
             \\ xchgq %%rbp, 8(%%rdi)
-            \\ leaq 0f(%%rip), %%rax
-            \\ xchgq %%rax, 16(%%rdi)
+            \\ movq 16(%%rdi), %%rax
+            \\ leaq 0f(%%rip), %%rbx
+            \\ movq %%rbx, 16(%%rdi)
             \\ jmpq *%%rax
             \\0:
             :
@@ -124,6 +138,9 @@ pub const StackState = extern struct {
               .dirflag = true,
               .memory = true,
             });
+        // std.Options.debug_io.sleep(.fromMilliseconds(100), .boot) catch {};
+        // printCurrentStack();
+        // std.log.debug("{*} resumed {*}", .{ self.bottom, self.rip });
     }
 
     pub fn alwaysYield(self: *StackState) callconv(.c) noreturn {
