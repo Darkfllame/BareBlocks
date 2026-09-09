@@ -1,6 +1,7 @@
 const StructuredPacket = @This();
 const std = @import("std");
 const utils = @import("utils");
+const serial = @import("serial");
 const math = @import("math");
 const core = @import("core");
 const TextComponent = utils.TextComponent;
@@ -348,6 +349,10 @@ pub const Type = union(enum) {
         pub fn streamedInput(gpa: Allocator, arena: Allocator) ReadParams {
             return .{ .gpa = gpa, .arena = arena, .input_mode = .streamed };
         }
+
+        pub fn toAllocPair(self: ReadParams) AllocPair {
+            return .{ .gpa = self.gpa, .arena = self.getArena() };
+        }
     };
 
     pub const AllocPair = struct {
@@ -394,7 +399,7 @@ pub const Type = union(enum) {
             .float => f32,
             .double => f64,
             .string => []const u8,
-            .json, .nbt => |may_sub| if (may_sub) |sub| sub else utils.serial.Value,
+            .json, .nbt => |may_sub| if (may_sub) |sub| sub else serial.Value,
             .identifier => Identifier,
             .entity_metadata => void, // TODO: Implement entity_metadata
             .slot => void, // TODO: Implement slot
@@ -669,7 +674,7 @@ pub const Type = union(enum) {
             },
             .string => |may_max_cps| try readString(params.getMaybeArena(), reader, may_max_cps),
             .json => |may_sub| {
-                const Sub = may_sub orelse utils.serial.Value;
+                const Sub = may_sub orelse serial.Value;
                 if (true) @compileError("TODO: Make json serial reader");
                 const str = try readString(params.getMaybeGpa(), reader, null);
                 defer if (params.getMaybeGpa()) |gpa| gpa.free(str);
@@ -696,15 +701,15 @@ pub const Type = union(enum) {
             .slot => @compileError("Not Yet Implemented"),
             .hashed_slot => @compileError("Not Yet Implemented"),
             .nbt => |may_sub| {
-                const T = may_sub orelse utils.serial.Value;
-                var nbt_sr: utils.serial.nbt.Reader = undefined;
+                const T = may_sub orelse serial.Value;
+                var nbt_sr: serial.nbt.Reader = undefined;
                 nbt_sr.initWithArena(params.arena, reader, false);
                 defer {
                     nbt_sr.redeemArena(params.arena);
                     nbt_sr.deinit();
                 }
 
-                break :sw @as(utils.serial.MapReader.ReadError!T, T.deserialize(&nbt_sr.mapr)) catch |e| return switch (e) {
+                break :sw @as(serial.MapReader.ReadError!T, T.deserialize(&nbt_sr.mapr)) catch |e| return switch (e) {
                     error.ValueTooLong => error.InvalidLength,
                     error.UnexpectedToken => error.InvalidNBT,
                     error.OutOfMemory => error.OutOfMemory,
@@ -1013,16 +1018,15 @@ pub const Type = union(enum) {
                 .big,
             ),
             .string => try writeString(writer, val),
-            .json => |may_sub| {
-                const T = may_sub orelse utils.serial.Value;
+            .json => {
                 var alloc_w = Writer.Allocating.init(apair.gpa);
                 defer alloc_w.deinit();
 
-                var json_sw: utils.serial.json.Writer = undefined;
-                json_sw.init(apair.gpa, &alloc_w.writer);
+                var json_sw: serial.JsonWriter = undefined;
+                json_sw.init(apair.gpa, &alloc_w.writer, .{});
                 defer json_sw.deinit();
 
-                @as(utils.serial.MapWriter.WriteError!void, T.serialize(&json_sw.mapw)) catch {
+                @as(serial.MapWriter.WriteError!void, val.serialize(&json_sw.mapw)) catch {
                     if (json_sw.@"error") |e| return switch (e) {
                         error.OutOfMemory => |err| err,
                     };
@@ -1036,13 +1040,12 @@ pub const Type = union(enum) {
             .entity_metadata => @compileError("Not Yet Implemented"),
             .slot => @compileError("Not Yet Implemented"),
             .hashed_slot => @compileError("Not Yet Implemented"),
-            .nbt => |may_sub| {
-                const T = may_sub orelse utils.serial.Value;
-                var nbt_sw: utils.serial.nbt.Writer = undefined;
+            .nbt => {
+                var nbt_sw: serial.NbtWriter = undefined;
                 nbt_sw.init(apair.gpa, writer);
                 defer nbt_sw.deinit();
 
-                @as(utils.serial.MapWriter.WriteError!void, T.serialize(&nbt_sw.mapw)) catch {
+                @as(serial.MapWriter.WriteError!void, val.serialize(&nbt_sw.mapw)) catch {
                     if (nbt_sw.@"error") |e| return switch (e) {
                         error.InvalidLength, error.InvalidEnumTag, error.OutOfMemory => |err| err,
                         else => error.WriteFailed,

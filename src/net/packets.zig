@@ -22,7 +22,7 @@ pub const StatusResponse = struct {
     version: Version = .@"1.21.11",
     players: ?struct {
         max: u31,
-        online: u31,
+        online: u31 = 0,
         sample: []const PlayerEntry = &.{},
     } = null,
     description: utils.TextComponent = .empty,
@@ -38,6 +38,10 @@ pub const StatusResponse = struct {
         name: []const u8,
         protocol: u32,
 
+        pub const @"26.2" = named("Gecko-26.2", 776);
+        pub const @"26.1.2" = named("Gecko-26.2", 775);
+        pub const @"26.1.1" = named("Gecko-26.2", 775);
+        pub const @"26.1" = named("Gecko-26.2", 775);
         pub const @"1.21.11" = named("Gecko-1.21.11", 774);
         pub const @"1.21.10" = named("Gecko-1.21.10", 773);
         pub const @"1.21.9" = named("Gecko-1.21.9", 773);
@@ -51,8 +55,12 @@ pub const StatusResponse = struct {
         pub const @"1.21.1" = named("Gecko-1.21.1", 767);
         pub const @"1.21" = named("Gecko-1.21", 767);
 
-        pub fn named(comptime name: []const u8, comptime protocol: u32) Version {
+        pub fn named(name: []const u8, protocol: u32) Version {
             return .{ .name = name, .protocol = protocol };
+        }
+
+        pub fn renamed(self: Version, name: []const u8) Version {
+            return .{ .name = name, .protocol = self.protocol };
         }
     };
 
@@ -90,7 +98,7 @@ pub const StatusResponse = struct {
             try mapw.endAggregate();
         }
 
-        if (!self.description.isSimpleText() and !self.description.isEmpty()) {
+        if (!self.description.isEmpty()) {
             try mapw.fieldName("description");
             try self.description.serialize(mapw);
         }
@@ -257,7 +265,13 @@ pub const encryption_request_s2c = StructuredPacket.getType(.{
         .{ .name = "should_authenticate", .type = .bool },
     },
 });
-pub const login_success_s2c = PacketType{ .game_profile = {} };
+pub const login_success_s2c = StructuredPacket.getType(.{
+    .name = "LoginSuccessS2C",
+    .fields = &.{
+        .{ .name = "profile", .type = .game_profile },
+        .{ .name = "session_id", .type = .uuid },
+    },
+});
 pub const set_compression_s2c = PacketType{ .var_int = {} };
 pub const login_plugin_request_s2c = StructuredPacket.getType(.{
     .name = "LoginPluginRequestS2C",
@@ -275,7 +289,7 @@ pub const login_start_c2s = StructuredPacket.getType(.{
         .{ .name = "player_uuid", .type = .uuid },
     },
 });
-pub const encryption_response_c2s = StructuredPacket.getType(.{
+pub const key = StructuredPacket.getType(.{
     .name = "EncryptionResponseC2S",
     .fields = &.{
         .{ .name = "shared_secret", .type = .byte_array },
