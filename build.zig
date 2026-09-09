@@ -39,7 +39,7 @@ pub fn build(b: *Build) !void {
     }
 
     const use_llvm = b.option(bool, "use_llvm", "Force the use of LLVM");
-    const mc_version = b.option([]const u8, "mcver", "Version of minecraft (default: latest)") orelse "latest";
+    const mc_version = b.option([]const u8, "mcver", "Version of minecraft (default: 26.2)") orelse "26.2";
     const force_mc_cache_reload = b.option(bool, "mccache_reload", "Force reloading minecraft cache (default: false)") orelse false;
 
     const old_datagen_cmd = blk: {
