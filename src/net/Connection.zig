@@ -342,7 +342,17 @@ fn readConnection(self: *Connection, gpa: Allocator, arena_alloc: *std.heap.Aren
     const entry = self.packet_registry.getEntry(curr_side, self.in_phase, pid);
     // logger.debug("  - Packet resource: {t}bound/{t}/{s} (id: 0x{x:0>2})", .{ curr_side, self.in_phase, entry.resource, pid });
 
-    const pkcb = entry.callback orelse return error.InvalidPacketID;
+    const pkcb = entry.callback orelse {
+        // at least 79 characters required + the size of the resource string so
+        // 100 seems nice
+        var buf: [100]u8 = undefined;
+        var w = Io.Writer.fixed(&buf);
+        w.print("Couldn't read packet: \"{t}bound/{t}/{s}\" (id: 0x{x:0>2}): Work In Progress", .{
+            curr_side, self.in_phase, entry.resource, pid,
+        }) catch {};
+        self.disconnect(&.text(w.buffered(), .{})) catch {};
+        return error.InvalidPacketID;
+    };
 
     pkcb(self, packet_reader, rparams) catch |e| {
         const err = switch (e) {
@@ -429,6 +439,7 @@ encryption: ?*Encryption,
 
 read_closed: bool,
 write_closed: bool,
+disconnect_done: bool,
 stream_handle: Io.net.Socket.Handle,
 ip_address: Io.net.IpAddress,
 
@@ -446,6 +457,7 @@ write_error: ?StreamWriteError,
 write_coro: coro.Coroutine(CoroWriteError!void),
 
 send_queue: std.DoublyLinkedList,
+send_count: usize,
 
 // Connection-specific callbacks
 vtable: *const VTable,
@@ -651,6 +663,7 @@ pub fn init(self: *Connection, allocator: Allocator, options: InitOptions) Alloc
 
         .read_closed = false,
         .write_closed = false,
+        .disconnect_done = false,
         .stream_handle = options.stream.socket.handle,
         .ip_address = options.stream.socket.address,
 
@@ -682,6 +695,7 @@ pub fn init(self: *Connection, allocator: Allocator, options: InitOptions) Alloc
         .write_coro = undefined,
 
         .send_queue = .{},
+        .send_count = 0,
 
         .vtable = options.vtable,
     };
@@ -708,8 +722,10 @@ pub fn deinit(self: *Connection, allocator: Allocator) void {
 }
 
 pub fn disconnect(self: *Connection, reason: *const TextComponent) (WritePacketError || Io.net.ShutdownError)!void {
+    if (self.disconnect_done or self.write_closed) return;
     try self.vtable.disconnect(self, reason);
     try self.shutdown(.recv);
+    self.disconnect_done = true;
 }
 
 /// Doesn't reallocate/duplicate anything.
@@ -758,6 +774,8 @@ pub fn sendPacket(
     comptime @"type": PacketType,
     value: @"type".getZigType(),
 ) WritePacketError!void {
+    if (self.write_closed) return;
+
     const pack_id = self.packet_registry.packedIDFromResource(self.target_side, self.out_phase, resource) orelse
         return error.PacketIDNotFound;
     const entry = self.packet_registry.getEntry(self.target_side, self.out_phase, pack_id);
@@ -811,6 +829,7 @@ pub fn sendPacket(
         .length = bytes_result.len - @sizeOf(PacketNode),
     };
     self.send_queue.prepend(&pnode.node);
+    self.send_count += 1;
 }
 
 pub fn shutdown(self: *Connection, how: Io.net.ShutdownHow) Io.net.ShutdownError!void {
