@@ -9,7 +9,13 @@
             "cwd": "${workspaceFolder}/zig-out/bin",
             "internalConsoleOptions": "openOnSessionStart",
             "console": "integratedTerminal",
-            "preLaunchTask": "build"
+            "preLaunchTask": "build",
+            "initCommands": [
+                "command script import /path/to/zig/tools/lldb_pretty_printers.py",
+                "type category enable zig.lang",
+                "type category enable zig.std",
+                "type category enable zig.stage2",
+            ]
         }
     ]
 }
