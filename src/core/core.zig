@@ -10,6 +10,7 @@ const value_providers = @import("value_providers.zig");
 pub const packets_callback = @import("packets_callback.zig");
 pub const Chunk = @import("Chunk.zig");
 pub const DimensionProperties = @import("DimensionProperties.zig");
+pub const Server = @import("Server.zig");
 pub const Registry = @import("registry.zig").Registry;
 
 pub const IntProvider = value_providers.IntProvider;
@@ -197,3 +198,12 @@ pub const Direction = enum {
         };
     }
 };
+
+test {
+    std.testing.refAllDecls(@This());
+    std.testing.refAllDecls(BlockPosition);
+    std.testing.refAllDecls(Direction);
+    std.testing.refAllDecls(Direction.AxisDirection);
+    std.testing.refAllDecls(Direction.Axis);
+    std.testing.refAllDecls(Direction.Plane);
+}
