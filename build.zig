@@ -130,12 +130,21 @@ pub fn build(b: *Build) !void {
         break :blk out_dir;
     };
     const mc_generated = try mcDatagenDir(b, mc26_2_jar, mc_version);
-    const mc_generated_data = blk: {
+    const mc_registries = blk: {
         const run_exe = b.addRunArtifact(mc_gendata);
         run_exe.addDirectoryArg(mc_generated);
+        run_exe.addArg("registries");
         break :blk run_exe.addOutputFileArg("registries.zig");
     };
-    const registries_mod = b.createModule(.{ .root_source_file = mc_generated_data });
+    const mc_packets = blk: {
+        const run_exe = b.addRunArtifact(mc_gendata);
+        run_exe.has_side_effects = true;
+        run_exe.addDirectoryArg(mc_generated);
+        run_exe.addArg("packets");
+        break :blk run_exe.addOutputFileArg("packets.zig");
+    };
+    const registries_mod = b.createModule(.{ .root_source_file = mc_registries });
+    const packets_mod = b.createModule(.{ .root_source_file = mc_packets });
 
     var proj = Project{
         .arena = b.graph.arena,
@@ -179,12 +188,12 @@ pub fn build(b: *Build) !void {
         },
         .local_imports = &.{
             "coro",
-            "core",
             "utils",
             "serial",
             "math",
             "net",
             "registries",
+            "packets",
         },
     });
     _ = core_mod;
@@ -193,6 +202,7 @@ pub fn build(b: *Build) !void {
         .root_source_file = b.path("src/serial/serial.zig"),
         .local_imports = &.{"utils"},
     });
+    _ = serial_mod;
 
     const main_mod = proj.createModule(b, .{
         .name = "main",
@@ -215,9 +225,11 @@ pub fn build(b: *Build) !void {
         },
     });
 
+    proj.addModule(.{ .name = "registries", .module = registries_mod });
     proj.addModule(.{
-        .name = "registries",
-        .module = registries_mod,
+        .name = "packets",
+        .module = packets_mod,
+        .local_imports = &.{ "core", "net" },
     });
     proj.addModule(.{ .name = "coro", .module = coro_mod });
 
@@ -225,9 +237,6 @@ pub fn build(b: *Build) !void {
     mc_gendata.root_module.addAnonymousImport("net", .{
         .root_source_file = net_mod.root_source_file.?,
         .imports = &.{
-            .{ .name = "coro", .module = coro_mod },
-            .{ .name = "utils", .module = utils_mod },
-            .{ .name = "serial", .module = serial_mod },
             .{ .name = "config", .module = config_mod },
         },
     });

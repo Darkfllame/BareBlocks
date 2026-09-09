@@ -7,6 +7,7 @@ const Writer = std.Io.Writer;
 
 const value_providers = @import("value_providers.zig");
 
+pub const packets_callback = @import("packets_callback.zig");
 pub const Chunk = @import("Chunk.zig");
 pub const DimensionProperties = @import("DimensionProperties.zig");
 pub const Registry = @import("registry.zig").Registry;

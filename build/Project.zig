@@ -1,3 +1,8 @@
+//! A useful struct that's directly used by build.zig.
+//! 
+//! Allows modules to have a unique name. Facilitates the whole 1 test runner per module
+//! shenanigans.
+
 const Project = @This();
 const std = @import("std");
 

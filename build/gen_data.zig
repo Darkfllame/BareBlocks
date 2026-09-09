@@ -203,16 +203,98 @@ const RegistriesFile = struct {
 
 const PacketsFile = struct {
     ids: std.EnumArray(net.NetworkingSide, std.EnumArray(net.NetworkingPhase, IdentifierList(void))),
-    
+
+    pub fn jsonParse(allocator: Allocator, source: *json.Reader, options: json.ParseOptions) !PacketsFile {
+        if ((try source.next()) != .object_begin) return error.UnexpectedToken;
+
+        var self: PacketsFile = .{ .ids = .initFill(.initFill(.{})) };
+
+        while (true) {
+            var tok = try source.nextAllocMax(allocator, options.allocate.?, options.max_value_len.?);
+            var name = switch (tok) {
+                .string, .allocated_string => |s| s,
+                .object_end => break,
+                else => return error.UnexpectedToken,
+            };
+            const phase = std.meta.stringToEnum(net.NetworkingPhase, name) orelse {
+                if (options.ignore_unknown_fields) {
+                    try source.skipValue();
+                    continue;
+                }
+                return error.UnknownField;
+            };
+
+            if ((try source.next()) != .object_begin) return error.UnexpectedToken;
+            while (true) {
+                tok = try source.nextAllocMax(allocator, options.allocate.?, options.max_value_len.?);
+                name = switch (tok) {
+                    .string, .allocated_string => |s| s,
+                    .object_end => break,
+                    else => return error.UnexpectedToken,
+                };
+                const side: net.NetworkingSide = if (std.mem.eql(u8, name, "clientbound"))
+                    .client
+                else if (std.mem.eql(u8, name, "serverbound"))
+                    .server
+                else if (options.ignore_unknown_fields) {
+                    try source.skipValue();
+                    continue;
+                } else return error.UnknownField;
+
+                const list = self.ids.getPtr(side).getPtr(phase);
+
+                if ((try source.next()) != .object_begin) return error.UnexpectedToken;
+                while (true) {
+                    tok = try source.nextAllocMax(allocator, options.allocate.?, options.max_value_len.?);
+                    const id = switch (tok) {
+                        .string, .allocated_string => |s| utils.Identifier.validate(s) catch return error.InvalidCharacter,
+                        .object_end => break,
+                        else => return error.UnexpectedToken,
+                    };
+
+                    var prot_id: ?u32 = null;
+                    if ((try source.next()) != .object_begin) return error.UnexpectedToken;
+                    while (true) {
+                        tok = try source.nextAllocMax(allocator, options.allocate.?, options.max_value_len.?);
+                        name = switch (tok) {
+                            .string, .allocated_string => |s| s,
+                            .object_end => break,
+                            else => return error.UnexpectedToken,
+                        };
+
+                        if (std.mem.eql(u8, name, "protocol_id")) {
+                            tok = try source.nextAllocMax(allocator, options.allocate.?, options.max_value_len.?);
+                            name = switch (tok) {
+                                .number, .allocated_number => |s| s,
+                                .object_end => break,
+                                else => return error.UnexpectedToken,
+                            };
+                            prot_id = try std.fmt.parseInt(u32, name, 0);
+                        } else if (options.ignore_unknown_fields) {
+                            try source.skipValue();
+                            continue;
+                        } else return error.UnknownField;
+                    }
+
+                    if (prot_id == null) return error.MissingField;
+
+                    try list.set(allocator, id, prot_id.?, {});
+                }
+            }
+        }
+
+        return self;
+    }
 };
 
-const GeneratedData = struct {
-    reports: Reports,
-
-    pub const Reports = struct {
-        packets: PacketsFile,
-        registries: RegistriesFile,
-    };
+const ReportKind = enum {
+    registries,
+    packets,
+    pub fn filename(self: ReportKind) []const u8 {
+        return switch (self) {
+            inline else => |tag| "reports/" ++ @tagName(tag) ++ ".json",
+        };
+    }
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -223,40 +305,75 @@ pub fn main(init: std.process.Init) !void {
     _ = args_it.skip();
 
     const dirpath = args_it.next() orelse return error.BadArgument;
+    const which_str = args_it.next() orelse return error.BadArgument;
     const out_filepath = args_it.next() orelse return error.BadArgument;
+
+    const which = std.meta.stringToEnum(ReportKind, which_str) orelse return error.BadArgument;
 
     const dir = try Io.Dir.cwd().openDir(init.io, dirpath, .{});
     defer dir.close(init.io);
 
+    var out_file = try Io.Dir.cwd().createFile(init.io, out_filepath, .{ .lock = .exclusive });
+    defer out_file.close(init.io);
+
     var buf: [256]u8 = undefined;
+    var fw = out_file.writer(init.io, &buf);
 
-    const reg_file = blk: {
-        const registries_file = try dir.openFile(init.io, "reports/registries.json", .{ .lock = .shared });
-        defer registries_file.close(init.io);
+    var aw = Io.Writer.Allocating.init(init.gpa);
+    defer aw.deinit();
 
-        var fr = registries_file.reader(init.io, &buf);
+    {
+        const report_file = try dir.openFile(init.io, which.filename(), .{ .lock = .shared });
+        defer report_file.close(init.io);
+
+        var fr = report_file.reader(init.io, &buf);
 
         var json_r = json.Reader.init(init.gpa, &fr.interface);
         defer json_r.deinit();
 
-        break :blk try json.parseFromTokenSourceLeaky(
-            RegistriesFile,
-            init.arena.allocator(),
-            &json_r,
-            .{},
-        );
-    };
+        switch (which) {
+            .registries => {
+                const reg_file = try json.parseFromTokenSourceLeaky(
+                    RegistriesFile,
+                    init.arena.allocator(),
+                    &json_r,
+                    .{},
+                );
 
-    var out_file = try Io.Dir.cwd().createFile(init.io, out_filepath, .{ .lock = .exclusive });
-    defer out_file.close(init.io);
+                printRegFile(&reg_file, init.gpa, &aw.writer) catch |e| return switch (e) {
+                    error.WriteFailed => error.OutOfMemory,
+                    else => |err| err,
+                };
+            },
+            .packets => {
+                const pack_file = try json.parseFromTokenSourceLeaky(
+                    PacketsFile,
+                    init.arena.allocator(),
+                    &json_r,
+                    .{},
+                );
 
-    var fw = out_file.writer(init.io, &buf);
-    try fw.flush();
+                printPackFile(&pack_file, &aw.writer) catch |e| return switch (e) {
+                    error.WriteFailed => error.OutOfMemory,
+                    // else => |err| err,
+                };
+            },
+        }
+    }
 
-    printRegFile(&reg_file, init.gpa, &fw.interface) catch |e| return switch (e) {
+    aw.writer.writeByte(0) catch return error.OutOfMemory;
+
+    const written = aw.written();
+    // std.log.err("attempted writing file:\n{s}", .{written});
+
+    var ast = try std.zig.Ast.parse(init.gpa, written[0 .. written.len - 1 :0], .zig);
+    defer ast.deinit(init.gpa);
+
+    ast.render(init.gpa, &fw.interface, .{}) catch |e| return switch (e) {
         error.WriteFailed => fw.err.?,
         else => |err| err,
     };
+
     try fw.flush();
 }
 
@@ -288,8 +405,11 @@ fn printRegFile(reg_file: *const RegistriesFile, gpa: Allocator, out: *Io.Writer
 
         try out.print("pub const @\"{s}Registry\"=enum(u32){{", .{pascal_name});
 
+        const count = reg.entries.map.count();
+
         var reg_it = reg.entries.iterator();
-        while (reg_it.next()) |entry2| {
+        var iter: usize = 0;
+        while (reg_it.next()) |entry2| : (iter += 1) {
             const rid, const idn, _ = entry2;
 
             try out.writeAll("@\"");
@@ -300,7 +420,9 @@ fn printRegFile(reg_file: *const RegistriesFile, gpa: Allocator, out: *Io.Writer
             }
             try out.writeAll("\"=");
             try out.printInt(idn, 10, .lower, .{});
-            try out.writeAll(",");
+            if (!(count <= 3 and iter == (count - 1))) {
+                try out.writeAll(",");
+            }
         }
         if (reg.default) |default| {
             try out.print("pub const default:@\"{s}Registry\"=@intFromEnum({d});", .{ pascal_name, default });
@@ -329,4 +451,60 @@ fn pascalize(str: []const u8, alloc: Allocator) Allocator.Error![]u8 {
     }
 
     return alloc.realloc(res, w.end);
+}
+
+fn printPackFile(pack_file: *const PacketsFile, out: *Io.Writer) !void {
+    const pack_file_mut: *PacketsFile = @constCast(pack_file);
+    try out.writeAll(
+        \\const std = @import("std");
+        \\const net = @import("net");
+        \\const core = @import("core");
+        \\pub const registry = net.PacketRegistry{.entries = .init(.{
+    );
+
+    var side_it = pack_file_mut.ids.iterator();
+    while (side_it.next()) |entry| {
+        const side = entry.key;
+        try out.print(".{t} = .init(.{{", .{side});
+
+        var phase_it = entry.value.iterator();
+        while (phase_it.next()) |entry2| {
+            const phase = entry2.key;
+            try out.print(".{t} = &.{{", .{phase});
+
+            var last_id: u32 = 0;
+            var packet_it = entry2.value.iterator();
+            while (packet_it.next()) |entry3| {
+                const id, const idn, _ = entry3;
+                if (idn - last_id > 1) {
+                    for (last_id..idn - 1) |_| {
+                        try out.writeAll(".{.write_cushion=0, .resource=\"none\",.callback=null},");
+                    }
+                }
+
+                try out.print(
+                    \\.{{
+                    \\  .write_cushion=512,
+                    \\  .resource="{f}",
+                    \\  .callback= if (@hasDecl(core.packets_callback, "{t}bound/{t}/{0f}")) core.packets_callback.@"{1t}bound/{2t}/{0f}" else null,
+                    \\}},
+                , .{
+                    id.alt(.omit_minecraft),
+                    side,
+                    phase,
+                });
+
+                last_id = idn;
+            }
+
+            try out.writeAll("},");
+        }
+
+        try out.writeAll("}),");
+    }
+
+    try out.writeAll(
+        \\    }),
+        \\};
+    );
 }

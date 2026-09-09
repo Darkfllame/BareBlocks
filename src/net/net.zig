@@ -37,71 +37,40 @@ pub const NetworkingPhase = enum { handshake, status, login, configuration, play
 pub const PacketID = enum(u16) { _ };
 
 pub const PacketRegistry = struct {
-    arena_state: std.heap.ArenaAllocator.State,
-    entries: std.EnumArray(NetworkingSide, std.EnumArray(NetworkingPhase, std.ArrayList(Entry))),
+    entries: std.EnumArray(NetworkingSide, std.EnumArray(NetworkingPhase, []const Entry)),
 
     pub const empty = PacketRegistry{
-        .arena_state = .init,
-        .entries = .initFill(.initFill(.empty)),
+        .entries = .initFill(.initFill(&.{})),
     };
 
     pub const Entry = struct {
         write_cushion: usize,
         resource: []const u8,
-        callback: *const Connection.ReadCallbackFn,
+        callback: ?*const Connection.ReadCallbackFn,
     };
 
-    pub fn addEntry(
-        self: *PacketRegistry,
-        allocator: Allocator,
-        side: NetworkingSide,
-        phase: NetworkingPhase,
-        entry: Entry,
-        copy_resource: bool,
-    ) Allocator.Error!PacketID {
-        const list = self.entries.getPtr(side).getPtr(phase);
-        for (list.items, 0..) |en, i| {
-            if (std.mem.eql(u8, en.resource, entry.resource)) return @enumFromInt(i);
-        }
-
-        try list.ensureUnusedCapacity(allocator, 1);
-
-        var new_entry = entry;
-        new_entry.resource = if (copy_resource) blk: {
-            var arena = self.arena_state.promote(allocator);
-            const val = try arena.allocator().dupe(u8, entry.resource);
-            self.arena_state = arena.state;
-            break :blk val;
-        } else entry.resource;
-
-        const id: PacketID = @enumFromInt(list.items.len);
-        list.appendAssumeCapacity(new_entry);
-
-        return id;
-    }
-
     pub fn getCallback(self: *const PacketRegistry, side: NetworkingSide, phase: NetworkingPhase, resource: []const u8) ?*const Connection.ReadCallbackFn {
-        const list = self.entries.getPtrConst(side).getPtrConst(phase);
-        for (list.items) |entry| {
+        const list = self.entries.getPtrConst(side).get(phase);
+        for (list) |entry| {
             if (std.mem.eql(u8, entry.resource, resource)) return entry.callback;
         }
         return null;
     }
 
     pub fn packedIDFromResource(self: *const PacketRegistry, side: NetworkingSide, phase: NetworkingPhase, resource: []const u8) ?PacketID {
-        const list = self.entries.getPtrConst(side).getPtrConst(phase);
-        for (list.items, 0..) |entry, i| {
+        const list = self.entries.getPtrConst(side).get(phase);
+        for (list, 0..) |entry, i| {
             if (std.mem.eql(u8, entry.resource, resource)) return @enumFromInt(i);
         }
         return null;
     }
 
     pub fn getEntry(self: *const PacketRegistry, side: NetworkingSide, phase: NetworkingPhase, id: PacketID) *const Entry {
-        return &self.entries.getPtrConst(side).getPtrConst(phase).items[@intFromEnum(id)];
+        return &self.entries.getPtrConst(side).get(phase)[@intFromEnum(id)];
     }
 
     pub fn getPacketID(self: *const PacketRegistry, side: NetworkingSide, phase: NetworkingPhase, id: i32) ?PacketID {
-        const entries = self.entries.getPtrConst(side).getPtrConst(phase).items;
+        const entries = self.entries.getPtrConst(side).get(phase);
         if (id < 0 or entries.len <= id) return null;
         return @enumFromInt(id);
     }
