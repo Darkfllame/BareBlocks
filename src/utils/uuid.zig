@@ -25,29 +25,85 @@ pub const UUID = extern union {
     u32s: [4]u32,
     bytes: [16]u8,
     v1: packed struct(u128) {
-        time_low: u32,
-        time_mid: u16,
-        version_time_high: u16,
-        variant_seq: u16,
         node: u48,
+        variant_seq: u16,
+        ver_time_hi: packed struct(u16) {
+            time_high: u12,
+            version: u4,
+        },
+        time_mid: u16,
+        time_low: u32,
+
+        pub fn variant(self: @This()) u2 {
+            assert(self.version == 1);
+            return switch (self.variant_seq & 0xE000) {
+                0x8000, 0xA000 => 1,
+                0xC000 => 2,
+                else => unreachable, // bad UUIDv1
+            };
+        }
     },
-    common: packed struct(u128) {
-        data: u62,
+    v3: V35,
+    v2: packed struct(u128) {
+        node: u48,
+        local_id_domain: u8,
         variant: u2,
-        data2: u12,
+        clock_seq_low: u6,
+        ver_time_hi: packed struct(u16) {
+            time_high: u12,
+            version: u4,
+        },
+        time_mid: u16,
+        local_id: u32,
+    },
+    v4: packed struct(u128) {
+        random5: u56,
+        variant_random2: u16,
         version: u4,
-        data3: u48,
+        random0: u52,
+
+        pub fn variant(self: @This()) u2 {
+            assert(self.version == 1);
+            return switch (self.variant_random2 & 0xE000) {
+                0x8000, 0xA000 => 1,
+                0xC000 => 2,
+                else => unreachable, // bad UUIDv1
+            };
+        }
+    },
+    v5: V35,
+    v6: packed struct(u128) {
+        node: u48,
+        variant: u2,
+        variant_seq: u14,
+        ver_time_lo: packed struct(u16) {
+            time_low: u12,
+            version: u4,
+        },
+        time_mid: u16,
+        time_high: u32,
     },
     v7: packed struct(u128) {
-        random: u62,
+        random2: u56,
         variant: u2,
-        random2: u12,
-        version: u4,
+        random1: u6,
+        version_rnd0: packed struct(u16) {
+            random: u12,
+            version: u4,
+        },
         timestamp: u48,
     },
 
     pub const @"null" = UUID{ .value = 0 };
     pub const stringified_length = 36;
+
+    pub const V35 = packed struct(u128) {
+        data5: u56,
+        variant: u2,
+        data2: u14,
+        version: u4,
+        data0: u52,
+    };
 
     pub const HashCtx = struct {
         pub fn hash(_: HashCtx, uuid: UUID) u64 {
@@ -103,11 +159,18 @@ pub const UUID = extern union {
     }
 
     pub fn format(self: UUID, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        try writer.print("{x:0>8}-{x:0>4}-{x:0>4}-{x:0>4}-{x:0>12}", .{
-            self.v1.time_low,          self.v1.time_mid,
-            self.v1.version_time_high, self.v1.variant_seq,
-            self.v1.node,
-        });
+        const info = @typeInfo(@FieldType(UUID, "v1")).@"struct";
+        inline for (0..info.fields.len) |i| {
+            const f = info.fields[info.fields.len - i - 1];
+            if (i != 0) try writer.writeByte('-');
+            const bits = @bitSizeOf(f.type);
+            const I = @Int(.unsigned, bits);
+            try writer.printInt(@as(I, @bitCast(@field(self.v1, f.name))), 16, .lower, .{
+                .fill = '0',
+                .alignment = .right,
+                .width = bits / 4,
+            });
+        }
     }
 
     pub fn serialize(self: UUID, mapw: *serial.MapWriter) serial.MapWriter.WriteError!void {
@@ -159,15 +222,29 @@ pub const UUID = extern union {
 
     pub fn withAttributes(self: UUID, version: u4, variant: enum { variant1, variant2 }) UUID {
         var out = self;
-        out.common.version = version;
+        out.v1.ver_time_hi.version = version;
         switch (variant) {
-            .variant1 => out.common.variant = 0b10,
-            .variant2 => {
-                out.common.variant = 0b11;
-                out.common.data3 >>= 1;
-            },
+            .variant1 => out.v1.variant_seq = (out.v1.variant_seq & 0x3FFF) | 0x8000,
+            .variant2 => out.v1.variant_seq = (out.v1.variant_seq & 0x1FFF) | 0xC000,
         }
         return out;
+    }
+
+    pub fn makeVersion3(name: []const u8) UUID {
+        var hash = std.crypto.hash.Md5.init(.{});
+        hash.update(name);
+        var out: UUID = undefined;
+        hash.final(&out.bytes);
+        out.value = @byteSwap(out.value);
+        return out.withAttributes(3, .variant1);
+    }
+
+    pub fn makeVersion5(name: []const u8) UUID {
+        var hash = std.crypto.hash.Sha1.init(.{});
+        hash.update(name);
+        var bytes: [20]u8 = undefined;
+        hash.final(&bytes);
+        return withAttributes(.{ .bytes = bytes[0..16].* }, 5, .variant1);
     }
 
     pub fn makeVersion4(io: std.Io) UUID {
@@ -182,10 +259,13 @@ pub const UUID = extern union {
         const timestamp = std.Io.Timestamp.now(io, .real);
         return UUID{ .v7 = .{
             .timestamp = @truncate(@as(u64, @bitCast(timestamp.toMilliseconds()))),
-            .version = 7,
-            .random2 = @truncate(rnd >> 62),
+            .version_rnd0 = .{
+                .random = @truncate(rnd),
+                .version = 7,
+            },
+            .random1 = @truncate(rnd >> 12),
             .variant = 0b10,
-            .random = @truncate(rnd),
+            .random2 = @truncate(rnd >> 18),
         } };
     }
 };
@@ -193,4 +273,21 @@ pub const UUID = extern union {
 test {
     std.testing.refAllDecls(@This());
     std.testing.refAllDecls(UUID);
+}
+
+test "UUID.makeVersion3" {
+    const uuid = UUID.makeVersion3("Offline: Darkfllame");
+    try std.testing.expectEqual(uuid.value, 0xf87c8a30378635021da43e54fe0cebf4);
+}
+
+test "UUID.parse" {
+    const uuid = try UUID.parse("f87c8a30-3786-a532-1da4-3e54fe0cebf4");
+    try std.testing.expectEqual(uuid.value, 0xf87c8a30378635021da43e54fe0cebf4);
+}
+
+test "UUID" {
+    const uuid = UUID{.value = 0xf87c8a30378635021da43e54fe0cebf4};
+    var buf: [UUID.stringified_length]u8 = undefined;
+    uuid.stringify(&buf);
+    try std.testing.expectEqualStrings("f87c8a30-3786-a532-1da4-3e54fe0cebf4", &buf);
 }

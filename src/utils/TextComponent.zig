@@ -348,19 +348,19 @@ click_event: ClickEvent = .none,
 hover_event: HoverEvent = .none,
 
 pub const empty = text("", .{});
-pub const disconnect_generic = translate("multiplayer.disconnect.generic", null, &.{}, .{});
-pub const server_shutdown = translate("multiplayer.disconnect.server_shutdown", null, &.{}, .{});
-pub const transfers_disabled = translate("multiplayer.disconnect.transfers_disabled", null, &.{}, .{});
-pub const duplicate_login = translate("multiplayer.disconnect.duplicate_login", null, &.{}, .{});
-pub const server_full = translate("multiplayer.disconnect.server_full", null, &.{}, .{});
-pub const not_whitelisted = translate("multiplayer.disconnect.not_whitelisted", null, &.{}, .{});
-pub const banned = translate("multiplayer.disconnect.banned", null, &.{}, .{});
-pub const banned_ip_exp = translate("multiplayer.disconnect.banned_ip.expiration", null, &.{}, .{});
-pub const banned_ip_reason = translate("multiplayer.disconnect.banned_ip.reason", null, &.{}, .{});
-pub const banned_exp = translate("multiplayer.disconnect.banned.expiration", null, &.{}, .{});
-pub const banned_reason = translate("multiplayer.disconnect.banned.reason", null, &.{}, .{});
-pub const banned_reason_default = translate("multiplayer.disconnect.banned.reason.default", null, &.{}, .{});
-pub const exceeded_packet_rate = translate("disconnect.exceeded_packet_rate", null, &.{}, .{});
+pub const disconnect_generic = translate("multiplayer.disconnect.generic", .{});
+pub const server_shutdown = translate("multiplayer.disconnect.server_shutdown", .{});
+pub const transfers_disabled = translate("multiplayer.disconnect.transfers_disabled", .{});
+pub const duplicate_login = translate("multiplayer.disconnect.duplicate_login", .{});
+pub const server_full = translate("multiplayer.disconnect.server_full", .{});
+pub const not_whitelisted = translate("multiplayer.disconnect.not_whitelisted", .{});
+pub const banned = translate("multiplayer.disconnect.banned", .{});
+pub const banned_ip_exp = translate("multiplayer.disconnect.banned_ip.expiration", .{});
+pub const banned_ip_reason = translate("multiplayer.disconnect.banned_ip.reason", .{});
+pub const banned_exp = translate("multiplayer.disconnect.banned.expiration", .{});
+pub const banned_reason = translate("multiplayer.disconnect.banned.reason", .{});
+pub const banned_reason_default = translate("multiplayer.disconnect.banned.reason.default", .{});
+pub const exceeded_packet_rate = translate("disconnect.exceeded_packet_rate", .{});
 
 pub const CreateCommonOptions = struct {
     arena_state: ArenaAllocator.State = .{},
@@ -389,6 +389,12 @@ pub const FormattingOptions = struct {
     obfuscated: ?bool = null,
     shadow_color: ?Color.ARGB = null,
 };
+pub const TranslateCreateOptions = struct {
+    fallback: ?[]const u8 = null,
+    args: []const TextComponent = &.{},
+
+    common: CreateCommonOptions = .{},
+};
 
 pub inline fn text(content: []const u8, options: CreateCommonOptions) TextComponent {
     return fromContent(.{ .text = content }, options);
@@ -408,12 +414,12 @@ pub fn textFmt(allocator: Allocator, comptime fmt: []const u8, args: anytype, op
     return text(try std.fmt.allocPrint(allocator, fmt, args), options);
 }
 
-pub inline fn translate(id: []const u8, fallback: ?[]const u8, args: []const TextComponent, options: CreateCommonOptions) TextComponent {
+pub inline fn translate(id: []const u8, options: TranslateCreateOptions) TextComponent {
     return fromContent(.{ .translatable = .{
         .id = id,
-        .fallback = fallback orelse "",
-        .with = args,
-    } }, options);
+        .fallback = options.fallback orelse "",
+        .with = options.args,
+    } }, options.common);
 }
 
 pub inline fn keybind(bind: Keybind, options: CreateCommonOptions) TextComponent {

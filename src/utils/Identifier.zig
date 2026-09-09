@@ -11,6 +11,14 @@ path_ptr: [*]const u8,
 namespace_len: u16,
 path_len: u16,
 
+pub const ValidationError = error{
+    SeparatorNotFound,
+    InvalidCharacter,
+    NamespaceTooLong,
+    PathTooLong,
+};
+
+
 pub const HashCtx = struct {
     pub fn hash(_: HashCtx, id: Identifier) u64 {
         var hasher = std.hash.Wyhash.init(0);
@@ -23,11 +31,24 @@ pub const HashCtx = struct {
     }
 };
 
-pub const ValidationError = error{
-    SeparatorNotFound,
-    InvalidCharacter,
-    NamespaceTooLong,
-    PathTooLong,
+pub const Alt = struct {
+    id: Identifier,
+    mode: Mode,
+    
+    pub const Mode = enum {
+        full,omit_minecraft
+    };
+
+    pub fn format(self: Alt, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        sw: switch (self.mode) {
+            .full => try writer.print("{s}:{s}", .{self.id.namespace(), self.id.path()}),
+            .omit_minecraft => {
+                if (std.mem.eql(u8, self.id.namespace(), "minecraft")) {
+                    try writer.writeAll(self.id.path());
+                } else continue :sw .full;
+            },
+        }
+    }
 };
 
 pub fn namespace(self: Identifier) []const u8 {
@@ -110,6 +131,10 @@ pub inline fn vanilla(comptime _path: []const u8) Identifier {
 
 pub fn format(self: Identifier, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     try writer.print("Identifier({s}:{s})", .{ self.namespace(), self.path() });
+}
+
+pub fn alt(self: Identifier,mode: Alt.Mode) Alt {
+    return .{.id = self,.mode=mode};
 }
 
 pub fn eql(a: Identifier, b: Identifier) bool {
