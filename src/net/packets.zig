@@ -5,13 +5,28 @@ const StructuredPacket = @import("StructuredPacket.zig");
 const PacketType = StructuredPacket.Type;
 
 test {
-    std.testing.refAllDecls(@This());
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer aw.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const info = @typeInfo(@This()).@"struct";
+    inline for (info.decls) |d| {
+        const value = @field(@This(), d.name);
+        if (@TypeOf(value) == PacketType) {
+            aw.clearRetainingCapacity();
+            _ = arena.reset(.retain_capacity);
+            try value.write(.newWithArena(std.testing.allocator, &arena), &aw.writer, value.default());
+            var reader = std.Io.Reader.fixed(aw.written());
+            _ = try PacketType.readRoot(value, .streamedInput(std.testing.allocator, &arena), &reader);
+        }
+    }
     std.testing.refAllDecls(StatusResponse);
     std.testing.refAllDecls(StatusResponse.PlayerEntry);
     std.testing.refAllDecls(StatusResponse.Version);
 }
 
-pub const HandshakeIntent = enum(u2) { status = 1, login, transfer };
+pub const HandshakeIntent = enum(u2) { invalid, status, login, transfer };
 pub const ServerLinkLabel = enum(u4) { bug_report, community_guidelines, support, statuts, feedback, community, website, forums, news, announcements };
 pub const ChatMode = enum { enabled, commands_only, hidden };
 pub const SkinPart = enum { cape, jacket, left_sleeve, right_sleeve, left_pants_leg, right_pants_leg, hat };
@@ -20,18 +35,42 @@ pub const ParticleSetting = enum { all, decreased, minimal };
 pub const ResourcePackResponseResult = enum { successful_download, declined, failed_download, accepted, downloaded, invalid_url, failed_to_reload, discarded };
 pub const StatusResponse = struct {
     version: Version = .@"1.21.11",
-    players: ?struct {
-        max: u31,
-        online: u31 = 0,
-        sample: []const PlayerEntry = &.{},
-    } = null,
+    players: ?Players = null,
     description: utils.TextComponent = .empty,
     enforcesSecureChat: ?bool = null,
     preventsChatReports: ?bool = null,
 
+    pub const default = StatusResponse{};
+
+    pub const Players = struct {
+        max: u31,
+        online: u31 = 0,
+        sample: []const PlayerEntry = &.{},
+    };
+
     pub const PlayerEntry = struct {
         name: []const u8 = "Anonymous Player",
         id: utils.UUID = .null,
+
+        pub fn deserialize(mapr: *serial.MapReader) serial.MapReader.ReadError!PlayerEntry {
+            const gpa = mapr.getAlloctor();
+            const arena = mapr.getArena();
+
+            var fg = serial.FieldGatherer(&.{
+                .{ .name = "name", .type = .string },
+                .{ .name = "id", .type = .{ .deserializeable = utils.UUID } },
+            }){};
+            defer fg.deinit(gpa);
+
+            try mapr.nextExpect(.aggregate_start);
+
+            while (try fg.next(gpa, arena, mapr)) |_| {}
+
+            return .{
+                .name = try fg.get(.name),
+                .id = try fg.get(.id),
+            };
+        }
     };
 
     pub const Version = struct {
@@ -64,7 +103,7 @@ pub const StatusResponse = struct {
         }
     };
 
-    pub fn serialize(self: *const StatusResponse, mapw: *serial.MapWriter) !void {
+    pub fn serialize(self: *const StatusResponse, mapw: *serial.MapWriter) serial.MapWriter.WriteError!void {
         try mapw.beginAggregate();
 
         try mapw.fieldName("version");
@@ -114,6 +153,68 @@ pub const StatusResponse = struct {
         }
 
         try mapw.endAggregate();
+    }
+
+    pub fn deserialize(mapr: *serial.MapReader) serial.MapReader.ReadError!StatusResponse {
+        const gpa = mapr.getAlloctor();
+        const arena = mapr.getArena();
+
+        var fg = serial.FieldGatherer(&.{
+            .{ .name = "version", .type = .{ .external = Version } },
+            .{ .name = "players", .type = .{ .external = Players } },
+            .{ .name = "description", .type = .{ .deserializeable = utils.TextComponent } },
+            .{ .name = "enforcesSecureChat", .type = .boolean },
+            .{ .name = "preventsChatReports", .type = .boolean },
+        }){};
+        defer fg.deinit(gpa);
+
+        try mapr.nextExpect(.aggregate_start);
+
+        while (try fg.next(gpa, arena, mapr)) |field| {
+            switch (field) {
+                .version => {
+                    var vfg = serial.FieldGatherer(&.{
+                        .{ .name = "name", .type = .string },
+                        .{ .name = "protocol", .type = .int },
+                    }){};
+                    defer vfg.deinit(gpa);
+
+                    try mapr.nextExpect(.aggregate_start);
+                    while (try vfg.next(gpa, arena, mapr)) |_| {}
+
+                    fg.set(.version, .{
+                        .name = try vfg.get(.name),
+                        .protocol = @intCast(try vfg.get(.protocol)),
+                    });
+                },
+                .players => {
+                    var pfg = serial.FieldGatherer(&.{
+                        .{ .name = "max", .type = .int },
+                        .{ .name = "online", .type = .int },
+                        .{ .name = "sample", .type = .{ .array = &.{ .deserializeable = PlayerEntry } } },
+                    }){};
+                    defer pfg.deinit(gpa);
+
+                    try mapr.nextExpect(.aggregate_start);
+                    while (try pfg.next(gpa, arena, mapr)) |_| {}
+
+                    fg.set(.players, .{
+                        .max = @intCast(try pfg.get(.max)),
+                        .online = @intCast(try pfg.get(.online)),
+                        .sample = try pfg.get(.sample),
+                    });
+                },
+                else => {},
+            }
+        }
+
+        return .{
+            .version = try fg.get(.version),
+            .players = fg.getNullable(.players),
+            .description = fg.getNullable(.description) orelse .empty,
+            .enforcesSecureChat = fg.getNullable(.enforcesSecureChat),
+            .preventsChatReports = fg.getNullable(.preventsChatReports),
+        };
     }
 };
 

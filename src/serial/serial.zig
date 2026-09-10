@@ -57,7 +57,7 @@ fn readPropsRaw(comptime ftype: FieldProperty.Type, arena: Allocator, mapr: *Map
             try c.read(arena, mapr, &out);
             return out;
         },
-        .deserializeable => |T| try T.deserialize(mapr),
+        .deserializeable => |T| try mapr.deserialize(T),
         .external, .array, .copy => unreachable,
     };
 }
@@ -100,6 +100,16 @@ pub const TaglessValue = union {
         };
     }
 
+    fn fromTagged(self: Value) TaglessValue {
+        return switch (self) {
+            inline else => |v, tag| @unionInit(
+                TaglessValue,
+                @tagName(tag),
+                v,
+            ),
+        };
+    }
+
     boolean: bool,
     byte: i8,
     short: i16,
@@ -124,10 +134,18 @@ pub const Value = union(BaseType) {
     array: std.MultiArrayList(Value),
     aggregate: Aggregate,
 
+    pub const default = Value{ .byte = 0 };
+
     pub const Aggregate = struct {
         inline fn convertValueAtIndex(self: Aggregate, index: usize) Value {
             return self.values[index].makeTagged(self.types[index]);
         }
+
+        const RawEntry = struct {
+            name: []const u8,
+            type: BaseType,
+            value: TaglessValue,
+        };
 
         count: usize,
         names: [*]const []const u8,
@@ -201,6 +219,97 @@ pub const Value = union(BaseType) {
             else => null,
         };
     }
+
+    pub fn serialize(self: Value, mapw: *MapWriter) MapWriter.WriteError!void {
+        switch (self) {
+            .boolean => |v| try mapw.writeBoolean(v),
+            .byte => |v| try mapw.writeByte(v),
+            .short => |v| try mapw.writeShort(v),
+            .int => |v| try mapw.writeInt(v),
+            .long => |v| try mapw.writeLong(v),
+            .float => |v| try mapw.writeFloat(v),
+            .double => |v| try mapw.writeDouble(v),
+            .string => |v| try mapw.writeString(v),
+            .array => |arr| {
+                const slice = arr.slice();
+                try mapw.beginArray(slice.len);
+                for (0..slice.len) |i| {
+                    try serialize(slice.get(i), mapw);
+                }
+                try mapw.endArray();
+            },
+            .aggregate => |agg| {
+                try mapw.beginAggregate();
+                for (0..agg.count) |i| {
+                    const en = agg.getIndex(i);
+                    try mapw.writeString(en[0]);
+                    try serialize(en[1], mapw);
+                }
+                try mapw.endAggregate();
+            },
+        }
+    }
+
+    pub fn deserialize(mapr: *MapReader) MapReader.ReadError!Value {
+        const gpa = mapr.getAlloctor();
+        const arena = mapr.getArena();
+
+        switch (try mapr.next()) {
+            inline .boolean,
+            .byte,
+            .short,
+            .int,
+            .long,
+            .float,
+            .double,
+            => |v, tag| return @unionInit(Value, @tagName(tag), v),
+            .string => |v| return .{ .string = try arena.dupe(u8, v) },
+            .aggregate_start => {
+                var multi = std.MultiArrayList(Aggregate.RawEntry).empty;
+                defer multi.deinit(gpa);
+
+                while (true) {
+                    const name = switch (try mapr.next()) {
+                        .string => |s| try arena.dupe(u8, s),
+                        .aggregate_end => break,
+                        else => return error.UnexpectedToken,
+                    };
+                    const value = try deserialize(mapr);
+                    try multi.append(gpa, .{
+                        .name = name,
+                        .type = value,
+                        .value = TaglessValue.fromTagged(value),
+                    });
+                }
+
+                const cloned = (try multi.clone(arena)).slice();
+
+                return .{ .aggregate = .{
+                    .count = cloned.len,
+                    .names = cloned.items(.name).ptr,
+                    .types = cloned.items(.type).ptr,
+                    .values = cloned.items(.value).ptr,
+                } };
+            },
+            .array_start => |as| {
+                var arr = std.MultiArrayList(Value).empty;
+                defer arr.deinit(gpa);
+                try arr.ensureTotalCapacity(gpa, as.length orelse 8);
+
+                while (true) {
+                    switch (try mapr.peek()) {
+                        .array_end => break,
+                        .aggregate_end => return error.UnexpectedToken,
+                        else => {},
+                    }
+                    try arr.append(gpa, try deserialize(mapr));
+                }
+
+                return .{ .array = try arr.clone(arena) };
+            },
+            .aggregate_end, .array_end => return error.UnexpectedToken,
+        }
+    }
 };
 
 pub const Token = union(TokenType) {
@@ -263,6 +372,18 @@ pub const Token = union(TokenType) {
             .string => |s| std.fmt.parseFloat(f64, s) catch null,
             else => null,
         };
+    }
+
+    pub fn format(self: Token, writer: *IoWriter) IoWriter.Error!void {
+        try writer.print(".{t}", .{self});
+        switch (self) {
+            .boolean => |v| try writer.print("({})", .{v}),
+            .byte, .short, .int, .long => |v| try writer.print("({d})", .{v}),
+            .float, .double => |v| try writer.print("({d})", .{v}),
+            .string => |v| try writer.print("({s})", .{v}),
+            .array_start => |v| try writer.print("({?d}, {?t})", .{ v.length, v.type }),
+            else => {},
+        }
     }
 };
 
@@ -354,6 +475,10 @@ pub const MapWriter = struct {
     pub inline fn endAggregate(self: *MapWriter) WriteError!void {
         return self.vtable.endAggregate(self);
     }
+
+    pub inline fn serialize(self: *MapWriter, value: anytype) WriteError!void {
+        return value.serialize(self);
+    }
 };
 
 pub const MapReader = struct {
@@ -416,7 +541,7 @@ pub const MapReader = struct {
             self.cached_token = null;
             return t;
         }
-        return self.vtable.next(self, self.max_value_len);
+        return self.nextMax(self.max_value_len);
     }
 
     pub inline fn nextMax(self: *MapReader, max_value_len: usize) ReadError!Token {
@@ -437,6 +562,10 @@ pub const MapReader = struct {
 
     pub inline fn ensureTotalStackCapacity(self: *MapReader, height: usize) Allocator.Error!void {
         return self.nesting.ensureTotalCapacity(self.getAlloctor(), height);
+    }
+
+    pub inline fn deserialize(self: *MapReader, comptime T: type) ReadError!T {
+        return T.deserialize(self);
     }
 
     pub fn mapToWriter(self: *MapReader, comptime max_depth: usize, mapw: *MapWriter) (MapWriter.WriteError || ReadError)!void {
@@ -586,16 +715,12 @@ pub const FieldProperty = struct {
                 .float => f64,
                 .deserializeable, .external => |T| T,
                 .array => |a| {
-                    assert(a.* != .copy);
-                    assert(a.* != .external);
-                    assert(a.* != .array);
+                    assert(a.isNestable());
                     return []const a.GetType();
                 },
                 .custom => |c| c.type,
                 .copy => |c| {
-                    assert(c.* != .copy);
-                    assert(c.* != .external);
-                    assert(c.* != .array);
+                    assert(c.isNestable());
                     return *c.GetType();
                 },
             };
@@ -740,7 +865,7 @@ pub fn FieldGatherer(comptime fields: []const FieldProperty) type {
             return @enumFromInt(fields.len); // always out of range
         }
 
-        pub fn set(self: *const Self, comptime field: FieldEnum, value: @FieldType(Values, @tagName(field))) void {
+        pub fn set(self: *Self, comptime field: FieldEnum, value: @FieldType(Values, @tagName(field))) void {
             comptime assert(fieldProps(field).type == .external);
 
             const name = @tagName(field);

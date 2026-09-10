@@ -743,7 +743,7 @@ pub fn deserialize(mapr: *serial.MapReader) serial.MapReader.ReadError!TextCompo
 
     var current: TextComponent = undefined;
     switch (try mapr.next()) {
-        .string => |s| return .text(s, .{}),
+        .string => |s| return .text(try _arena.dupe(u8, s), .{}),
         .aggregate_start => {
             current = .empty;
 

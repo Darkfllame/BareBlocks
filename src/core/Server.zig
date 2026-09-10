@@ -515,8 +515,9 @@ pub fn addressAlt(self: *const Server) AddressAlt {
 pub fn handleHandshake(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
     const hs = net.packets.handshake_c2s;
     const pack = try hs.readRoot(params, reader);
-    logger.debug("[{f}] Hanshake: {f}", .{ conn, hs.formatted(pack) });
+    logger.debug("[{f}] Hanshake: {f}", .{ conn, hs.formatted(pack, params.toAllocPair()) });
     switch (pack.intent) {
+        .invalid => return error.InvalidEnumTag,
         .status => conn.reconfigure(.{
             .in_phase = .status,
             .out_phase = .status,
@@ -541,7 +542,7 @@ pub fn handleHandshake(conn: *Connection, reader: *Io.Reader, params: net.Packet
 pub fn handleStatus(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
     const status = net.packets.status_request_c2s;
     const pack = try status.readRoot(params, reader);
-    logger.debug("[{f}] Status: {f}", .{ conn, status.formatted(pack) });
+    logger.debug("[{f}] Status: {f}", .{ conn, status.formatted(pack, params.toAllocPair()) });
     const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
 
     try conn.sendPacket(
@@ -562,7 +563,7 @@ pub fn handleStatus(conn: *Connection, reader: *Io.Reader, params: net.PacketTyp
 pub fn handleStatusPing(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
     const ping = net.packets.ping_pong;
     const pack = try ping.readRoot(params, reader);
-    logger.debug("[{f}] Ping: {f}", .{ conn, ping.formatted(pack) });
+    logger.debug("[{f}] Ping: {f}", .{ conn, ping.formatted(pack, params.toAllocPair()) });
 
     try conn.sendPacket(
         params.toAllocPair(),
@@ -575,7 +576,7 @@ pub fn handleStatusPing(conn: *Connection, reader: *Io.Reader, params: net.Packe
 pub fn handleLoginHello(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
     const hello = net.packets.login_start_c2s;
     const pack = try hello.readRoot(params, reader);
-    logger.debug("[{f}] Login Start: {f}", .{ conn, hello.formatted(pack) });
+    logger.debug("[{f}] Login Start: {f}", .{ conn, hello.formatted(pack, params.toAllocPair()) });
 
     const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
     if (owned.data != .none) {
@@ -637,7 +638,7 @@ pub fn handleLoginKey(conn: *Connection, reader: *Io.Reader, params: net.PacketT
     const login_success = net.packets.login_success_s2c;
 
     const pack = try key.readRoot(params, reader);
-    logger.debug("[{f}] Login Key: {f}", .{ conn, key.formatted(pack) });
+    logger.debug("[{f}] Login Key: {f}", .{ conn, key.formatted(pack, params.toAllocPair()) });
 
     const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
     const owner = owned.owner;
@@ -693,7 +694,7 @@ pub fn handleLoginKey(conn: *Connection, reader: *Io.Reader, params: net.PacketT
 pub fn handleLoginAck(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
     const ack = net.packets.login_acknowledged_c2s;
     const pack = try ack.readRoot(params, reader);
-    logger.debug("[{f}] Login Ack: {f}", .{ conn, ack.formatted(pack) });
+    logger.debug("[{f}] Login Ack: {f}", .{ conn, ack.formatted(pack, params.toAllocPair()) });
 
     const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
     const owner = owned.owner;

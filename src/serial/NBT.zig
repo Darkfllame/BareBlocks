@@ -1263,6 +1263,14 @@ pub const SerialReader = struct {
     /// single wrapper in your whole data input.
     unwrap_compounds: bool,
 
+    pub const Error = IoReader.Error || Allocator.Error || error{
+        UnexpectedToken,
+        InvalidLength,
+        InvalidEnumTag,
+        ValueTooLong,
+        InvalidString,
+    };
+
     pub fn init(self: *SerialReader, allocator: Allocator, input: *IoReader, named: bool) void {
         self.* = .{
             .mapr = .{
@@ -1304,14 +1312,6 @@ pub const SerialReader = struct {
         arena.state = self.mapr.arena.state;
         self.mapr.arena.state = .init;
     }
-
-    pub const Error = IoReader.Error || Allocator.Error || error{
-        UnexpectedToken,
-        InvalidLength,
-        InvalidEnumTag,
-        ValueTooLong,
-        InvalidString,
-    };
 
     pub fn next(self: *SerialReader, max_value_len: usize) Error!serial.Token {
         var mb_w_cmp = if (self.wrapped_compound_value) |wcv| may_r: {

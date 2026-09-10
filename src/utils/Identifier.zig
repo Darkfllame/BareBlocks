@@ -18,7 +18,6 @@ pub const ValidationError = error{
     PathTooLong,
 };
 
-
 pub const HashCtx = struct {
     pub fn hash(_: HashCtx, id: Identifier) u64 {
         var hasher = std.hash.Wyhash.init(0);
@@ -34,14 +33,12 @@ pub const HashCtx = struct {
 pub const Alt = struct {
     id: Identifier,
     mode: Mode,
-    
-    pub const Mode = enum {
-        full,omit_minecraft
-    };
+
+    pub const Mode = enum { full, omit_minecraft };
 
     pub fn format(self: Alt, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         sw: switch (self.mode) {
-            .full => try writer.print("{s}:{s}", .{self.id.namespace(), self.id.path()}),
+            .full => try writer.print("{s}:{s}", .{ self.id.namespace(), self.id.path() }),
             .omit_minecraft => {
                 if (std.mem.eql(u8, self.id.namespace(), "minecraft")) {
                     try writer.writeAll(self.id.path());
@@ -81,12 +78,18 @@ pub fn validate(id: []const u8) ValidationError!Identifier {
             colon_idx = i;
         },
         '0'...'9', 'a'...'z', '-', '.', '_' => continue,
-        else => if (colon_idx == null or c != '/')
-            return error.InvalidCharacter
-        else
-            continue,
+        else => if (colon_idx == null or c != '/') {
+            if (@inComptime()) {
+                @compileError(std.fmt.comptimePrint("Invalid character in id: {s}\x1b[31m{s}\x1b[39m{s}", .{
+                    id[0 .. i - 1], id[i .. i + 1], id[i + 1 ..],
+                }));
+            }
+            return error.InvalidCharacter;
+        } else continue,
     };
-    var path_off = colon_idx orelse return error.SeparatorNotFound;
+    var path_off = colon_idx orelse {
+        return error.SeparatorNotFound;
+    };
     path_off += 1;
     if (id.len - path_off > std.math.maxInt(@FieldType(Identifier, "path_len")))
         return error.PathTooLong;
@@ -102,23 +105,7 @@ pub fn validate(id: []const u8) ValidationError!Identifier {
 pub inline fn literal(comptime id: []const u8) Identifier {
     comptime {
         @setEvalBranchQuota(id.len * 100);
-        var colon_idx: ?usize = null;
-        for (id, 0..) |c, i| switch (c) {
-            ':' => colon_idx = i,
-            '0'...'9', 'a'...'z', '-', '.', '_' => continue,
-            else => if (@intFromBool(c == '/') ^ @intFromBool(colon_idx == null) == 0)
-                @compileError(std.fmt.comptimePrint(
-                    "Invalid character in identifier: {s}\x1b[31m{c}\x1b[0m{s}",
-                    .{ id[0..i], id[i], id[i + 1 ..] },
-                ))
-            else
-                continue,
-        };
-
-        return if (colon_idx) |sepoff| .{
-            .id = id,
-            .sep_offset = sepoff,
-        } else @compileError("Colon character not found in '" ++ id ++ "'");
+        return validate(id) catch unreachable;
     }
 }
 
@@ -133,8 +120,8 @@ pub fn format(self: Identifier, writer: *std.Io.Writer) std.Io.Writer.Error!void
     try writer.print("Identifier({s}:{s})", .{ self.namespace(), self.path() });
 }
 
-pub fn alt(self: Identifier,mode: Alt.Mode) Alt {
-    return .{.id = self,.mode=mode};
+pub fn alt(self: Identifier, mode: Alt.Mode) Alt {
+    return .{ .id = self, .mode = mode };
 }
 
 pub fn eql(a: Identifier, b: Identifier) bool {

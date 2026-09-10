@@ -4,11 +4,21 @@ const UUID = @import("uuid.zig").UUID;
 
 uuid: UUID,
 lengths: packed struct {
-    username: @Int(.unsigned, std.math.log2_int_ceil(usize, max_lengths.username)),
-    properties: @Int(.unsigned, std.math.log2_int_ceil(usize, max_lengths.properties)),
+    username: @Int(.unsigned, std.math.log2_int(usize, max_lengths.username) + 1),
+    properties: @Int(.unsigned, std.math.log2_int(usize, max_lengths.properties) + 1),
 },
 username_ptr: [*]const u8,
 properties_ptr: [*]const Property,
+
+pub const @"null" = GameProfile{
+    .uuid = .@"null",
+    .lengths = .{
+        .username = 0,
+        .properties = 0,
+    },
+    .username_ptr = undefined,
+    .properties_ptr = undefined,
+};
 
 pub const HashCtx = struct {
     pub fn hash(_: HashCtx, key: GameProfile) u64 {

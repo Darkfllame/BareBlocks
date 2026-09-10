@@ -19,9 +19,9 @@ pub const FloatProvider = value_providers.FloatProvider;
 pub const logger = std.log.scoped(.bare_blocks);
 
 pub const BlockPosition = packed struct(u64) {
-    x: u26,
-    z: u26,
-    y: u12,
+    x: u26 = 0,
+    z: u26 = 0,
+    y: u12 = 0,
 
     pub fn format(self: BlockPosition, writer: *Writer) Writer.Error!void {
         return writer.print("{{ {d}, {d}, {d}}}", .{ self.x, self.y, self.z });

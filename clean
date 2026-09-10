@@ -1,3 +1,3 @@
 #!/usr/bin/bash
 
-rm -rfd */**/.zig-cache */**/zig-out */**/zig-pkg ./.mccache .zig-cache zig-out zig-pkg $@
+rm -rfd */**/.zig-cache */**/zig-out */**/zig-pkg ./.mccache .zig-cache zig-out zig-pkg $@ ./run_datagen_*

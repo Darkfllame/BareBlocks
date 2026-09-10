@@ -9,6 +9,8 @@ const IoWriter = std.Io.Writer;
 const IoReader = std.Io.Reader;
 const Allocator = std.mem.Allocator;
 
+const assert = std.debug.assert;
+
 pub const SerialWriter = struct {
     const vtable = MapWriter.VTable{
         .fieldName = fieldName,
@@ -198,10 +200,304 @@ pub const SerialWriter = struct {
     }
 };
 pub const SerialReader = struct {
-    mapr: MapReader,
+    const vtable = MapReader.VTable{
+        .next = nextImpl,
+        .skip = skipImpl,
+    };
 
-    comptime {
-        @compileError("TODO: Make json reader");
+    const State = enum { field_name, value, end_value };
+
+    fn nextImpl(mapr: *MapReader, max_value_len: usize) MapReader.ReadError!serial.Token {
+        const self: *SerialReader = @fieldParentPtr("mapr", mapr);
+        return self.next(max_value_len) catch |e| switch (e) {
+            error.OutOfMemory,
+            error.ReadFailed,
+            error.UnexpectedToken,
+            error.ValueTooLong,
+            => |err| return err,
+            else => {
+                self.@"error" = e;
+                return error.ReadFailed;
+            },
+        };
+    }
+
+    fn skipImpl(mapr: *MapReader, until_height: usize) MapReader.ReadError!void {
+        _ = mapr;
+        _ = until_height;
+        @panic("TODO: Unimplemented skip");
+    }
+
+    inline fn getAllocator(self: *SerialReader) Allocator {
+        return self.mapr.getAlloctor();
+    }
+
+    fn skipWhitespace(self: *SerialReader) Error!void {
+        const reader = self.mapr.reader;
+        search_ws: while (true) {
+            const s = try reader.peekGreedy(1);
+            for (s, 0..) |c, i| switch (c) {
+                ' ', '\t', '\n', '\r' => continue,
+                else => {
+                    reader.toss(i);
+                    break :search_ws;
+                },
+            };
+            reader.toss(s.len);
+        }
+    }
+
+    fn readContinuationByte(self: *SerialReader) Error!u21 {
+        return switch (try self.mapr.reader.takeByte()) {
+            0b10000000...0b10111111 => |c| c & 0b00111111,
+            else => error.InvalidString,
+        };
+    }
+
+    fn readCodepointShort(self: *SerialReader) Error!u21 {
+        const reader = self.mapr.reader;
+        const first = try reader.takeByte();
+        var codepoint_full: u21 = undefined;
+        switch (first) {
+            '\\' => {
+                reader.toss(1);
+                return switch (try reader.takeByte()) {
+                    '\\' => '\\',
+                    '"' => '"',
+                    '/' => '/',
+                    'b' => 0x1b,
+                    'f' => 0x0c,
+                    'n' => '\n',
+                    'r' => '\r',
+                    't' => '\t',
+                    'u' => {
+                        var hex: [4]u8 = undefined;
+                        try reader.readSliceAll(&hex);
+                        return std.fmt.parseInt(u16, "0x" ++ hex, 16) catch error.InvalidString;
+                    },
+                    else => error.InvalidString,
+                };
+            },
+            0b00000000...('\\' - 1), ('\\' + 1)...0b01111111 => return first,
+            0b11000000...0b11011111 => {
+                const second = try self.readContinuationByte();
+                codepoint_full = (@as(u21, first & 0b00011111) << 6) | second;
+            },
+            0b11100000...0b11101111 => {
+                const second = try self.readContinuationByte();
+                const third = try self.readContinuationByte();
+                codepoint_full = (@as(u21, first & 0b00001111) << 12) | (second << 6) | third;
+            },
+            0b11110000...0b11110111 => {
+                const second = try self.readContinuationByte();
+                const third = try self.readContinuationByte();
+                const fourth = try self.readContinuationByte();
+                codepoint_full = (@as(u21, first & 0b00000111) << 18) | (second << 12) | (third << 6) | fourth;
+            },
+            else => return error.InvalidString,
+        }
+        return codepoint_full;
+    }
+
+    fn readCodepoint(self: *SerialReader) Error!u21 {
+        const first = try self.readCodepointShort();
+        return switch (first) {
+            0xD800...0xDBFF => {
+                const second = try self.readCodepointShort();
+                if (second < 0xDC00 or second > 0xDFFF) return error.InvalidString;
+                return (((first - 0xD800) << 10) + 0x10000) | (second - 0xDC00);
+            },
+            0xDC00...0xDFFF => error.InvalidString,
+            else => first,
+        };
+    }
+
+    mapr: MapReader,
+    @"error": ?Error,
+    string_buffer: std.ArrayList(u8),
+    state: State,
+
+    pub const Error = IoReader.Error || Allocator.Error || error{
+        UnexpectedToken,
+        InvalidLength,
+        ValueTooLong,
+        InvalidString,
+    };
+
+    pub fn init(self: *SerialReader, allocator: Allocator, reader: *IoReader) void {
+        self.* = .{
+            .mapr = .{
+                .reader = reader,
+                .vtable = &vtable,
+                .nesting = .init,
+                .arena = .init(allocator),
+            },
+            .@"error" = null,
+            .string_buffer = .empty,
+            .state = .value,
+        };
+    }
+
+    pub fn initWithArena(self: *SerialReader, arena: *std.heap.ArenaAllocator, reader: *IoReader) void {
+        self.init(undefined, reader);
+        self.mapr.arena = arena.*;
+        arena.state = .init;
+    }
+
+    pub fn deinit(self: *SerialReader) void {
+        self.string_buffer.deinit(self.getAllocator());
+        self.mapr.nesting.deinit(self.getAllocator());
+    }
+
+    pub fn redeemArena(self: *SerialReader, arena: *std.heap.ArenaAllocator) void {
+        arena.state = self.mapr.arena.state;
+        self.mapr.arena.state = .init;
+    }
+
+    pub fn next(self: *SerialReader, max_value_len: usize) Error!serial.Token {
+        const reader = self.mapr.reader;
+        try self.skipWhitespace();
+
+        sw: switch (self.state) {
+            .end_value => {
+                const c = try reader.takeByte();
+                switch (c) {
+                    ']' => {
+                        assert(self.mapr.popNesting().? == .list);
+                        self.state = .end_value;
+                        return .array_end;
+                    },
+                    '}' => {
+                        assert(self.mapr.popNesting().? == .aggregate);
+                        self.state = .end_value;
+                        return .aggregate_end;
+                    },
+                    ',' => {
+                        self.state = if (self.mapr.peekNesting()) |nt| switch (nt) {
+                            .list => .value,
+                            .aggregate => .field_name,
+                        } else return error.EndOfStream;
+                        continue :sw self.state;
+                    },
+                    else => return error.UnexpectedToken,
+                }
+            },
+            .value => {
+                const c = try reader.takeByte();
+
+                switch (c) {
+                    ',' => continue :sw .end_value,
+                    '{' => {
+                        self.state = .field_name;
+                        try self.mapr.pushNesting(.aggregate);
+                        return .aggregate_start;
+                    },
+                    '[' => {
+                        self.state = .value;
+                        try self.mapr.pushNesting(.list);
+                        return .{ .array_start = .{
+                            .length = null,
+                            .type = null,
+                        } };
+                    },
+                    '"' => {
+                        self.string_buffer.clearRetainingCapacity();
+                        var tmp: [4]u8 = undefined;
+                        while (true) {
+                            const byte = try reader.peekByte();
+                            switch (byte) {
+                                '"' => break,
+                                '\n', '\r', 0xc, 0x1b => return error.InvalidString,
+                                else => {},
+                            }
+                            if (self.string_buffer.items.len > max_value_len) return error.ValueTooLong;
+                            const cp = try self.readCodepoint();
+                            const n = std.unicode.wtf8Encode(cp, &tmp) catch unreachable;
+                            try self.string_buffer.appendSlice(self.getAllocator(), tmp[0..n]);
+                        }
+                        reader.toss(1);
+                        self.state = .end_value;
+                        return .{ .string = self.string_buffer.items };
+                    },
+                    'f', 't' => {
+                        const max_len = @max("true".len, "false".len);
+                        self.string_buffer.clearRetainingCapacity();
+                        try self.string_buffer.ensureTotalCapacity(self.getAllocator(), max_len);
+                        self.string_buffer.appendAssumeCapacity(c);
+
+                        while (true) {
+                            const byte = try reader.peekByte();
+                            switch (byte) {
+                                ',', ' ', '\n', '\r', '\t', 0xc => break,
+                                'r', 'u', 'e', 'a', 'l', 's' => {},
+                                else => return error.UnexpectedToken,
+                            }
+                            self.string_buffer.appendBounded(byte) catch return error.UnexpectedToken;
+                        }
+                        self.state = .end_value;
+                        const items = self.string_buffer.items;
+                        return .{ .boolean = if (std.mem.eql(u8, items, "false"))
+                            false
+                        else if (std.mem.eql(u8, items, "true"))
+                            true
+                        else
+                            return error.UnexpectedToken };
+                    },
+                    '0'...'9' => {
+                        self.string_buffer.clearRetainingCapacity();
+                        try self.string_buffer.append(self.getAllocator(), c);
+
+                        while (true) {
+                            const byte = try reader.peekByte();
+                            switch (byte) {
+                                ',', ' ', '\n', '\r', '\t', 0xc, ']', '}' => break,
+                                '0'...'9', 'e', 'E', '-', '.' => {},
+                                else => return error.UnexpectedToken,
+                            }
+                            reader.toss(1);
+                            if (self.string_buffer.items.len > max_value_len) return error.ValueTooLong;
+                            try self.string_buffer.append(self.getAllocator(), byte);
+                        }
+                        self.state = .end_value;
+                        const items = self.string_buffer.items;
+
+                        if (std.fmt.parseInt(i64, items, 10)) |v| {
+                            return .{ .long = v };
+                        } else |_| if (std.fmt.parseFloat(f64, items)) |v| {
+                            return .{ .double = v };
+                        } else |_| return error.UnexpectedToken;
+                    },
+                    else => return error.UnexpectedToken,
+                }
+            },
+            .field_name => {
+                assert(self.mapr.peekNesting().? == .aggregate);
+
+                switch (try reader.takeByte()) {
+                    '"' => {},
+                    else => return error.UnexpectedToken,
+                }
+                self.string_buffer.clearRetainingCapacity();
+                var tmp: [4]u8 = undefined;
+                while (true) {
+                    const byte = try reader.peekByte();
+                    switch (byte) {
+                        '"' => break,
+                        '\n', '\r', 0xc, 0x1b => return error.InvalidString,
+                        else => {},
+                    }
+                    if (self.string_buffer.items.len > max_value_len) return error.ValueTooLong;
+                    const cp = try self.readCodepoint();
+                    const n = std.unicode.wtf8Encode(cp, &tmp) catch unreachable;
+                    try self.string_buffer.appendSlice(self.getAllocator(), tmp[0..n]);
+                }
+                reader.toss(1);
+                try self.skipWhitespace();
+                if ((try reader.takeByte()) != ':') return error.UnexpectedToken;
+                self.state = .value;
+                return .{ .string = self.string_buffer.items };
+            },
+        }
     }
 };
 

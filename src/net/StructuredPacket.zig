@@ -143,6 +143,7 @@ pub const Type = union(enum) {
         readFn: fn (params: ReadParams, reader: *Reader, parent: anytype, out: anytype) ReadError!void,
         /// `val` is `<.type>`
         writeFn: fn (apair: AllocPair, writer: *Writer, val: anytype) WriteError!void,
+        default_value_ptr: *const anyopaque,
     },
     structured: StructuredPacket,
     bool,
@@ -329,7 +330,7 @@ pub const Type = union(enum) {
         fn getArena(self: ReadParams) Allocator {
             return self.arena.allocator();
         }
-        fn arenaDupe(self: ReadParams, comptime T: type, m: []const T) Allocator.Error![]const T {
+        fn arenaDupe(self: ReadParams, comptime T: type, m: []const T) Allocator.Error![]T {
             return self.getArena().dupe(T, m);
         }
 
@@ -346,7 +347,7 @@ pub const Type = union(enum) {
             return .{ .gpa = gpa, .arena = arena, .input_mode = .full };
         }
 
-        pub fn streamedInput(gpa: Allocator, arena: Allocator) ReadParams {
+        pub fn streamedInput(gpa: Allocator, arena: *std.heap.ArenaAllocator) ReadParams {
             return .{ .gpa = gpa, .arena = arena, .input_mode = .streamed };
         }
 
@@ -376,6 +377,8 @@ pub const Type = union(enum) {
     };
 
     pub fn getZigType(comptime self: Type) type {
+        @setEvalBranchQuota(0xFFFFFFFF); // I genuinely don't care brosky
+
         return switch (self) {
             .custom => |c| c.type,
             .structured => |desc| blk: {
@@ -439,7 +442,7 @@ pub const Type = union(enum) {
             },
             .id_or_x => |sub| IdOr(sub.getZigType()),
             .id_set => IdSet,
-            .either => |subs| Either(subs[0], subs[1]),
+            .either => |subs| Either(subs[0].getZigType(), subs[1].getZigType()),
             .game_profile => GameProfile,
             .lpvec3 => math.Vec3d,
         };
@@ -448,6 +451,7 @@ pub const Type = union(enum) {
     pub fn Formatted(comptime self: Type) type {
         return struct {
             value: self.getZigType(),
+            apair: AllocPair,
 
             pub fn format(fmtd: @This(), writer: *Writer) Writer.Error!void {
                 const value = fmtd.value;
@@ -462,7 +466,7 @@ pub const Type = union(enum) {
                         inline for (desc.fields, 0..) |field, i| {
                             try writer.print("{s}: {f}", .{
                                 field.name,
-                                field.type.formatted(@field(value, field.name)),
+                                field.type.formatted(@field(value, field.name), fmtd.apair),
                             });
                             if (i + 1 < desc.fields.len) {
                                 try writer.writeAll(", ");
@@ -484,15 +488,12 @@ pub const Type = union(enum) {
 
                     .string => try writer.print("\"{s}\"", .{value}),
 
-                    .json => |may_sub| {
-                        if (may_sub) |Sub| {
-                            try writer.print(jsonFmtString(Sub), .{value});
-                        } else {
-                            try writer.print("\"{f}\"", .{json.fmt(
-                                value,
-                                .{ .whitespace = .indent_2 },
-                            )});
-                        }
+                    .json => {
+                        var json_w: serial.JsonWriter = undefined;
+                        json_w.init(fmtd.apair.gpa, writer, .{ .whitespace = .indent_2 });
+                        defer json_w.deinit();
+
+                        json_w.mapw.serialize(value) catch return error.WriteFailed;
                     },
 
                     .identifier, .uuid, .game_profile, .block_position => try value.format(writer),
@@ -530,7 +531,7 @@ pub const Type = union(enum) {
                     .array => |arr| {
                         try writer.print("[{d}] {{ ", .{value.len});
                         for (value, 0..) |v, i| {
-                            try arr.sub.formatted(v).format(writer);
+                            try arr.sub.formatted(v, fmtd.apair).format(writer);
                             if (i + 1 < value.len) {
                                 try writer.writeAll(", ");
                             }
@@ -588,8 +589,8 @@ pub const Type = union(enum) {
         };
     }
 
-    pub inline fn formatted(comptime self: Type, value: self.getZigType()) self.Formatted() {
-        return .{ .value = value };
+    pub inline fn formatted(comptime self: Type, value: self.getZigType(), apair: AllocPair) self.Formatted() {
+        return .{ .value = value, .apair = apair };
     }
 
     pub fn limitedString(comptime max_size: u15) Type {
@@ -628,6 +629,60 @@ pub const Type = union(enum) {
 
     pub inline fn writerNoAlloc(comptime self: Type, writer: *Writer, val: self.getZigType()) WriteError!void {
         return self.write(.no_alloc, writer, val);
+    }
+
+    pub inline fn default(comptime self: Type) self.getZigType() {
+        return comptime switch (self) {
+            .custom => |c| @as(*const c.type, @ptrCast(@alignCast(c.default_value_ptr))),
+            .structured => |s| {
+                var res: self.getZigType() = undefined;
+                for (s.fields) |f| {
+                    @field(res, f.name) = f.type.default();
+                }
+                return res;
+            },
+            .bool => false,
+            .byte, .short, .int, .long, .float, .double, .var_int, .var_long, .byte_angle => 0,
+            .string => "",
+            .json, .nbt => |may_sub| {
+                const Sub = may_sub orelse serial.Value;
+                const empty_decls = &[_][]const u8{
+                    "empty",
+                    "init",
+                    "initEmpty",
+                    "default",
+                };
+                for (empty_decls) |name| {
+                    if (@hasDecl(Sub, name)) {
+                        const value = @field(Sub, name);
+                        if (@TypeOf(value) == Sub) {
+                            return value;
+                        } else if (@TypeOf(value) == fn () Sub) {
+                            return value();
+                        }
+                    }
+                }
+                @compileError("Couldn't find default value for " ++ @typeName(Sub));
+            },
+            .identifier => Identifier.vanilla("none"),
+            .entity_metadata, .slot, .hashed_slot => @compileError("Not yet implemented"),
+            .block_position => .{},
+            .uuid => .null,
+            .bitset => |may_bits| if (may_bits != null) .empty else .{},
+            .optional => null,
+            .array => |arr| switch (arr.size) {
+                .remaining, .prefixed => &.{},
+                .fixed => @splat(arr.sub.default()),
+            },
+            .@"enum" => @enumFromInt(0),
+            .enum_set => .empty,
+            .packed_struct => |ib| @bitCast(@as(@typeInfo(ib.base).@"struct".backing_integer.?, 0)),
+            .id_or_x => .{ .id = 0 },
+            .id_set => .{ .tag = Identifier.vanilla("none") },
+            .either => |ei| .{ .a = ei[0].default() },
+            .game_profile => .null,
+            .lpvec3 => .zero,
+        };
     }
 
     pub fn read(comptime self: Type, params: ReadParams, reader: *Reader, parent: anytype, ret: *self.getZigType()) ReadError!void {
@@ -674,21 +729,25 @@ pub const Type = union(enum) {
             },
             .string => |may_max_cps| try readString(params.getMaybeArena(), reader, may_max_cps),
             .json => |may_sub| {
-                const Sub = may_sub orelse serial.Value;
-                if (true) @compileError("TODO: Make json serial reader");
-                const str = try readString(params.getMaybeGpa(), reader, null);
-                defer if (params.getMaybeGpa()) |gpa| gpa.free(str);
+                const T = may_sub orelse serial.Value;
+                var json_sr: serial.JsonReader = undefined;
+                json_sr.initWithArena(params.arena, reader);
+                defer {
+                    json_sr.redeemArena(params.arena);
+                    json_sr.deinit();
+                }
 
-                const value = json.parseFromSliceLeaky(Sub, params.getArena(), str, .{
-                    .allocate = if (params.input_mode == .streamed)
-                        .alloc_always
-                    else
-                        .alloc_if_needed,
-                }) catch |e| {
-                    logger.err("Error parsing JSON value of {any}: {t}", .{ Sub, e });
-                    return error.InvalidJSON;
+                break :sw json_sr.mapr.deserialize(T) catch |e| return switch (e) {
+                    error.ValueTooLong => error.InvalidLength,
+                    error.UnexpectedToken => error.InvalidJSON,
+                    error.OutOfMemory => error.OutOfMemory,
+                    error.ReadFailed, error.EndOfStream => |err| err,
+                    else => if (json_sr.@"error") |err| switch (err) {
+                        error.ValueTooLong, error.UnexpectedToken, error.OutOfMemory, error.ReadFailed, error.EndOfStream => unreachable,
+                        error.InvalidString => error.InvalidUTF8,
+                        error.InvalidLength => |err2| err2,
+                    } else error.InvalidJSON,
                 };
-                break :sw value;
             },
             .identifier => {
                 const str = try readString(params.getArena(), reader, null);
@@ -702,14 +761,14 @@ pub const Type = union(enum) {
             .hashed_slot => @compileError("Not Yet Implemented"),
             .nbt => |may_sub| {
                 const T = may_sub orelse serial.Value;
-                var nbt_sr: serial.nbt.Reader = undefined;
+                var nbt_sr: serial.NbtReader = undefined;
                 nbt_sr.initWithArena(params.arena, reader, false);
                 defer {
                     nbt_sr.redeemArena(params.arena);
                     nbt_sr.deinit();
                 }
 
-                break :sw @as(serial.MapReader.ReadError!T, T.deserialize(&nbt_sr.mapr)) catch |e| return switch (e) {
+                break :sw nbt_sr.mapr.deserialize(T) catch |e| return switch (e) {
                     error.ValueTooLong => error.InvalidLength,
                     error.UnexpectedToken => error.InvalidNBT,
                     error.OutOfMemory => error.OutOfMemory,
@@ -806,7 +865,7 @@ pub const Type = union(enum) {
                             defer array.deinit(params.gpa);
 
                             while (true) {
-                                const elem = try array.addOne(params.arena);
+                                const elem = try array.addOne(params.gpa);
                                 arr.sub.read(params, reader, parent, elem) catch |e| switch (e) {
                                     error.EndOfStream => break,
                                     else => |err| return err,
@@ -837,7 +896,7 @@ pub const Type = union(enum) {
                         defer array.deinit(params.gpa);
 
                         for (0..array.capacity) |_| {
-                            const val = array.addOneAssumeCapacity(params.gpa);
+                            const val = array.addOneAssumeCapacity();
                             errdefer _ = array.pop();
                             try arr.sub.read(params, reader, parent, val);
                         }
@@ -1026,7 +1085,7 @@ pub const Type = union(enum) {
                 json_sw.init(apair.gpa, &alloc_w.writer, .{});
                 defer json_sw.deinit();
 
-                @as(serial.MapWriter.WriteError!void, val.serialize(&json_sw.mapw)) catch {
+                json_sw.mapw.serialize(val) catch {
                     if (json_sw.@"error") |e| return switch (e) {
                         error.OutOfMemory => |err| err,
                     };
@@ -1035,7 +1094,11 @@ pub const Type = union(enum) {
 
                 try writeString(writer, alloc_w.written());
             },
-            .identifier => try writeString(writer, val.id),
+            .identifier => {
+                try writeVarInt(writer, val.namespace_len + val.path_len + 1);
+                var bufs = [3][]const u8{ val.namespace(), ":", val.path() };
+                try writer.writeVecAll(&bufs);
+            },
             inline .var_int, .var_long => try writeVarInt(writer, val),
             .entity_metadata => @compileError("Not Yet Implemented"),
             .slot => @compileError("Not Yet Implemented"),
@@ -1045,7 +1108,7 @@ pub const Type = union(enum) {
                 nbt_sw.init(apair.gpa, writer);
                 defer nbt_sw.deinit();
 
-                @as(serial.MapWriter.WriteError!void, val.serialize(&nbt_sw.mapw)) catch {
+                nbt_sw.mapw.serialize(val) catch {
                     if (nbt_sw.@"error") |e| return switch (e) {
                         error.InvalidLength, error.InvalidEnumTag, error.OutOfMemory => |err| err,
                         else => error.WriteFailed,
@@ -1072,7 +1135,7 @@ pub const Type = union(enum) {
             .optional => |opt| {
                 if (val) |value| {
                     if (opt.condition == .prefixed) try writer.writeByte(1);
-                    try opt.sub.write(apair.arena, writer, value);
+                    try opt.sub.write(apair, writer, value);
                 } else try writer.writeByte(0);
             },
             .array => |arr| blk: {
