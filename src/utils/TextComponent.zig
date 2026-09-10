@@ -361,6 +361,7 @@ pub const banned_exp = translate("multiplayer.disconnect.banned.expiration", .{}
 pub const banned_reason = translate("multiplayer.disconnect.banned.reason", .{});
 pub const banned_reason_default = translate("multiplayer.disconnect.banned.reason.default", .{});
 pub const exceeded_packet_rate = translate("disconnect.exceeded_packet_rate", .{});
+pub const timeout = translate("disconnect.timeout", .{});
 
 pub const CreateCommonOptions = struct {
     arena_state: ArenaAllocator.State = .{},

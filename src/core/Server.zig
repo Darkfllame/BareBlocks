@@ -157,6 +157,68 @@ const LoginConnection = struct {
     @"error": ?LoginError = null,
 };
 
+const ConfigPlayCommon = struct {
+    const keepalive_timeout_ms = 15_000;
+
+    fn getKeepAliveValue() u64 {
+        return @bitCast(Io.Timestamp.now(static_io, .boot).toMilliseconds());
+    }
+    fn getPingValue() u32 {
+        return @truncate(getKeepAliveValue());
+    }
+
+    keep_alive: ?u64,
+    ping: ?u32,
+    latency: u64,
+
+    fn keepAlive(self: *ConfigPlayCommon, conn: *Connection) net.Connection.WritePacketError!void {
+        const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
+        
+        const now = getKeepAliveValue();
+        if (self.keep_alive) |ka| {
+            if (now - ka >= keepalive_timeout_ms) {
+                try conn.disconnect(&.timeout);
+            }
+        } else {
+            self.keep_alive = now;
+
+            var arena: std.heap.ArenaAllocator = undefined;
+            const apair = net.PacketType.AllocPair.newFromGpa(owned.owner.allocator, &arena);
+            defer arena.deinit();
+
+            try conn.sendPacket(apair, "keep_alive", net.packets.keep_alive, now);
+        }
+    }
+
+    fn handleCommonPing(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
+        const ping = net.packets.ping_pong;
+        const pack = try ping.readRoot(params, reader);
+        logger.debug("[{f}] Ping: {f}", .{ conn, ping.formatted(pack, params.toAllocPair()) });
+
+        try conn.sendPacket(params.toAllocPair(), "pong", ping, pack);
+    }
+
+    fn handleCommonKeepAlive(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
+        const keep_alive = net.packets.keep_alive;
+        const pack = try keep_alive.readRoot(params, reader);
+        logger.debug("[{f}] Keep Alive: {f}", .{ conn, keep_alive.formatted(pack, params.toAllocPair()) });
+
+        const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
+        const common = switch (owned.data) {
+            .none ,
+            .login => unreachable,
+            .config => |c| &c.common,
+        };
+
+        if (common.keep_alive) |ka| {
+            if (pack != ka) return conn.disconnect(&.timeout);
+            const diff = getKeepAliveValue() - ka;
+            common.latency = (common.latency * 3 + diff) / 4;
+            common.keep_alive = null;
+        }
+    }
+};
+
 const ConfigConnection = struct {
     const vtable = Connection.VTable{
         .deinit = LoginConnection.deinitImpl,
@@ -174,6 +236,7 @@ const ConfigConnection = struct {
     }
 
     owned: *OwnedConnection,
+    common: ConfigPlayCommon,
     encryption: *Connection.Encryption,
     compression: *Connection.Compression,
 };
@@ -232,7 +295,7 @@ fn coro_acceptConnection(co: *coro.AnyCoroutine, self: *Server, which: enum { v4
         }) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => |e| {
-                logger.err("Couldn't add connection to {f}: {t}", .{stream.?.socket.address, e});
+                logger.err("Couldn't add connection to {f}: {t}", .{ stream.?.socket.address, e });
                 stream.?.close(coio);
                 self.allocator.destroy(owned);
                 continue;
@@ -444,6 +507,7 @@ pub fn tick(self: *Server) !void {
                 assert(owned.owner == self);
 
                 // logger.debug("[{f}] Event: {f}", .{ conn, ev.events });
+                var handled_disc= false;
                 if (ev.events.in) {
                     const res = conn.read_coro.@"resume"();
                     // logger.debug("[{f}] Read result: {!}", .{ conn, res });
@@ -468,8 +532,9 @@ pub fn tick(self: *Server) !void {
                         conn.read_coro.deinit();
                         conn.read_coro = .initFinished({});
                         conn.shutdown(.recv) catch |e| {
-                            logger.err("[{f}] Failed to shutdown connection: {t}", .{conn, e});
+                            logger.err("[{f}] Failed to shutdown connection: {t}", .{ conn, e });
                         };
+                        handled_disc = true;
                     }
                 }
 
@@ -482,15 +547,16 @@ pub fn tick(self: *Server) !void {
                         conn.write_coro.deinit();
                         conn.write_coro = .initFinished({});
                         conn.shutdown(.send) catch |e| {
-                            logger.err("[{f}] Failed to shutdown connection: {t}", .{conn, e});
+                            logger.err("[{f}] Failed to shutdown connection: {t}", .{ conn, e });
                         };
+                        handled_disc = true;
                     }
                 }
 
                 const time_since_last_packet = conn.last_packet_timestamp.untilNow(self.io, .boot);
                 const timedout = time_since_last_packet.nanoseconds > conn.timeout.nanoseconds;
 
-                if (timedout) {
+                if (timedout and !handled_disc) {
                     logger.err("[{f}] Disconnected: Timeout", .{conn});
                 }
 
@@ -713,8 +779,14 @@ pub fn handleLoginAck(conn: *Connection, reader: *Io.Reader, params: net.PacketT
 
     const configing = try owner.allocator.create(ConfigConnection);
     errdefer comptime unreachable;
+
     configing.* = .{
         .owned = owned,
+        .common = .{
+            .keep_alive = null,
+            .ping = null,
+            .latency = 0,
+        },
         .encryption = loginging.encryption.?,
         .compression = loginging.compression.?,
     };
