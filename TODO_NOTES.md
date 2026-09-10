@@ -4,10 +4,21 @@
     - Make it unpack itself
         - In tmp or cwd ?
     - Compressed or just tar ?
+    - Maybe giving a separate folder OR the resource fetcher directly
+        could be a good soluion
 - Serial
-    - JSON Reader still not done.
     - SNBT interfaces
 - Finding a better http library
     - `std.http` kinda trash
     - httpx-zig doesn't offer streaming
     - Make one myself ?
+- Multithreading
+    - Preferable use/make "lock-free" data structs by exploiting atomics
+    - Split all the connections into blocks of *N* connections
+    - Loaded chunks should be split into region
+        - A region is tied to one or more players
+            - And world logic should be run on their "logic thread"
+        - Loaded regions can merge into a single one
+            - Based on overlapping size
+        - Orphan regions (player-less, basically not owned by a player- YES THIS IS FUNNY) would all run on
+            the same thread. For resource conservation; Since they're not actively being useful.
