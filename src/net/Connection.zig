@@ -41,6 +41,7 @@ const writer_vtable = Io.Writer.VTable{
 
 const reader_buffer_size = 1024;
 const writer_buffer_size = 1024;
+
 const PacketNode = struct {
     node: std.DoublyLinkedList.Node,
     length: usize,
@@ -745,6 +746,8 @@ pub fn deinit(self: *Connection, allocator: Allocator) void {
     self.write_coro.await(.cancel) catch |e| {
         logger.debug("[{f}] Error occured when closing connection: {t}", .{ self, e });
     };
+    self.read_coro.deinit();
+    self.write_coro.deinit();
     while (self.popPacket()) |packet| allocator.free(packet.getBytes());
     static_io.vtable.netClose(static_io.userdata, (&self.stream_handle)[0..1]);
 }
