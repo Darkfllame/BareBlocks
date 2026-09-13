@@ -729,9 +729,12 @@ pub const Type = union(enum) {
             },
             .string => |may_max_cps| try readString(params.getMaybeArena(), reader, may_max_cps),
             .json => |may_sub| {
+                const input = try readString(params.getMaybeArena(), reader, 262144);
+                var r = Io.Reader.fixed(input);
+
                 const T = may_sub orelse serial.Value;
                 var json_sr: serial.JsonReader = undefined;
-                json_sr.initWithArena(params.arena, reader);
+                json_sr.initWithArena(params.arena, &r);
                 defer {
                     json_sr.redeemArena(params.arena);
                     json_sr.deinit();
@@ -1255,14 +1258,15 @@ pub const Type = union(enum) {
         }
     }
 
-    pub fn format(comptime self: Type, writer: *Writer) Writer.Error!void {
+    pub fn format(self: Type, writer: *Writer) Writer.Error!void {
         switch (self) {
-            .custom => |c| try writer.print("Type.custom{{{s}}}", .{c.type}),
+            .custom => |c| try writer.print("Type.custom{{{}}}", .{c.type}),
             .structured => |desc| {
                 try writer.writeAll(desc.name);
                 try writer.writeAll("{ ");
                 inline for (desc.fields, 0..) |field, i| {
-                    try writer.print("{s}: {f}", .{ field.name, field.type });
+                    try writer.print("{s}: ", .{field.name});
+                    try field.type.format(writer);
                     if (i + 1 < desc.fields.len) {
                         try writer.writeAll(", ");
                     }
@@ -1292,7 +1296,8 @@ pub const Type = union(enum) {
             else
                 try writer.writeAll("BitSet"),
             .optional => |opt| {
-                try writer.print("?{f}", .{opt.sub});
+                try writer.writeByte('?');
+                try opt.sub.format(writer);
                 switch (opt.condition) {
                     .prefixed => {},
                     .bool_field => |f| try writer.print(" (.{s} == true)", .{f}),
@@ -1311,18 +1316,36 @@ pub const Type = union(enum) {
                     .field_mask => |msk| try writer.print(" (.{s} & {b})", .{ msk.name, msk.value }),
                 }
             },
-            .array => |arr| switch (arr.size) {
-                .remaining => try writer.print("[0..]{f}", .{arr.sub}),
-                .prefixed => |max| try writer.print("[0..{d}]{f}", .{ max, arr.sub }),
-                .fixed => |len| try writer.print("[{d}]{f}", .{ len, arr.sub }),
-                .custom => try writer.print("[]{f}", .{arr.sub}),
+            .array => |arr| {
+                switch (arr.size) {
+                    .remaining => try writer.writeAll("[0..]"),
+                    .prefixed => |max| {
+                        if (max == std.math.maxInt(usize)) {
+                            try writer.writeAll("[0..unlimited]");
+                        } else {
+                            try writer.print("[0..{d}]", .{max});
+                        }
+                    },
+                    .fixed => |len| try writer.print("[{d}]", .{len}),
+                }
+                try arr.sub.format(writer);
             },
-            .@"enum" => |ib| try writer.print("Enum({any}, {f})", .{ ib.base, ib.backing }),
-            .enum_set => |ib| try writer.print("EnumSet({any}, {f})", .{ ib.backing, ib.base }),
-            .packed_struct => |ib| try writer.print("PackedStruct({any}, {f})", .{ ib.backing, ib.base }),
-            .id_or_x => |sub| try writer.print("IdOr({f})", .{sub}),
+            .@"enum" => |ib| try writer.print("Enum({}, {f})", .{ ib.base, ib.backing }),
+            .enum_set => |ib| try writer.print("EnumSet({}, {f})", .{ ib.base, ib.backing }),
+            .packed_struct => |ib| try writer.print("PackedStruct({}, {f})", .{ ib.base, ib.backing }),
+            .id_or_x => |sub| {
+                try writer.writeAll("IdOr(");
+                try sub.format(writer);
+                try writer.writeAll(")");
+            },
             .id_set => try writer.writeAll("IdSet"),
-            .either => |subs| try writer.print("XorY({f}, {f})", .{ subs[0], subs[1] }),
+            .either => |subs| {
+                try writer.writeAll("Either(");
+                try subs[0].format(writer);
+                try writer.writeAll(", ");
+                try subs[1].format(writer);
+                try writer.writeAll(")");
+            },
             .game_profile => try writer.writeAll("GameProfile"),
             .lpvec3 => try writer.writeAll("LPVec3"),
         }
@@ -1404,9 +1427,9 @@ pub fn readVarIntMax(reader: *Reader, comptime T: type, max_val: T) Reader.TakeL
 /// microshitstem wanted utf16 strings in java.
 ///
 /// Though I will use UTF8 instead as it'll be easier for me.
-pub fn readString(allocator: ?Allocator, reader: *Reader, may_max_cps: ?u15) (Reader.TakeLeb128Error || Reader.ReadAllocError || error{ InvalidUTF8, InvalidLength })![]const u8 {
+pub fn readString(allocator: ?Allocator, reader: *Reader, may_max_cps: ?u32) (Reader.TakeLeb128Error || Reader.ReadAllocError || error{ InvalidUTF8, InvalidLength })![]const u8 {
     const max_cps = may_max_cps orelse std.math.maxInt(u15);
-    const len = try readVarIntMax(reader, u32, @as(u32, max_cps) * 3);
+    const len = try readVarIntMax(reader, u32, max_cps *| 3);
 
     const buf = if (allocator) |alloc|
         try reader.readAlloc(alloc, len)

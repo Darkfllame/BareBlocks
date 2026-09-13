@@ -16,6 +16,17 @@ test {
         if (@TypeOf(value) == PacketType) {
             aw.clearRetainingCapacity();
             _ = arena.reset(.retain_capacity);
+            errdefer {
+                var buffer: [64]u8 = undefined;
+                const stderr = std.debug.lockStderr(&buffer);
+                defer std.debug.unlockStderr();
+                const w = &stderr.file_writer.interface;
+                w.print("{s}\n{f}\n", .{
+                    aw.written(),
+                    value,
+                }) catch {};
+                // w.flush() catch {};
+            }
             try value.write(.newWithArena(std.testing.allocator, &arena), &aw.writer, value.default());
             var reader = std.Io.Reader.fixed(aw.written());
             _ = try PacketType.readRoot(value, .streamedInput(std.testing.allocator, &arena), &reader);
