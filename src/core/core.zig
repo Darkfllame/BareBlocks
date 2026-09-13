@@ -8,9 +8,9 @@ const Writer = std.Io.Writer;
 const value_providers = @import("value_providers.zig");
 
 pub const packets_callback = @import("packets_callback.zig");
-pub const Chunk = @import("Chunk.zig");
 pub const DimensionProperties = @import("DimensionProperties.zig");
 pub const Server = @import("Server.zig");
+pub const RefCount = @import("RefCount.zig");
 pub const Registry = @import("registry.zig").Registry;
 
 pub const IntProvider = value_providers.IntProvider;
@@ -19,9 +19,9 @@ pub const FloatProvider = value_providers.FloatProvider;
 pub const logger = std.log.scoped(.bare_blocks);
 
 pub const BlockPosition = packed struct(u64) {
-    x: u26 = 0,
-    z: u26 = 0,
-    y: u12 = 0,
+    x: i26 = 0,
+    z: i26 = 0,
+    y: i12 = 0,
 
     pub fn format(self: BlockPosition, writer: *Writer) Writer.Error!void {
         return writer.print("{{ {d}, {d}, {d}}}", .{ self.x, self.y, self.z });

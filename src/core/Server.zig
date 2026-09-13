@@ -1,5 +1,6 @@
 const Server = @This();
 const std = @import("std");
+const builtin = @import("builtin");
 const coro = @import("coro");
 const net = @import("net");
 const utils = @import("utils");
@@ -16,6 +17,7 @@ const logger = std.log.scoped(.@"core/server");
 
 const static_io = coro.AnyCoroutine.static_io;
 const current_version = net.packets.StatusResponse.Version.@"26.2";
+const use_epoll = coro.polling.Poller == coro.polling.EPoll;
 
 const assert = std.debug.assert;
 
@@ -173,7 +175,7 @@ const ConfigPlayCommon = struct {
 
     fn keepAlive(self: *ConfigPlayCommon, conn: *Connection) net.Connection.WritePacketError!void {
         const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
-        
+
         const now = getKeepAliveValue();
         if (self.keep_alive) |ka| {
             if (now - ka >= keepalive_timeout_ms) {
@@ -205,8 +207,7 @@ const ConfigPlayCommon = struct {
 
         const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
         const common = switch (owned.data) {
-            .none ,
-            .login => unreachable,
+            .none, .login => unreachable,
             .config => |c| &c.common,
         };
 
@@ -304,7 +305,12 @@ fn coro_acceptConnection(co: *coro.AnyCoroutine, self: *Server, which: enum { v4
         stream = null;
         errdefer conn.deinit(self.allocator);
 
-        try self.poller.addSocket(self.allocator, conn.getSocket(), .rw, .{ .client = conn });
+        try self.poller.addSocket(self.allocator, conn.getSocket(), .{
+            .in = true,
+            .out = true,
+            .edge_triggered = true,
+            .read_hang_up = true,
+        }, .{ .client = conn });
 
         const gop = self.connections.getOrPutAssumeCapacity(conn);
         if (gop.found_existing) {
@@ -345,6 +351,11 @@ rsa_key: *crypto.EVP_PKEY,
 public_key_bytes: []u8,
 
 compression_threshold: u31,
+
+poll_wait_info: if (use_epoll) struct {
+    event_count: usize,
+    poller_data: []std.os.linux.epoll_event,
+} else void,
 
 pub const server_id_header = "gecko_";
 
@@ -415,6 +426,7 @@ pub fn init(self: *Server, options: InitOptions) InitError!void {
 
         break :blk try options.allocator.dupe(u8, der[0..@intCast(len)]);
     };
+    errdefer options.allocator.free(der);
 
     self.* = .{
         .packet_registry = &packets.registry,
@@ -436,7 +448,16 @@ pub fn init(self: *Server, options: InitOptions) InitError!void {
         .public_key_bytes = der,
 
         .compression_threshold = options.compression_threshold,
+
+        .poll_wait_info = undefined,
     };
+    if (use_epoll) {
+        self.poll_wait_info = .{
+            .event_count = 0,
+            .poller_data = try options.allocator.alloc(std.os.linux.epoll_event, 128),
+        };
+    }
+    errdefer if (use_epoll) options.allocator.free(self.poll_wait_info.poller_data);
 
     {
         var id_writer = Io.Writer.fixed(&self.server_id);
@@ -462,6 +483,10 @@ pub fn deinit(self: *Server) void {
     // TODO: Race conditions ?
     crypto.EVP_PKEY_free(self.rsa_key);
     self.allocator.free(self.public_key_bytes);
+
+    if (use_epoll) {
+        self.allocator.free(self.poll_wait_info.poller_data);
+    }
 
     self.accept_coro.await(.cancel) catch |e| {
         logger.err("Caught error while closing server: {t}", .{e});
@@ -492,9 +517,15 @@ pub fn deinit(self: *Server) void {
 }
 
 pub fn tick(self: *Server) !void {
-    var it = try self.poller.wait(1_000);
+    var it = if (use_epoll)
+        self.poller.epollWait(1_000, self.poll_wait_info.poller_data)
+    else
+        try self.poller.wait(1_000);
+    self.poll_wait_info.event_count = 0;
     while (it.next()) |ev| {
-        // logger.debug("Event: {t}, {f}", .{ ev.data, ev.events });
+        logger.debug("Event: {t}, {f}", .{ ev.data, ev.events });
+        if (use_epoll) self.poll_wait_info.event_count += 1;
+
         switch (ev.data) {
             .server => if (try self.accept_coro.@"resume"()) {
                 return error.ServerClosed;
@@ -507,7 +538,7 @@ pub fn tick(self: *Server) !void {
                 assert(owned.owner == self);
 
                 // logger.debug("[{f}] Event: {f}", .{ conn, ev.events });
-                var handled_disc= false;
+                var handled_disc = false;
                 if (ev.events.in) {
                     const res = conn.read_coro.@"resume"();
                     // logger.debug("[{f}] Read result: {!}", .{ conn, res });
@@ -538,7 +569,7 @@ pub fn tick(self: *Server) !void {
                     }
                 }
 
-                if (ev.events.out) {
+                if (ev.events.out and conn.send_queue.last == null) {
                     // if (tagged.tag == .login) @breakpoint();
                     if (conn.write_coro.@"resume"()) |finished| {
                         assert(!finished or conn.write_closed);
@@ -554,19 +585,34 @@ pub fn tick(self: *Server) !void {
                 }
 
                 const time_since_last_packet = conn.last_packet_timestamp.untilNow(self.io, .boot);
-                const timedout = time_since_last_packet.nanoseconds > conn.timeout.nanoseconds;
+                const timedout = time_since_last_packet.nanoseconds >= conn.timeout.nanoseconds;
 
                 if (timedout and !handled_disc) {
                     logger.err("[{f}] Disconnected: Timeout", .{conn});
                 }
 
-                if (ev.events.err or (conn.read_closed and conn.send_queue.last == null) or timedout) {
+                if (ev.events.err or (conn.read_closed and conn.send_queue.last == null) or timedout or
+                    ev.events.read_hang_up) {
                     assert(self.connections.remove(conn));
                     _ = self.poller.removeSocket(conn.getSocket());
                     self.destroyConnection(conn);
                     continue;
                 }
             },
+        }
+
+        if (use_epoll) blk: {
+            const new_len = switch (std.math.order(self.poll_wait_info.event_count, self.poll_wait_info.poller_data.len)) {
+                .lt => break :blk,
+                .eq => self.poll_wait_info.poller_data.len * 2,
+                .gt => self.poll_wait_info.event_count,
+            };
+            self.poll_wait_info.poller_data = it.resizeBuffer(self.allocator, new_len) catch {
+                logger.warn("Failed to adapt poll window size", .{});
+                break :blk;
+            };
+            logger.debug("New poll window size: {d}", .{new_len});
+            self.poll_wait_info.event_count = 0;
         }
     }
 }

@@ -1,6 +1,8 @@
 const Block = @This();
 const std = @import("std");
+const utils = @import("utils");
 const core = @import("core.zig");
+const RefCount = @import("RefCount.zig");
 
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -46,10 +48,23 @@ pub const Properties = struct {
 };
 
 pub const State = struct {
-    // using a rwlock instead of mutex might be more efficient considering the fact we'll probably read the state
-    // in parralel more often than modify it.
-    rw: Io.RwLock,
-    ref_count: usize,
+    const dummy_vtable = VTable{
+        .equal = dummyEqual,
+        .free = dummyFree,
+    };
+
+    fn dummyEqual(a: *const State, b: *const State) bool {
+        _ = a;
+        _ = b;
+        return true;
+    }
+
+    fn dummyFree(state: *State, gpa: Allocator) void {
+        _ = state;
+        _ = gpa;
+    }
+
+    ref_count: RefCount,
     state_id: State.Id,
     vtable: *const VTable,
 
@@ -60,56 +75,40 @@ pub const State = struct {
 
     pub const Id = enum(u32) { _ };
 
-    pub fn acquire(self: *State, io: Io) void {
-        self.lockUncancelable(io);
-        defer self.unlock(io);
-
-        assert(self.ref_count != 0);
-
-        self.ref_count += 1;
-    }
-    pub fn release(self: *State, io: Io, allocator: Allocator) void {
-        self.lockUncancelable(io);
-        self.ref_count -= 1;
-        if (self.ref_count == 0) {
-            self.vtable.free(self, allocator);
-            return; // last instance so no need to unlock
+    pub inline fn dummyIota(comptime N: u32, comptime start: u32) [N]State {
+        comptime {
+            @setEvalBranchQuota(N);
+            
+            var arr: [N]State = @splat(.{
+                .ref_count = .{},
+                .state_id = undefined,
+                .vtable = &dummy_vtable,
+            });
+            for (0..N) |i| {
+                arr[i].state_id = @enumFromInt(start + i);
+            }
+            return arr;
         }
-        self.unlock(io);
     }
 
-    pub fn lock(self: *State, io: Io) Io.Cancelable!void {
-        return self.rw.lock(io);
-    }
-    pub fn lockShared(self: *State, io: Io) Io.Cancelable!void {
-        return self.rw.lockShared(io);
-    }
-    pub fn tryLock(self: *State, io: Io) bool {
-        return self.rw.tryLock(io);
-    }
-    pub fn tryLockShared(self: *State, io: Io) bool {
-        return self.rw.tryLockShared(io);
-    }
-    pub fn lockUncancelable(self: *State, io: Io) void {
-        return self.rw.lockUncancelable(io);
-    }
-    pub fn lockSharedUncancelable(self: *State, io: Io) void {
-        return self.rw.lockSharedUncancelable(io);
-    }
-    pub fn unlock(self: *State, io: Io) void {
-        return self.rw.unlock(io);
-    }
-    pub fn unlockShared(self: *State, io: Io) void {
-        return self.rw.unlockShared(io);
+    pub fn dummy(id: Id) State {
+        return dummyIota(1, @intFromEnum(id))[0];
     }
 
-    pub fn eql(self: *State, other: *State, io: Io) bool {
-        self.lockSharedUncancelable(io);
-        defer self.unlockShared(io);
+    /// Should be called when a thread pass the point
+    pub fn acquire(self: *State) *State {
+        self.ref_count.acquireExtra(@returnAddress());
+        return self;
+    }
 
-        other.lockSharedUncancelable(io);
-        defer other.unlockShared(io);
+    pub fn release(self: *State, allocator: Allocator) void {
+        if (self.ref_count.release()) {
+            self.vtable.free(self, allocator);
+        }
+    }
 
+    /// Does not acquire `self` or `other`.
+    pub fn eql(self: *State, other: *State) bool {
         if (self == other) return true;
         if (self.state_id != other.state_id) return false;
 
