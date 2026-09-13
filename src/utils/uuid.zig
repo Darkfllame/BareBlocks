@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const serial = @import("serial");
 const utils = @import("utils.zig");
 
@@ -7,8 +8,7 @@ const assert = std.debug.assert;
 fn hexToNimble(c: u8) ?u8 {
     return switch (c) {
         '0'...'9' => c - '0',
-        'A'...'F' => 0xa + c - 'A',
-        'a'...'f' => 0xa + c - 'a',
+        'A'...'F', 'a'...'f' => 0xa + (c | 32) - 'a',
         else => null,
     };
 }
@@ -125,20 +125,27 @@ pub const UUID = extern union {
 
         var res: UUID = undefined;
         inline for (sections, 0..) |sec, j| {
-            const pairs: *const [sec[1] - sec[0]][2]u8 = @ptrCast(str[sec[0]..sec[1]]);
-            inline for (pairs, sec[0]..) |c, i| {
+            const pairs: *const [@divExact(sec[1] - sec[0], 2)][2]u8 = @ptrCast(str[sec[0]..sec[1]]);
+            inline for (pairs, 0..) |c, off| {
+                const i = sec[0] + (off * 2);
+                const be_index = @divExact(i - j, 2);
+                const byte_index = switch (std.builtin.Endian.native) {
+                    .little => res.bytes.len - be_index - 1,
+                    .big => be_index,
+                };
+
                 const high = hexToNimble(c[0]);
                 const low = hexToNimble(c[1]);
                 if (high == null or low == null) {
                     if (@inComptime()) {
                         @compileError(std.fmt.comptimePrint(
                             "Invalid byte: {s}\x1b[31m{s}\x1b[0m{s}",
-                            .{ str[0 .. i % 2], str[i % 2 ..][0..2], str[i % 2 + 2 ..] },
+                            .{ str[0..i], str[i..][0..2], str[i + 2 ..] },
                         ));
                     }
                     return error.InvalidCharacter;
                 }
-                res.bytes[j + i - sec[0]] = (high.? << 4) | low.?;
+                res.bytes[byte_index] = (high.? << 4) | low.?;
             }
         }
 
@@ -152,6 +159,7 @@ pub const UUID = extern union {
     pub fn stringify(self: UUID, out: *[stringified_length]u8) void {
         var fbw = std.Io.Writer.fixed(out);
         self.format(&fbw) catch unreachable;
+        assert(fbw.end == stringified_length);
     }
 
     pub fn eql(a: UUID, b: UUID) bool {
@@ -277,17 +285,17 @@ test {
 
 test "UUID.makeVersion3" {
     const uuid = UUID.makeVersion3("Offline: Darkfllame");
-    try std.testing.expectEqual(uuid.value, 0xf87c8a30378635021da43e54fe0cebf4);
+    try std.testing.expectEqual(0xf87c8a30_3786_3502_9d64_3e54fe0cebf4, uuid.value);
 }
 
 test "UUID.parse" {
-    const uuid = try UUID.parse("f87c8a30-3786-a532-1da4-3e54fe0cebf4");
-    try std.testing.expectEqual(uuid.value, 0xf87c8a30378635021da43e54fe0cebf4);
+    const uuid = try UUID.parse("f87c8a30-3786-3502-9d64-3e54fe0cebf4");
+    try std.testing.expectEqual(0xf87c8a30_3786_3502_9d64_3e54fe0cebf4, uuid.value);
 }
 
 test "UUID" {
-    const uuid = UUID{.value = 0xf87c8a30378635021da43e54fe0cebf4};
+    const uuid = UUID{ .value = 0xf87c8a30_3786_3502_9d64_3e54fe0cebf4 };
     var buf: [UUID.stringified_length]u8 = undefined;
     uuid.stringify(&buf);
-    try std.testing.expectEqualStrings("f87c8a30-3786-a532-1da4-3e54fe0cebf4", &buf);
+    try std.testing.expectEqualStrings("f87c8a30-3786-3502-9d64-3e54fe0cebf4", &buf);
 }
