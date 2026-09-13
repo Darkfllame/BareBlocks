@@ -81,6 +81,10 @@ pub const Events = packed struct {
     ///
     /// Should be used with non-blocking sockets/files
     edge_triggered: bool = false,
+    /// Used by `EPoll` as input.
+    /// 
+    /// Signals the other end closed end of the connection.
+    read_hang_up: bool = false,
 
     pub const rw = Events{ .in = true, .out = true };
     pub const readonly = Events{ .in = true };
@@ -310,6 +314,8 @@ pub fn EPoll(comptime Userdata: type) type {
 
                 .hang_up = (ev & EPOLL.HUP) != 0,
                 .err = (ev & EPOLL.ERR) != 0,
+
+                .read_hang_up = (ev & EPOLL.RDHUP) != 0,
             };
         }
 
@@ -317,7 +323,8 @@ pub fn EPoll(comptime Userdata: type) type {
             return @as(EventInt, @intFromBool(ev.in)) * EPOLL.IN |
                 @as(EventInt, @intFromBool(ev.out)) * EPOLL.OUT |
                 @as(EventInt, @intFromBool(ev.pri)) * EPOLL.PRI |
-                @as(EventInt, @intFromBool(ev.edge_triggered)) * EPOLL.ET;
+                @as(EventInt, @intFromBool(ev.edge_triggered)) * EPOLL.ET |
+                @as(EventInt, @intFromBool(ev.read_hang_up)) * EPOLL.RDHUP;
         }
 
         fn removeFdInner(self: *Self, fd: posix.fd_t) struct { usize, Userdata } {
@@ -341,6 +348,63 @@ pub fn EPoll(comptime Userdata: type) type {
         /// Used to identify the implementation of the current poller,
         /// useful for platform-specific optimizations.
         comptime poller_type: PollerType = .epoll,
+
+        pub const EPEventIterator = struct {
+            self: *const Self,
+            events: []linux.epoll_event,
+            timeout: i32,
+            iter: usize = 0,
+            count: usize = 0,
+
+            pub fn resizeBuffer(it: *EPEventIterator, gpa: Allocator, new_len: usize) Allocator.Error![]linux.epoll_event {
+                if (new_len <= it.events.len) return it.events;
+
+                if (gpa.resize(it.events, new_len)) {
+                    it.events.len = new_len;
+                    return it.events;
+                }
+
+                const new_alloc = try gpa.alloc(linux.epoll_event, new_len);
+                @memmove(new_alloc[0 .. it.count - it.iter], it.events[it.iter..it.count]);
+                gpa.free(it.events);
+                it.events = new_alloc;
+                return it.events;
+            }
+
+            pub fn next(it: *EPEventIterator) ?PollEvent(Userdata) {
+                const self = it.self;
+
+                const State = enum { loop, wait };
+
+                // I love state-machines 🤤
+                sw: switch (State.loop) {
+                    .loop => {
+                        if (it.iter >= it.count) continue :sw .wait;
+
+                        const idx = it.iter;
+                        const ev = it.events[idx];
+                        it.iter += 1;
+
+                        if (!self.used.isSet(idx)) continue :sw .loop;
+
+                        return .{
+                            .data = self.datas.items[ev.data.ptr][1],
+                            .events = fromLinuxEvents(ev.events),
+                        };
+                    },
+                    .wait => {
+                        const n = self.fd.wait(it.events, it.timeout);
+                        it.count = @min(n, it.events.len);
+                        it.iter = 0;
+
+                        if (it.count > 0) continue :sw .loop;
+
+                        return null;
+                    },
+                }
+                comptime unreachable;
+            }
+        };
 
         /// If `poller_type == .epoll`
         pub fn addFd(self: *Self, allocator: Allocator, fd: posix.fd_t, events: Events, data: Userdata) AddError!void {
@@ -394,47 +458,23 @@ pub fn EPoll(comptime Userdata: type) type {
             return self.removeFdInner(fd)[1];
         }
 
+        pub fn epollWait(self: *Self, timeout_ms: i32, buffer: []linux.epoll_event) EPEventIterator {
+            return .{
+                .self = self,
+                .events = buffer,
+                .timeout = timeout_ms,
+            };
+        }
+
         //#region Common API
 
         pub const EventIterator = struct {
-            self: *const Self,
             events: [poll_block_size]linux.epoll_event,
-            timeout: i32,
-            iter: CountInt = 0,
-            count: CountInt = 0,
+            private: EPEventIterator,
 
             pub fn next(it: *EventIterator) ?PollEvent(Userdata) {
-                const self = it.self;
-
-                const State = enum { loop, wait };
-
-                // I love state-machines 🤤
-                sw: switch (State.loop) {
-                    .loop => {
-                        if (it.iter >= it.count) continue :sw .wait;
-
-                        const idx = it.iter;
-                        const ev = it.events[idx];
-                        it.iter += 1;
-
-                        if (!self.used.isSet(idx)) continue :sw .loop;
-
-                        return .{
-                            .data = self.datas.items[ev.data.ptr][1],
-                            .events = fromLinuxEvents(ev.events),
-                        };
-                    },
-                    .wait => {
-                        const n = self.fd.wait(&it.events, it.timeout);
-                        it.count = @intCast(@min(n, poll_block_size));
-                        it.iter = 0;
-
-                        if (it.count > 0) continue :sw .loop;
-
-                        return null;
-                    },
-                }
-                comptime unreachable;
+                it.private.events = &it.events;
+                return it.private.next();
             }
         };
 
@@ -482,9 +522,8 @@ pub fn EPoll(comptime Userdata: type) type {
 
         pub inline fn wait(self: *Self, timeout_ms: i32) WaitError!EventIterator {
             return .{
-                .self = self,
                 .events = undefined,
-                .timeout = timeout_ms,
+                .private = self.epollWait(timeout_ms, &.{}),
             };
         }
 
