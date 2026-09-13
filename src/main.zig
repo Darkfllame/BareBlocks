@@ -4,7 +4,7 @@ const utils = @import("utils");
 
 const Io = std.Io;
 
-var ert_buf: [4096]usize = undefined;
+var ert_buf: [8 * 1024]usize = undefined;
 
 pub fn main(init: std.process.Init) !void {
     var server = try init.gpa.create(core.Server);
@@ -14,11 +14,12 @@ pub fn main(init: std.process.Init) !void {
         ert.instruction_addresses = &ert_buf;
     }
 
+    // Should take no memory except in debug mode
     var ca = utils.CountingAllocator.init(init.gpa, true);
     defer ca.deinit();
 
     try server.init(.{
-        .allocator = ca.allocator(),
+        .allocator = if (utils.is_debug) ca.allocator() else init.gpa,
         .io = init.io,
         .bind_port_v6 = 35565,
     });
@@ -28,7 +29,9 @@ pub fn main(init: std.process.Init) !void {
 
     while (true) {
         try server.tick();
-        std.log.debug("Counting alloc: (total: {d}, slots: {d}, largest: {d})", .{ ca.total, ca.allocs.items.len, ca.largestAllocation() });
+        if (utils.is_debug) {
+            std.log.debug("Counting alloc: (total: {d}, slots: {d}, largest: {d})", .{ ca.total, ca.allocs.items.len, ca.largestAllocation() });
+        }
     }
 }
 
