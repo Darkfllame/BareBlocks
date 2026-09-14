@@ -58,6 +58,22 @@ fn readPropsRaw(comptime ftype: FieldProperty.Type, arena: Allocator, mapr: *Map
             return out;
         },
         .deserializeable => |T| try mapr.deserialize(T),
+        .enumeration => |en| switch (en.mode) {
+            .string => std.meta.stringToEnum(en.type, try mapr.nextExpect(.string)) orelse error.InvalidEnumTag,
+            .number => std.enums.fromInt(en.type, try mapr.nextAsInt()) orelse error.InvalidEnumTag,
+            .either => {
+                const tok = try mapr.next();
+                const num: i65 = sw: switch (tok) {
+                    .string => |s| {
+                        const r = std.meta.stringToEnum(en.type, s) orelse continue :sw .byte;
+                        return r;
+                    },
+                    else => tok.asInt() orelse (tok.asIntUnsigned() orelse return error.UnexpectedToken),
+                    .aggregate_start, .aggregate_end, .array_start, .array_end => return error.UnexpectedToken,
+                };
+                return std.enums.fromInt(en.type, num) orelse error.InvalidEnumTag;
+            },
+        },
         .external, .array, .copy => unreachable,
     };
 }
@@ -499,6 +515,7 @@ pub const MapReader = struct {
         MissingField,
         UnknownField,
         DuplicateField,
+        InvalidEnumTag,
     };
 
     pub const NestingType = enum(u1) { aggregate, list };
@@ -680,10 +697,15 @@ pub const FieldProperty = struct {
         },
         /// Will allocate a value of the subtype.
         copy: *const Type,
+        enumeration: struct {
+            type: type,
+            mode: enum { string, number, either } = .string,
+            ignore_invalid: bool = false,
+        },
 
         fn isNestable(comptime self: Type) bool {
             return switch (self) {
-                .string, .boolean, .int, .float, .deserializeable, .custom => true,
+                .string, .boolean, .int, .float, .deserializeable, .custom, .enumeration => true,
                 .external, .array, .copy => false,
             };
         }
@@ -704,6 +726,7 @@ pub const FieldProperty = struct {
                     assert(c.isNestable());
                     return *c.GetType();
                 },
+                .enumeration => |en| en.type,
             };
         }
 
@@ -723,6 +746,7 @@ pub const FieldProperty = struct {
                     assert(c.isNestable());
                     return *c.GetType();
                 },
+                .enumeration => |en| en.type,
             };
         }
     };
@@ -788,13 +812,7 @@ pub fn FieldGatherer(comptime fields: []const FieldProperty) type {
             const mask_ptr = &@field(self.mask, @tagName(field));
 
             switch (ftype) {
-                .string,
-                .boolean,
-                .custom,
-                .deserializeable,
-                .int,
-                .float,
-                => value_ptr.* = try readPropsRaw(ftype, arena, mapr),
+                .string, .boolean, .custom, .deserializeable, .int, .float, .enumeration => value_ptr.* = try readPropsRaw(ftype, arena, mapr),
                 .external => unreachable,
                 .array => |a| {
                     var tok = try mapr.next();
@@ -857,7 +875,12 @@ pub fn FieldGatherer(comptime fields: []const FieldProperty) type {
                         else => {},
                     }
 
-                    try self.readValue(field_enum, gpa, arena, mapr);
+                    self.readValue(field_enum, gpa, arena, mapr) catch |e| {
+                        if (fp.type == .enumeration and fp.type.enumeration.ignore_invalid and e == error.InvalidEnumTag) {
+                            return @enumFromInt(fields.len);
+                        }
+                        return e;
+                    };
                     return field_enum;
                 }
             } else if (!self.opts.ignore_unknown_fields) return error.UnknownField;

@@ -235,6 +235,13 @@ pub const RandomPair = struct {
     }
 };
 
+pub fn err(logger: anytype, comptime fmt: []const u8, args: anytype) void {
+    if (@inComptime()) {
+        @compileError(std.fmt.comptimePrint(fmt, args));
+    }
+    logger.err(fmt, args);
+}
+
 pub fn compileError(comptime fmt: []const u8, args: anytype) noreturn {
     @compileError(std.fmt.comptimePrint(fmt, args));
 }

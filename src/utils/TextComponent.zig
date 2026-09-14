@@ -746,10 +746,15 @@ pub fn deserialize(mapr: *serial.MapReader) serial.MapReader.ReadError!TextCompo
     switch (try mapr.next()) {
         .string => |s| return .text(try _arena.dupe(u8, s), .{}),
         .aggregate_start => {
+            const ContentType = @typeInfo(Content).@"union".tag_type.?;
+
             current = .empty;
 
             var fg = serial.FieldGatherer(&.{
-                .{ .name = "type", .type = .string },
+                .{ .name = "type", .type = .{ .enumeration = .{
+                    .type = ContentType,
+                    .ignore_invalid = true,
+                } } },
 
                 .{ .name = "text", .type = .string },
 
@@ -818,11 +823,9 @@ pub fn deserialize(mapr: *serial.MapReader) serial.MapReader.ReadError!TextCompo
                 }
             }
 
-            const ContentType = @typeInfo(Content).@"union".tag_type.?;
-
             const real_type: ContentType = blk: {
                 if (fg.get(.type)) |typ| notype: {
-                    break :blk switch (std.meta.stringToEnum(ContentType, typ) orelse break :notype) {
+                    break :blk switch (typ) {
                         .int, .float => break :notype,
                         else => |v| v,
                     };

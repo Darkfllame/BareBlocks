@@ -1,10 +1,13 @@
 const Identifier = @This();
 const std = @import("std");
 const serial = @import("serial");
+const utils = @import("utils.zig");
 
 const json = std.json;
 const MapWriter = serial.MapWriter;
 const MapReader = serial.MapReader;
+
+const logger = std.log.scoped(.@"utils/identifier");
 
 namespace_ptr: [*]const u8,
 path_ptr: [*]const u8,
@@ -48,6 +51,15 @@ pub const Alt = struct {
     }
 };
 
+pub const Tag = union(enum) {
+    /// A raw identifier.
+    single: Identifier,
+    /// A set of identifiers denoted by another identifier.
+    tag: Identifier,
+    /// A set of identifiers.
+    inlined: []const Identifier,
+};
+
 pub fn namespace(self: Identifier) []const u8 {
     return self.namespace_ptr[0..self.namespace_len];
 }
@@ -79,11 +91,9 @@ pub fn validate(id: []const u8) ValidationError!Identifier {
         },
         '0'...'9', 'a'...'z', '-', '.', '_' => continue,
         else => if (colon_idx == null or c != '/') {
-            if (@inComptime()) {
-                @compileError(std.fmt.comptimePrint("Invalid character in id: {s}\x1b[31m{s}\x1b[39m{s}", .{
-                    id[0 .. i - 1], id[i .. i + 1], id[i + 1 ..],
-                }));
-            }
+            utils.err(logger, "Invalid character in id: {s}\x1b[31m{s}\x1b[39m{s}",  .{
+                id[0 .. i - 1], id[i .. i + 1], id[i + 1 ..],
+            });
             return error.InvalidCharacter;
         } else continue,
     };

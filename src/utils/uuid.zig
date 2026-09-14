@@ -3,6 +3,8 @@ const builtin = @import("builtin");
 const serial = @import("serial");
 const utils = @import("utils.zig");
 
+const logger = std.log.scoped(.@"utils/uuid");
+
 const assert = std.debug.assert;
 
 fn hexToNimble(c: u8) ?u8 {
@@ -137,12 +139,11 @@ pub const UUID = extern union {
                 const high = hexToNimble(c[0]);
                 const low = hexToNimble(c[1]);
                 if (high == null or low == null) {
-                    if (@inComptime()) {
-                        @compileError(std.fmt.comptimePrint(
-                            "Invalid byte: {s}\x1b[31m{s}\x1b[0m{s}",
-                            .{ str[0..i], str[i..][0..2], str[i + 2 ..] },
-                        ));
-                    }
+                    utils.err(
+                        logger,
+                        "Invalid byte: {s}\x1b[31m{s}\x1b[0m{s}",
+                        .{ str[0..i], str[i..][0..2], str[i + 2 ..] },
+                    );
                     return error.InvalidCharacter;
                 }
                 res.bytes[byte_index] = (high.? << 4) | low.?;
