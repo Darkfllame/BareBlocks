@@ -569,7 +569,7 @@ pub fn tick(self: *Server) !void {
                     }
                 }
 
-                if (ev.events.out and conn.send_queue.last == null) {
+                if (ev.events.out and conn.send_queue.last != null) {
                     // if (tagged.tag == .login) @breakpoint();
                     if (conn.write_coro.@"resume"()) |finished| {
                         assert(!finished or conn.write_closed);
