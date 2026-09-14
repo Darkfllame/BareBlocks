@@ -9,10 +9,12 @@ const value_providers = @import("value_providers.zig");
 
 pub const world = @import("world/world.zig");
 pub const packets_callback = @import("packets_callback.zig");
+
+pub const Registry = @import("registry.zig").Registry;
+pub const Block = @import("Block.zig");
 pub const DimensionProperties = @import("DimensionProperties.zig");
 pub const Server = @import("Server.zig");
 pub const RefCount = @import("RefCount.zig");
-pub const Registry = @import("registry.zig").Registry;
 
 pub const IntProvider = value_providers.IntProvider;
 pub const FloatProvider = value_providers.FloatProvider;
