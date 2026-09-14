@@ -2,8 +2,9 @@ const RefCount = @This();
 const std = @import("std");
 const utils = @import("utils");
 
+// TODO: Figure if 32-bits targets (unlikely) would be compilable
 /// Aligned to avoid false-sharing.
-count: std.atomic.Value(usize) align (std.atomic.cache_line) = .init(1),
+count: std.atomic.Value(u64) align(std.atomic.cache_line) = .init(1),
 
 /// Should be called when a thread pass the point
 pub fn acquire(self: *RefCount) void {
