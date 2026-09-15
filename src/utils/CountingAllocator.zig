@@ -49,6 +49,7 @@ fn resize(ud: *anyopaque, slice: []u8, al: Alignment, new_len: usize, ret_addr: 
 fn remap(ud: *anyopaque, slice: []u8, al: Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
     const self: *CountingAllocator = @ptrCast(@alignCast(ud));
     const new_addr = self.parent.rawRemap(slice, al, new_len, ret_addr) orelse return null;
+    self.total = (self.total - slice.len) + new_len;
     if (self.count_largest) {
         self.findBlock(@intFromPtr(slice.ptr)).?.*.? = new_addr[0..new_len];
     }
@@ -112,7 +113,11 @@ pub fn largestAllocation(self: *const CountingAllocator) usize {
 pub fn format(self: *const CountingAllocator, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     try writer.print("(total: {Bi}", .{self.total});
     if (self.count_largest) {
-        try writer.print(", slots: {d}\n", .{self.allocs.items.len});
+        var used: usize = 0;
+        for (self.allocs.items) |mptr| {
+            used += @intFromBool(mptr != null);
+        }
+        try writer.print(", slots: {d}\n", .{used});
 
         for (self.allocs.items, 0..) |mptr, i| {
             const ptr = mptr orelse continue;
