@@ -1,6 +1,7 @@
 const AnyCoroutine = @This();
 const std = @import("std");
 const private = @import("private.zig");
+const polling = @import("polling.zig");
 
 const posix = std.posix;
 const mem = std.mem;
@@ -124,7 +125,10 @@ allocated: []align(page_size_min) u8,
 data: *anyopaque,
 fn_ptr: *const CoroFunction,
 stack: StackState,
-state: IoImpl,
+state: struct {
+    canceled: bool,
+    max_sleep_time: i96,
+},
 
 pub const static_io = Io{ .userdata = null, .vtable = &IoImpl.vtable };
 
@@ -144,4 +148,3 @@ pub fn io(self: *AnyCoroutine) Io {
         .vtable = &IoImpl.vtable,
     };
 }
-

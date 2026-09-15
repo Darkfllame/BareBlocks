@@ -238,7 +238,7 @@ pub fn Coroutine(comptime T: type) type {
         }
 
         pub inline fn markCancel(self: *Self) void {
-            self.any.state.cancel();
+            self.any.state.canceled = true;
         }
 
         /// `RetType` is a transformation of `T`.

@@ -36,6 +36,55 @@ fn toPosixEvents(ev: Events) EventInt {
         @as(EventInt, @intFromBool(ev.pri)) * POLL.PRI;
 }
 
+fn genericOf(comptime P: type, comptime Userdata: type, self: *P) GenericPoller {
+    const S = struct {
+        const vtable = GenericPoller.VTable{
+            .addSocket = &addSocket,
+            .addFile = &addFile,
+            .modifySocket = &modifySocket,
+            .modifyFile = &modifyFile,
+            .removeSocket = &removeSocket,
+            .removeFile = &removeFile,
+        };
+
+        fn addSocket(ud: *anyopaque, sock: Io.net.Socket, events: Events, data_ptr: *anyopaque) AddError!void {
+            const poller: *P = @ptrCast(@alignCast(ud));
+            const data: *const Userdata = @ptrCast(@alignCast(data_ptr));
+            return poller.addSocket(sock, events, data.*);
+        }
+        fn addFile(ud: *anyopaque, file: Io.File, events: Events, data_ptr: *anyopaque) AddError!void {
+            const poller: *P = @ptrCast(@alignCast(ud));
+            const data: *const Userdata = @ptrCast(@alignCast(data_ptr));
+            return poller.addFile(file, events, data.*);
+        }
+        fn modifySocket(ud: *anyopaque, sock: Io.net.Socket, events: Events, data_ptr: ?*anyopaque) void {
+            const poller: *P = @ptrCast(@alignCast(ud));
+            const data: ?Userdata = if (data_ptr) |ptr|
+                @as(*const Userdata, @ptrCast(@alignCast(ptr))).*
+            else
+                null;
+            return poller.modifySocket(sock, events, data);
+        }
+        fn modifyFile(ud: *anyopaque, file: Io.File, events: Events, data_ptr: ?*anyopaque) void {
+            const poller: *P = @ptrCast(@alignCast(ud));
+            const data: ?Userdata = if (data_ptr) |ptr|
+                @as(*const Userdata, @ptrCast(@alignCast(ptr))).*
+            else
+                null;
+            return poller.modifyFile(file, events, data);
+        }
+        fn removeSocket(ud: *anyopaque, sock: Io.net.Socket) void {
+            const poller: *P = @ptrCast(@alignCast(ud));
+            _ = poller.removeSocket(sock);
+        }
+        fn removeFile(ud: *anyopaque, file: Io.File) void {
+            const poller: *P = @ptrCast(@alignCast(ud));
+            _ = poller.removeFile(file);
+        }
+    };
+    return .{ .ud = self, .vtable = &S.vtable };
+}
+
 pub const CreateError = Allocator.Error || error{ ProcessFdQuotaExceeded, SystemFdQuotaExceeded, SystemResources };
 pub const AddError = Allocator.Error || error{ Duplicate, SystemResources };
 pub const WaitError = error{SystemResources};
@@ -82,7 +131,7 @@ pub const Events = packed struct {
     /// Should be used with non-blocking sockets/files
     edge_triggered: bool = false,
     /// Used by `EPoll` as input.
-    /// 
+    ///
     /// Signals the other end closed end of the connection.
     read_hang_up: bool = false,
 
@@ -106,6 +155,20 @@ pub const Events = packed struct {
         if (bits != 0) try writer.writeByte(' ');
         try writer.writeByte('}');
     }
+};
+
+pub const GenericPoller = struct {
+    ud: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        addSocket: *const fn (*anyopaque, Io.net.Socket, events: Events, data: *const anyopaque) AddError!void,
+        addFile: *const fn (*anyopaque, Io.File, events: Events, data: *const anyopaque) AddError!void,
+        modifySocket: *const fn (*anyopaque, Io.net.Socket, events: Events, data: ?*const anyopaque) void,
+        modifyFile: *const fn (*anyopaque, Io.File, events: Events, data: ?*const anyopaque) void,
+        removeSocket: *const fn (*anyopaque, Io.net.Socket) void,
+        removeFile: *const fn (*anyopaque, Io.File) void,
+    };
 };
 
 pub fn PollEvent(comptime Userdata: type) type {
@@ -240,12 +303,18 @@ pub fn PosixPoll(comptime Userdata: type) type {
             }
         };
 
+        pub fn generic(self: *Self) GenericPoller {
+            return genericOf(Self, Userdata, self);
+        }
+
         pub inline fn init() CreateError!Self {
             return initCapacity(.failing, 0);
         }
 
         pub fn initCapacity(allocator: Allocator, capacity: usize) CreateError!Self {
-            var self: Self = .{};
+            var self: Self = .{
+                .allocator = allocator,
+            };
             errdefer self.deinit(allocator);
             try self.fds.ensureTotalCapacity(allocator, capacity);
             // Technically, self.used.bit_length could server as a capacity for both
@@ -343,68 +412,11 @@ pub fn EPoll(comptime Userdata: type) type {
 
         fd: linux_fd.EPollFD,
         used: std.DynamicBitSetUnmanaged = .{},
-        datas: std.ArrayList(struct { posix.fd_t, Userdata }) = .empty,
+        datas: std.ArrayList(struct { posix.fd_t, Userdata, EventInt }) = .empty,
 
         /// Used to identify the implementation of the current poller,
         /// useful for platform-specific optimizations.
         comptime poller_type: PollerType = .epoll,
-
-        pub const EPEventIterator = struct {
-            self: *const Self,
-            events: []linux.epoll_event,
-            timeout: i32,
-            iter: usize = 0,
-            count: usize = 0,
-
-            pub fn resizeBuffer(it: *EPEventIterator, gpa: Allocator, new_len: usize) Allocator.Error![]linux.epoll_event {
-                if (new_len <= it.events.len) return it.events;
-
-                if (gpa.resize(it.events, new_len)) {
-                    it.events.len = new_len;
-                    return it.events;
-                }
-
-                const new_alloc = try gpa.alloc(linux.epoll_event, new_len);
-                @memmove(new_alloc[0 .. it.count - it.iter], it.events[it.iter..it.count]);
-                gpa.free(it.events);
-                it.events = new_alloc;
-                return it.events;
-            }
-
-            pub fn next(it: *EPEventIterator) ?PollEvent(Userdata) {
-                const self = it.self;
-
-                const State = enum { loop, wait };
-
-                // I love state-machines 🤤
-                sw: switch (State.loop) {
-                    .loop => {
-                        if (it.iter >= it.count) continue :sw .wait;
-
-                        const idx = it.iter;
-                        const ev = it.events[idx];
-                        it.iter += 1;
-
-                        if (!self.used.isSet(idx)) continue :sw .loop;
-
-                        return .{
-                            .data = self.datas.items[ev.data.ptr][1],
-                            .events = fromLinuxEvents(ev.events),
-                        };
-                    },
-                    .wait => {
-                        const n = self.fd.wait(it.events, it.timeout);
-                        it.count = @min(n, it.events.len);
-                        it.iter = 0;
-
-                        if (it.count > 0) continue :sw .loop;
-
-                        return null;
-                    },
-                }
-                comptime unreachable;
-            }
-        };
 
         /// If `poller_type == .epoll`
         pub fn addFd(self: *Self, allocator: Allocator, fd: posix.fd_t, events: Events, data: Userdata) AddError!void {
@@ -416,8 +428,9 @@ pub fn EPoll(comptime Userdata: type) type {
                 break :grow idx;
             };
 
+            const l_events = toLinuxEvents(events);
             self.fd.control(.add, fd, .{
-                .events = toLinuxEvents(events),
+                .events = l_events,
                 .data = .{ .ptr = idx },
             }) catch |e| switch (e) {
                 error.NotFound => unreachable,
@@ -425,7 +438,7 @@ pub fn EPoll(comptime Userdata: type) type {
             };
 
             self.datas.items.len = @max(self.datas.items.len, idx + 1);
-            self.datas.items[idx] = .{ fd, data };
+            self.datas.items[idx] = .{ fd, data, l_events };
             self.used.set(idx);
         }
 
@@ -443,10 +456,12 @@ pub fn EPoll(comptime Userdata: type) type {
                     elem[1] = ud;
                 }
                 if (events) |ev| {
+                    const l_events = toLinuxEvents(ev);
                     self.fd.control(.modify, fd, .{
-                        .events = toLinuxEvents(ev),
+                        .events = l_events,
                         .data = .{ .ptr = idx },
                     }) catch unreachable;
+                    elem[2] = l_events;
                 }
 
                 break;
@@ -458,25 +473,55 @@ pub fn EPoll(comptime Userdata: type) type {
             return self.removeFdInner(fd)[1];
         }
 
-        pub fn epollWait(self: *Self, timeout_ms: i32, buffer: []linux.epoll_event) EPEventIterator {
-            return .{
-                .self = self,
-                .events = buffer,
-                .timeout = timeout_ms,
-            };
-        }
-
         //#region Common API
 
         pub const EventIterator = struct {
             events: [poll_block_size]linux.epoll_event,
-            private: EPEventIterator,
+            self: *const Self,
+            timeout: i32,
+            iter: usize = 0,
+            count: usize = 0,
 
             pub fn next(it: *EventIterator) ?PollEvent(Userdata) {
-                it.private.events = &it.events;
-                return it.private.next();
+                const self = it.self;
+
+                const State = enum { loop, wait };
+
+                // I love state-machines 🤤
+                sw: switch (State.loop) {
+                    .loop => {
+                        if (it.iter >= it.count) continue :sw .wait;
+
+                        const idx = it.iter;
+                        const ev = it.events[idx];
+                        it.iter += 1;
+
+                        if (!self.used.isSet(idx)) continue :sw .loop;
+
+                        const data = self.datas.items[ev.data.ptr];
+
+                        return .{
+                            .data = data[1],
+                            .events = fromLinuxEvents(ev.events),
+                        };
+                    },
+                    .wait => {
+                        const n = self.fd.wait(&it.events, it.timeout);
+                        it.count = @min(n, it.events.len);
+                        it.iter = 0;
+
+                        if (it.count > 0) continue :sw .loop;
+
+                        return null;
+                    },
+                }
+                comptime unreachable;
             }
         };
+
+        pub fn generic(self: *Self) GenericPoller {
+            return genericOf(Self, Userdata, self);
+        }
 
         pub inline fn init() CreateError!Self {
             return .initCapacity(.failing, 0);
@@ -523,7 +568,8 @@ pub fn EPoll(comptime Userdata: type) type {
         pub inline fn wait(self: *Self, timeout_ms: i32) WaitError!EventIterator {
             return .{
                 .events = undefined,
-                .private = self.epollWait(timeout_ms, &.{}),
+                .self = self,
+                .timeout = timeout_ms,
             };
         }
 

@@ -11,6 +11,7 @@ const posix = std.posix;
 const IpAddress = net.IpAddress;
 const Threaded = Io.Threaded;
 
+const native_os = builtin.os.tag;
 const socket_flags_unsupported = Threaded.socket_flags_unsupported;
 const HostName = net.HostName;
 const PosixAddress = Threaded.PosixAddress;
@@ -27,6 +28,7 @@ const assert = std.debug.assert;
 const timestampToPosix = private.timestampToPosix;
 
 const have_accept4 = !socket_flags_unsupported;
+const have_sendmmsg = native_os == .linux;
 
 fn checkCancel(ud: ?*anyopaque) Io.Cancelable!void {
     const co: *AnyCoroutine = @ptrCast(@alignCast(ud));
@@ -38,21 +40,37 @@ fn operate(ud: ?*anyopaque, op: Io.Operation) Io.Cancelable!Io.Operation.Result 
 
     switch (op) {
         else => return Io.failingOperate(ud, op),
-        .net_read => |nr| {
-            const res = netRead(co, nr.socket_handle, nr.data) catch |e| switch (e) {
-                error.Canceled => return error.Canceled,
-                else => |err| err,
-            };
+        // .net_read => |nr| {
+        //     const res = netRead(co, nr.socket_handle, nr.data) catch |e| switch (e) {
+        //         error.Canceled => return error.Canceled,
+        //         else => |err| err,
+        //     };
 
-            return .{ .net_read = res };
-        },
-        .net_write => |nw| {
-            const res = netWrite(co, nw.socket_handle, nw.header, nw.data, nw.splat) catch |e| switch (e) {
-                error.Canceled => return error.Canceled,
-                else => |err| err,
-            };
+        //     return .{ .net_read = res };
+        // },
+        // .net_write => |nw| {
+        //     const res = netWrite(co, nw.socket_handle, nw.header, nw.data, nw.splat) catch |e| switch (e) {
+        //         error.Canceled => return error.Canceled,
+        //         else => |err| err,
+        //     };
 
-            return .{ .net_write = res };
+        //     return .{ .net_write = res };
+        // },
+        .net_receive => |nr| {
+            const res = netReceive(
+                co,
+                nr.socket_handle,
+                &nr.message_buffer[0],
+                nr.data_buffer,
+                nr.flags,
+            );
+            return .{ .net_receive = .{
+                if (res) null else |e| switch (e) {
+                    error.Canceled => |err| return err,
+                    else => |err| err,
+                },
+                1,
+            } };
         },
     }
 }
@@ -85,22 +103,28 @@ fn sleep(ud: ?*anyopaque, timeout: Io.Timeout) Io.Cancelable!void {
         inline .duration, .deadline => |d| d.clock,
     };
     const clock_id = clockToPosix(clock);
-    var remaining = switch (timeout) {
-        .none => std.math.maxInt(i96),
-        .duration => |d| d.raw.nanoseconds,
-        .deadline => |d| d.raw.nanoseconds - now(undefined, clock).nanoseconds,
+    const deadline = switch (timeout) {
+        .none => while (true) try co.yield(),
+        .duration => |d| now(undefined, clock).nanoseconds + d.raw.nanoseconds,
+        .deadline => |d| d.raw.nanoseconds,
     };
-    while (remaining > 0) {
+    while (true) {
+        const _now = now(undefined, clock).nanoseconds;
+        if (_now >= deadline) break;
+
+        const remaining = deadline - _now;
         const sleep_time = @min(0, co.state.max_sleep_time, remaining);
-        var timespec = timestampToPosix(sleep_time);
-        while (true) {
-            const rc = posix.system.clock_nanosleep(clock_id, .{ .ABSTIME = false }, &timespec, &timespec);
-            switch (if (builtin.link_libc) @as(posix.E, @enumFromInt(rc)) else posix.errno(rc)) {
-                .INTR => continue,
-                else => return,
+        if (sleep_time > 0) {
+            var timespec = timestampToPosix(sleep_time);
+            while (true) {
+                const rc = posix.system.clock_nanosleep(clock_id, .{ .ABSTIME = false }, &timespec, &timespec);
+                switch (if (builtin.link_libc) @as(posix.E, @enumFromInt(rc)) else posix.errno(rc)) {
+                    .INTR => continue,
+                    else => return,
+                }
             }
         }
-        remaining -= sleep_time;
+
         try co.yield();
     }
 }
@@ -287,6 +311,25 @@ fn bindUnix(fd: posix.socket_t, addr: *const posix.sockaddr, addr_len: posix.soc
     }
 }
 
+fn pollConnect(co: *AnyCoroutine, fd: posix.socket_t, clock: Io.Clock, deadline: i96) !posix.E {
+    var pfd = posix.pollfd{
+        .fd = fd,
+        .events = posix.POLL.OUT,
+        .revents = undefined,
+    };
+    const max_timeout: i32 = @intCast(std.math.clamp(
+        co.state.max_sleep_time,
+        std.math.minInt(i32),
+        std.math.maxInt(i32),
+    ));
+    while ((try posix.poll((&pfd)[0..1], max_timeout)) != 1) {
+        try co.yield();
+        if (now(undefined, clock).nanoseconds > deadline) return error.Timeout;
+    }
+    const err = try getSocketOption(fd, posix.SOL.SOCKET, posix.SO.ERROR);
+    return posix.errno(err);
+}
+
 fn connect(
     co: *AnyCoroutine,
     socket_fd: posix.socket_t,
@@ -305,29 +348,17 @@ fn connect(
             .SUCCESS => return,
             .INTR => continue,
 
+            // TODO: Integrate this into pollers
             .AGAIN => {
+                if (addr.family == posix.AF.UNIX) {
+                    continue :sw try pollConnect(co, socket_fd, clock, deadline);
+                }
+
                 try co.yield();
                 if (now(undefined, clock).nanoseconds > deadline) return error.Timeout;
                 continue;
             },
-            .INPROGRESS => {
-                var pfd = posix.pollfd{
-                    .fd = socket_fd,
-                    .events = posix.POLL.OUT,
-                    .revents = undefined,
-                };
-                const max_timeout: i32 = @intCast(std.math.clamp(
-                    co.state.max_sleep_time,
-                    std.math.minInt(i32),
-                    std.math.maxInt(i32),
-                ));
-                while ((try posix.poll((&pfd)[0..1], max_timeout)) != 1) {
-                    try co.yield();
-                    if (now(undefined, clock).nanoseconds > deadline) return error.Timeout;
-                }
-                const err = try getSocketOption(socket_fd, posix.SOL.SOCKET, posix.SO.ERROR);
-                continue :sw posix.errno(err);
-            },
+            .INPROGRESS => continue :sw try pollConnect(co, socket_fd, clock, deadline),
 
             .ADDRNOTAVAIL => error.AddressUnavailable,
             .AFNOSUPPORT => error.AddressFamilyUnsupported,
@@ -537,6 +568,7 @@ fn netBindIp(_: ?*anyopaque, address: *const IpAddress, options: IpAddress.BindO
     var storage: PosixAddress = undefined;
     var addr_len = addressToPosix(address, &storage);
     try bind(socket_fd, &storage.any, addr_len);
+    if (options.allow_broadcast) try setSocketOption(socket_fd, posix.SOL.SOCKET, posix.SO.BROADCAST, 1);
     try posixGetSockName(socket_fd, &storage.any, &addr_len);
 
     return .{
@@ -782,30 +814,224 @@ fn netWriteFileUnimplemented(
     @panic("TODO: Implement netWriteFile");
 }
 
-fn netSendUnimplemented(co: *AnyCoroutine, handle: net.Socket.Handle, messages: []net.OutgoingMessage, flags: net.SendFlags) struct { ?net.Socket.SendError, usize } {
-    _ = co;
-    _ = handle;
-    _ = messages;
-    _ = flags;
-    @panic("TODO: Implement netSend");
+fn netSendOne(co: *AnyCoroutine, socket_handle: net.Socket.Handle, message: *net.OutgoingMessage, flags: u32) net.Socket.SendError!void {
+    var addr: PosixAddress = undefined;
+    var iovec: posix.iovec_const = .{ .base = @constCast(message.data_ptr), .len = message.data_len };
+    const msg: posix.msghdr_const = .{
+        .name = &addr.any,
+        .namelen = addressToPosix(message.address, &addr),
+        .iov = (&iovec)[0..1],
+        .iovlen = 1,
+        // OS returns EINVAL if this pointer is invalid even if controllen is zero.
+        .control = if (message.control.len == 0) null else @constCast(message.control.ptr),
+        .controllen = @intCast(message.control.len),
+        .flags = 0,
+    };
+    while (true) {
+        const rc = posix.system.sendmsg(socket_handle, &msg, flags);
+        switch (posix.errno(rc)) {
+            .SUCCESS => {
+                message.data_len = @intCast(rc);
+                return;
+            },
+            .INTR => continue,
+            .AGAIN => {
+                try co.yield();
+                continue;
+            },
+
+            .ACCES => return error.AccessDenied,
+            .ALREADY => return error.FastOpenAlreadyInProgress,
+            .CONNRESET => return error.ConnectionResetByPeer,
+            .MSGSIZE => return error.MessageOversize,
+            .NOBUFS => return error.SystemResources,
+            .NOMEM => return error.SystemResources,
+            .PIPE => return error.SocketUnconnected,
+            .AFNOSUPPORT => return error.AddressFamilyUnsupported,
+            .HOSTUNREACH => return error.HostUnreachable,
+            .NETUNREACH => return error.NetworkUnreachable,
+            .NOTCONN => return error.SocketUnconnected,
+            .NETDOWN => return error.NetworkDown,
+
+            .BADF => |err| return errnoBug(err), // File descriptor used after closed.
+            .DESTADDRREQ => |err| return errnoBug(err),
+            .FAULT => |err| return errnoBug(err),
+            .INVAL => |err| return errnoBug(err),
+            .ISCONN => |err| return errnoBug(err),
+            .NOTSOCK => |err| return errnoBug(err),
+            .OPNOTSUPP => |err| return errnoBug(err),
+            else => |err| return posix.unexpectedErrno(err),
+        }
+    }
 }
 
-fn netReceiveUnimplemented(
+fn netSendMany(co: *AnyCoroutine, socket_handle: net.Socket.Handle, messages: []net.OutgoingMessage, flags: u32) net.Socket.SendError!usize {
+    var msg_buffer: [64]posix.system.mmsghdr = undefined;
+    var addr_buffer: [msg_buffer.len]PosixAddress = undefined;
+    var iovecs_buffer: [msg_buffer.len]posix.iovec = undefined;
+    const min_len: usize = @min(messages.len, msg_buffer.len);
+    const clamped_messages = messages[0..min_len];
+    const clamped_msgs = (&msg_buffer)[0..min_len];
+    const clamped_addrs = (&addr_buffer)[0..min_len];
+    const clamped_iovecs = (&iovecs_buffer)[0..min_len];
+
+    for (clamped_messages, clamped_msgs, clamped_addrs, clamped_iovecs) |*message, *msg, *addr, *iovec| {
+        iovec.* = .{ .base = @constCast(message.data_ptr), .len = message.data_len };
+        msg.* = .{
+            .hdr = .{
+                .name = &addr.any,
+                .namelen = addressToPosix(message.address, addr),
+                .iov = iovec[0..1],
+                .iovlen = 1,
+                .control = @constCast(message.control.ptr),
+                .controllen = message.control.len,
+                .flags = 0,
+            },
+            .len = undefined, // Populated by calling sendmmsg below.
+        };
+    }
+
+    while (true) {
+        const rc = posix.system.sendmmsg(socket_handle, clamped_msgs.ptr, @intCast(clamped_msgs.len), flags);
+        switch (posix.errno(rc)) {
+            .SUCCESS => {
+                const n: usize = @intCast(rc);
+                for (clamped_messages[0..n], clamped_msgs[0..n]) |*message, *msg| {
+                    message.data_len = msg.len;
+                }
+                return n;
+            },
+            .INTR => continue,
+            .AGAIN => {
+                try co.yield();
+                continue;
+            },
+
+            .ACCES => return error.AccessDenied,
+            .ALREADY => return error.FastOpenAlreadyInProgress,
+            .CONNRESET => return error.ConnectionResetByPeer,
+            .MSGSIZE => return error.MessageOversize,
+            .NOBUFS => return error.SystemResources,
+            .NOMEM => return error.SystemResources,
+            .PIPE => return error.SocketUnconnected,
+            .AFNOSUPPORT => return error.AddressFamilyUnsupported,
+            .HOSTUNREACH => return error.HostUnreachable,
+            .NETUNREACH => return error.NetworkUnreachable,
+            .NOTCONN => return error.SocketUnconnected,
+            .NETDOWN => return error.NetworkDown,
+
+            .BADF => |err| return errnoBug(err), // File descriptor used after closed.
+            .DESTADDRREQ => |err| return errnoBug(err), // The socket is not connection-mode, and no peer address is set.
+            .FAULT => |err| return errnoBug(err), // An invalid user space address was specified for an argument.
+            .INVAL => |err| return errnoBug(err), // Invalid argument passed.
+            .ISCONN => |err| return errnoBug(err), // connection-mode socket was connected already but a recipient was specified
+            .NOTSOCK => |err| return errnoBug(err), // The file descriptor sockfd does not refer to a socket.
+            .OPNOTSUPP => |err| return errnoBug(err), // Some bit in the flags argument is inappropriate for the socket type.
+
+            else => |err| return posix.unexpectedErrno(err),
+        }
+    }
+}
+
+fn netSend(ud: ?*anyopaque, handle: net.Socket.Handle, messages: []net.OutgoingMessage, flags: net.SendFlags) struct { ?net.Socket.SendError, usize } {
+    const co: *AnyCoroutine = @ptrCast(@alignCast(ud));
+
+    const posix_flags: u32 =
+        @as(u32, if (@hasDecl(posix.MSG, "CONFIRM") and flags.confirm) posix.MSG.CONFIRM else 0) |
+        @as(u32, if (@hasDecl(posix.MSG, "DONTROUTE") and flags.dont_route) posix.MSG.DONTROUTE else 0) |
+        @as(u32, if (@hasDecl(posix.MSG, "EOR") and flags.eor) posix.MSG.EOR else 0) |
+        @as(u32, if (@hasDecl(posix.MSG, "OOB") and flags.oob) posix.MSG.OOB else 0) |
+        @as(u32, if (@hasDecl(posix.MSG, "FASTOPEN") and flags.fastopen) posix.MSG.FASTOPEN else 0) |
+        posix.MSG.NOSIGNAL | posix.MSG.DONTWAIT;
+
+    var i: usize = 0;
+    while (messages.len - i != 0) {
+        if (have_sendmmsg) {
+            i += netSendMany(co, handle, messages[i..], posix_flags) catch |err| return .{ err, i };
+            continue;
+        }
+        netSendOne(co, handle, &messages[i], posix_flags) catch |err| return .{ err, i };
+        i += 1;
+    }
+    return .{ null, i };
+}
+
+fn netReceive(
     userdata: ?*anyopaque,
     handle: net.Socket.Handle,
-    message_buffer: []net.IncomingMessage,
+    message: *net.IncomingMessage,
     data_buffer: []u8,
     flags: net.ReceiveFlags,
-    timeout: Io.Timeout,
-) struct { ?net.Socket.ReceiveTimeoutError, usize } {
+) net.Socket.ReceiveError!void {
     const co: *AnyCoroutine = @ptrCast(@alignCast(userdata));
-    _ = co;
-    _ = handle;
-    _ = message_buffer;
-    _ = data_buffer;
-    _ = flags;
-    _ = timeout;
-    @panic("TODO: Implement netReceive");
+
+    // recvmmsg is useless, here's why:
+    // * [timeout bug](https://bugzilla.kernel.org/show_bug.cgi?id=75371)
+    // * it wants iovecs for each message but we have a better API: one data
+    //   buffer to handle all the messages. The better API cannot be lowered to
+    //   the split vectors though because reducing the buffer size might make
+    //   some messages unreceivable.
+    const posix_flags: u32 =
+        @as(u32, if (flags.oob) posix.MSG.OOB else 0) |
+        @as(u32, if (flags.peek) posix.MSG.PEEK else 0) |
+        @as(u32, if (flags.trunc) posix.MSG.TRUNC else 0) |
+        posix.MSG.NOSIGNAL | posix.MSG.DONTWAIT;
+
+    var storage: PosixAddress = undefined;
+    var iov: posix.iovec = .{ .base = data_buffer.ptr, .len = data_buffer.len };
+    var msg: posix.msghdr = .{
+        .name = &storage.any,
+        .namelen = @sizeOf(PosixAddress),
+        .iov = (&iov)[0..1],
+        .iovlen = 1,
+        .control = message.control.ptr,
+        .controllen = @intCast(message.control.len),
+        .flags = undefined,
+    };
+
+    while (true) {
+        const rc = posix.system.recvmsg(handle, &msg, posix_flags);
+        switch (posix.errno(rc)) {
+            .SUCCESS => {
+                const data = data_buffer[0..@intCast(rc)];
+                message.* = .{
+                    .from = addressFromPosix(&storage),
+                    .data = data,
+                    .control = if (msg.control) |ptr| @as([*]u8, @ptrCast(ptr))[0..msg.controllen] else message.control,
+                    .flags = .{
+                        .eor = (msg.flags & posix.MSG.EOR) != 0,
+                        .trunc = (msg.flags & posix.MSG.TRUNC) != 0,
+                        .ctrunc = (msg.flags & posix.MSG.CTRUNC) != 0,
+                        .oob = (msg.flags & posix.MSG.OOB) != 0,
+                        .errqueue = if (@hasDecl(posix.MSG, "ERRQUEUE")) (msg.flags & posix.MSG.ERRQUEUE) != 0 else false,
+                    },
+                };
+                return;
+            },
+            .INTR => continue,
+            .AGAIN => {
+                try co.yield();
+                continue;
+            },
+
+            .NFILE => return error.SystemFdQuotaExceeded,
+            .MFILE => return error.ProcessFdQuotaExceeded,
+            .NOBUFS => return error.SystemResources,
+            .NOMEM => return error.SystemResources,
+            .NOTCONN => return error.SocketUnconnected,
+            .MSGSIZE => return error.MessageOversize,
+            .PIPE => return error.SocketUnconnected,
+            .CONNRESET => return error.ConnectionResetByPeer,
+            .NETDOWN => return error.NetworkDown,
+
+            .BADF => |err| return errnoBug(err),
+            .FAULT => |err| return errnoBug(err),
+            .INVAL => |err| return errnoBug(err),
+            .NOTSOCK => |err| return errnoBug(err),
+            .OPNOTSUPP => |err| return errnoBug(err),
+            else => |err| return posix.unexpectedErrno(err),
+        }
+    }
 }
 
 fn netInterfaceNameResolve(_: ?*anyopaque, name: *const net.Interface.Name) net.Interface.Name.ResolveError!net.Interface {
@@ -858,13 +1084,10 @@ fn netLookupUnimplemented(
 }
 //#endregion net
 
-canceled: bool,
-max_sleep_time: i96,
-
 pub const vtable = blk: {
     var res: Io.VTable = Io.failing.vtable.*;
     res.checkCancel = checkCancel;
-    // res.operate = operate;
+    res.operate = operate;
     res.now = now;
     res.clockResolution = clockResolution;
     res.sleep = sleep;
@@ -878,6 +1101,7 @@ pub const vtable = blk: {
     res.netRead = netRead;
     res.netWrite = netWrite;
     res.netClose = netClose;
+    res.netSend = netSend;
     res.netShutdown = netShutdown;
     res.netWriteFile = netWriteFileUnimplemented;
     res.netInterfaceNameResolve = netInterfaceNameResolve;
