@@ -5,6 +5,7 @@
 const Connection = @This();
 const std = @import("std");
 const builtin = @import("builtin");
+const core = @import("core");
 const coro = @import("coro");
 const utils = @import("utils");
 const crypto = @import("crypto");
@@ -450,16 +451,41 @@ fn noDeinit(self: *Connection, allocator: Allocator) void {
     _ = allocator;
 }
 
+fn deinit(self: *Connection, allocator: Allocator) void {
+    logger.debug("Destroying {f}", .{self});
+
+    self.read_closed = true;
+    self.write_closed = true;
+    self.read_coro.await(.cancel) catch |e| {
+        logger.debug("[{f}] Error occured when closing connection: {t}", .{ self, e });
+    };
+    self.write_coro.await(.cancel) catch |e| {
+        logger.debug("[{f}] Error occured when closing connection: {t}", .{ self, e });
+    };
+    self.read_coro.deinit();
+    self.write_coro.deinit();
+    while (self.popPacket()) |packet| allocator.free(packet.getBytes());
+    static_io.vtable.netClose(static_io.userdata, (&self.stream_handle)[0..1]);
+    
+    self.vtable.deinit(self, allocator);
+}
+
 // TODO: Bandwidth monitor ?
 
 /// Will replace the ip when this connection gets formatted to the console.
+packet_registry: *const PacketRegistry,
 name: ?[]const u8 = null,
+vtable: *const VTable,
+mutex: Io.Mutex,
+refcount: core.RefCount,
+
+last_tick_sec: Io.Timestamp,
+
 in_phase: NetworkingPhase,
 out_phase: NetworkingPhase,
 target_side: NetworkingSide,
-timeout: Io.Duration,
+
 rate_limited: ?*RateLimited,
-packet_registry: *const PacketRegistry,
 compression: ?*Compression,
 encryption: ?*Encryption,
 
@@ -477,6 +503,8 @@ handler_error: ?ReadCallbackError,
 read_coro: coro.Coroutine(CoroReadError!void),
 last_packet_timestamp: Io.Timestamp,
 
+timeout: Io.Duration,
+
 write_buffer: [writer_buffer_size]u8,
 writer: Io.Writer,
 write_error: ?StreamWriteError,
@@ -484,9 +512,6 @@ write_coro: coro.Coroutine(CoroWriteError!void),
 
 send_queue: std.DoublyLinkedList,
 send_count: usize,
-
-// Connection-specific callbacks
-vtable: *const VTable,
 
 /// Maximum value of `u21`, roughly 2MiB
 pub const max_packet_length = (2 * 1024 * 1024) - 1;
@@ -677,16 +702,21 @@ pub const VTable = struct {
 /// `allocator` must remain valid until this connection is deinitalized
 pub fn init(self: *Connection, allocator: Allocator, options: InitOptions) InitError!void {
     self.* = .{
+        .packet_registry = options.packet_registry,
         .name = options.name,
+        .vtable = options.vtable,
+        .mutex = .init,
+        .refcount = .{},
+
+        .last_tick_sec = .zero,
+
         .in_phase = options.in_phase,
         .out_phase = options.out_phase,
         .target_side = options.target_side,
-        .timeout = options.timeout,
+
         .rate_limited = options.rate_limited,
         .compression = options.compression,
         .encryption = options.encryption,
-
-        .packet_registry = options.packet_registry,
 
         .read_closed = false,
         .write_closed = false,
@@ -711,6 +741,7 @@ pub fn init(self: *Connection, allocator: Allocator, options: InitOptions) InitE
         .handler_error = null,
         .read_coro = undefined,
         .last_packet_timestamp = Io.Timestamp.now(static_io, .boot),
+        .timeout = options.timeout,
 
         .write_buffer = undefined,
         .writer = .{
@@ -723,8 +754,6 @@ pub fn init(self: *Connection, allocator: Allocator, options: InitOptions) InitE
 
         .send_queue = .{},
         .send_count = 0,
-
-        .vtable = options.vtable,
     };
 
     try self.setNoDelay();
@@ -735,21 +764,31 @@ pub fn init(self: *Connection, allocator: Allocator, options: InitOptions) InitE
     errdefer self.write_coro.deinit();
 }
 
-pub fn deinit(self: *Connection, allocator: Allocator) void {
-    self.vtable.deinit(self, allocator);
+pub fn acquire(self: *Connection) void {
+    self.refcount.acquire();
+}
 
-    self.read_closed = true;
-    self.write_closed = true;
-    self.read_coro.await(.cancel) catch |e| {
-        logger.debug("[{f}] Error occured when closing connection: {t}", .{ self, e });
-    };
-    self.write_coro.await(.cancel) catch |e| {
-        logger.debug("[{f}] Error occured when closing connection: {t}", .{ self, e });
-    };
-    self.read_coro.deinit();
-    self.write_coro.deinit();
-    while (self.popPacket()) |packet| allocator.free(packet.getBytes());
-    static_io.vtable.netClose(static_io.userdata, (&self.stream_handle)[0..1]);
+pub fn release(self: *Connection, allocator: Allocator) void {
+    if (self.refcount.release()) {
+        assert(self.tryLock()); // Nice lifetimes management bro...
+        self.deinit(allocator);
+    }
+}
+
+pub fn lock(self: *Connection, io: Io) Io.Cancelable!void {
+    return self.mutex.lock(io);
+}
+
+pub fn lockUncancelable(self: *Connection, io: Io) void {
+    return self.mutex.lockUncancelable(io);
+}
+
+pub fn tryLock(self: *Connection) bool {
+    return self.mutex.tryLock();
+}
+
+pub fn unlock(self: *Connection, io: Io) void {
+    return self.mutex.unlock(io);
 }
 
 pub fn disconnect(self: *Connection, reason: *const TextComponent) (WritePacketError || Io.net.ShutdownError)!void {
@@ -757,6 +796,8 @@ pub fn disconnect(self: *Connection, reason: *const TextComponent) (WritePacketE
     try self.vtable.disconnect(self, reason);
     try self.shutdown(.recv);
     self.disconnect_done = true;
+    // more than one second of timeout is useless
+    self.timeout = .fromSeconds(1);
 }
 
 /// Doesn't reallocate/duplicate anything.
@@ -870,6 +911,10 @@ pub fn shutdown(self: *Connection, how: Io.net.ShutdownHow) Io.net.ShutdownError
 }
 
 pub fn tickSecond(self: *Connection) (WritePacketError || Io.net.ShutdownError)!void {
+    const now = Io.Timestamp.now(static_io, .boot);
+    if (self.last_tick_sec.durationTo(now).toMilliseconds() < 1_000) return;
+    self.last_tick_sec = now;
+
     if (self.rate_limited) |rl| {
         rl.average_sent = math.lerp(@as(RateLimited.Average, @floatFromInt(rl.sent)), rl.average_sent, 0.75);
         rl.average_received = math.lerp(@as(RateLimited.Average, @floatFromInt(rl.received)), rl.average_received, 0.75);

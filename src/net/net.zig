@@ -16,8 +16,9 @@ const static_io = coro.AnyCoroutine.static_io;
 
 pub const logger = std.log.scoped(.net);
 
-pub const StructuredPacket = @import("StructuredPacket.zig");
 pub const packets = @import("packets.zig");
+pub const datagram = @import("datagram.zig");
+pub const StructuredPacket = @import("StructuredPacket.zig");
 pub const Connection = @import("Connection.zig");
 
 pub const PacketType = StructuredPacket.Type;
