@@ -294,91 +294,75 @@ fn assetWorkerDownload(
     } else out_dir;
     defer if (do_close) file_dir.close(self.io);
 
-    const file = try file_dir.createFile(self.io, asset_filename, .{
-        .lock = .exclusive,
-        .truncate = true,
-    });
-    errdefer file_dir.deleteFile(self.io, asset_filename) catch {};
-    defer file.close(self.io);
-
-    var read_buffer: [4096]u8 = undefined;
-    var write_buffer: [4096]u8 = undefined;
-    var fw = file.writer(self.io, &write_buffer);
-    if (try self.searchCache(.asset, req.hash)) |file_path| search: {
-        const cached_file = self.root.openFile(self.io, file_path, .{ .lock = .shared }) catch |e| switch (e) {
-            error.FileNotFound => break :search,
-            else => |err| return err,
-        };
-        defer cached_file.close(self.io);
-
-        var fr = cached_file.reader(self.io, &read_buffer);
-
-        _ = fw.interface.sendFileAll(&fr, .unlimited) catch |e| return switch (e) {
-            error.WriteFailed => fw.err.?,
-            error.ReadFailed => fr.err.?,
-        };
-        try fw.flush();
-    }
-
-    var name_buffer: [1024]u8 = undefined;
-
-    const uri_buffer = try self.allocator.alloc(u8, ressource_base_url.len + 3 + (Sha1.digest_length * 2));
-    defer self.allocator.free(uri_buffer);
-
-    const uri = blk: {
-        var uri_writer = Io.Writer.fixed(uri_buffer);
-        uri_writer.print("{s}{x:0>2}/{x}", .{ ressource_base_url, req.hash[0], req.hash }) catch unreachable;
-        break :blk Uri.parse(uri_writer.buffered()) catch unreachable;
-    };
-
-    const child_prog = progress_node.startFmt(0, "Downloading {s}: {x}", .{
-        req.name, req.hash,
-    });
-    defer child_prog.end();
-
-    var aw = Io.Writer.Allocating.init(self.allocator);
-    defer aw.deinit();
-
-    for (0..max_retries) |i| {
-        aw.clearRetainingCapacity();
-        child_prog.setCompletedItems(0);
-
-        _ = streamFromUri(
-            self,
-            child_prog,
-            uri,
-            redibuf,
-            &read_buffer,
-            decomp_buffer,
-            &name_buffer,
-            &aw.writer,
-            false,
-        ) catch |e| {
-            if (i == max_retries - 1) {
-                return switch (e) {
-                    error.WriteFailed => fw.err.?,
-                    else => |err| err,
-                };
-            }
-            std.log.debug("Attempt {d} to download {f} failed: {t}", .{ i, uri, e });
-            continue;
-        };
-        var cmp_hash: [Sha1.digest_length]u8 = undefined;
-        Sha1.hash(aw.written(), &cmp_hash, .{});
-        if (!std.mem.eql(u8, req.hash, &cmp_hash)) {
-            std.log.debug("Attempt {d} to download {f} failed: Mismatch hash values: {x}, {x}", .{
-                i,        uri,
-                req.hash, &cmp_hash,
-            });
-            continue;
+    const cached_file = cached_file: {
+        if (try self.searchCache(.asset, req.hash)) |file_path| search: {
+            break :cached_file self.root.openFile(self.io, file_path, .{ .lock = .shared }) catch |e| return switch (e) {
+                error.FileNotFound => break :search,
+                else => |err| return err,
+            };
         }
-        break;
-    }
+        
+        var read_buffer: [4096]u8 = undefined;
+        var name_buffer: [1024]u8 = undefined;
 
-    try self.writeCache(.asset, req.hash, aw.written());
+        const uri_buffer = try self.allocator.alloc(u8, ressource_base_url.len + 3 + (Sha1.digest_length * 2));
+        defer self.allocator.free(uri_buffer);
 
-    try fw.interface.writeAll(aw.written());
-    try fw.flush();
+        const uri = blk: {
+            var uri_writer = Io.Writer.fixed(uri_buffer);
+            uri_writer.print("{s}{x:0>2}/{x}", .{ ressource_base_url, req.hash[0], req.hash }) catch unreachable;
+            break :blk Uri.parse(uri_writer.buffered()) catch unreachable;
+        };
+
+        const child_prog = progress_node.startFmt(0, "Downloading {s}: {x}", .{
+            req.name, req.hash,
+        });
+        defer child_prog.end();
+
+        var aw = Io.Writer.Allocating.init(self.allocator);
+        defer aw.deinit();
+
+        for (0..max_retries) |i| {
+            aw.clearRetainingCapacity();
+            child_prog.setCompletedItems(0);
+
+            _ = streamFromUri(
+                self,
+                child_prog,
+                uri,
+                redibuf,
+                &read_buffer,
+                decomp_buffer,
+                &name_buffer,
+                &aw.writer,
+                false,
+            ) catch |e| {
+                if (i == max_retries - 1) {
+                    return switch (e) {
+                        error.WriteFailed => error.OutOfMemory,
+                        else => |err| err,
+                    };
+                }
+                std.log.debug("Attempt {d} to download {f} failed: {t}", .{ i, uri, e });
+                continue;
+            };
+            var cmp_hash: [Sha1.digest_length]u8 = undefined;
+            Sha1.hash(aw.written(), &cmp_hash, .{});
+            if (!std.mem.eql(u8, req.hash, &cmp_hash)) {
+                std.log.debug("Attempt {d} to download {f} failed: Mismatch hash values: {x}, {x}", .{
+                    i,        uri,
+                    req.hash, &cmp_hash,
+                });
+                continue;
+            }
+            break;
+        }
+
+        break :cached_file try self.writeCacheGetFile(.asset, req.hash, aw.written());
+    };
+    defer cached_file.close(self.io);
+
+    try cached_file.hardLink(self.io, file_dir, asset_filename, .{});
 }
 
 fn assetAppender(self: *Cache, idx: AssetsIndex) Io.Cancelable!void {
@@ -414,6 +398,11 @@ fn searchCache(self: *Cache, cft: CachedFileType, sha1: *const [Sha1.digest_leng
 }
 
 fn writeCache(self: *Cache, cft: CachedFileType, sha1: *const [Sha1.digest_length]u8, content: []const u8) !void {
+    const file = try self.writeCacheGetFile(cft, sha1, content);
+    file.close(self.io);
+}
+
+fn writeCacheGetFile(self: *Cache, cft: CachedFileType, sha1: *const [Sha1.digest_length]u8, content: []const u8) !Io.File {
     const arr = self.registries.getPtr(cft);
     try arr.rw_lock.lock(self.io);
     defer arr.rw_lock.unlock(self.io);
@@ -452,13 +441,15 @@ fn writeCache(self: *Cache, cft: CachedFileType, sha1: *const [Sha1.digest_lengt
     assert(sp_w.end == sp_w.buffer.len);
 
     const file = try dir.createFile(self.io, sp_w.buffer, .{ .lock = .exclusive });
-    defer file.close(self.io);
+    errdefer file.close(self.io);
 
     var write_buffer: [1024]u8 = undefined;
     var fw = file.writer(self.io, &write_buffer);
 
     try fw.interface.writeAll(content);
     try fw.flush();
+
+    return file;
 }
 
 fn streamCacheFile(
