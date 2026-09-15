@@ -37,7 +37,6 @@ pub fn main(init: std.process.Init) !void {
             last_print_time = now;
             std.log.debug("Counting alloc: (total: {d}, slots: {d}, largest: {d})", .{ ca.total, ca.allocs.items.len, ca.largestAllocation() });
         }
-        if (server.closing) break;
     }
 }
 

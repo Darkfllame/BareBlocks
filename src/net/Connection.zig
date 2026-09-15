@@ -340,12 +340,17 @@ fn readConnection(self: *Connection, gpa: Allocator, arena_alloc: *std.heap.Aren
     var decomp: flate.Decompress = undefined;
 
     const packet_reader = if (self.compression) |comp| blk: {
+        @branchHint(.likely);
+
         const uncompressed_length = PacketType.readNoAlloc(.var_int, &raw_reader) catch |e| return switch (e) {
             error.Overflow, error.EndOfStream => error.InvalidLength,
             else => unreachable,
         };
         if (uncompressed_length < 0) return error.InvalidLength;
-        if (uncompressed_length == 0) break :blk &raw_reader;
+        if (uncompressed_length == 0) {
+            @branchHint(.unlikely);
+            break :blk &raw_reader;
+        }
         rparams.input_mode = .streamed;
 
         decomp = .init(&raw_reader, .zlib, &comp.decompress_buffer);
@@ -466,7 +471,7 @@ fn deinit(self: *Connection, allocator: Allocator) void {
     self.write_coro.deinit();
     while (self.popPacket()) |packet| allocator.free(packet.getBytes());
     static_io.vtable.netClose(static_io.userdata, (&self.stream_handle)[0..1]);
-    
+
     self.vtable.deinit(self, allocator);
 }
 
@@ -505,6 +510,7 @@ last_packet_timestamp: Io.Timestamp,
 
 timeout: Io.Duration,
 
+write_ready: bool,
 write_buffer: [writer_buffer_size]u8,
 writer: Io.Writer,
 write_error: ?StreamWriteError,
@@ -743,6 +749,7 @@ pub fn init(self: *Connection, allocator: Allocator, options: InitOptions) InitE
         .last_packet_timestamp = Io.Timestamp.now(static_io, .boot),
         .timeout = options.timeout,
 
+        .write_ready = false,
         .write_buffer = undefined,
         .writer = .{
             .vtable = &writer_vtable,
@@ -879,6 +886,7 @@ pub fn sendPacket(
                 PacketType.writerNoAlloc(.var_int, &out_w.writer, 0) catch unreachable;
                 out_w.writer.writeAll(content) catch unreachable;
             } else {
+                @branchHint(.likely);
                 PacketType.writerNoAlloc(.var_int, &out_w.writer, @intCast(content.len)) catch unreachable;
                 var compress = flate.Compress.init(&out_w.writer, &comp.compress_buffer, .zlib, .default) catch
                     return error.OutOfMemory;

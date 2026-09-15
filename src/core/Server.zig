@@ -383,10 +383,14 @@ fn enableBroadcast(self: *Server) !void {
     try self.broadcast.coro.init(.{}, coro_broadcast, .{self});
     errdefer self.broadcast.coro.deinit();
 
-    try self.poller.addSocket(self.allocator, self.broadcast.socket, .{ .out = true }, .broadcast);
+    try self.poller.addSocket(self.allocator, self.broadcast.socket, .{
+        .out = true,
+        .edge_triggered = true,
+    }, .broadcast);
     errdefer _ = self.poller.removeSocket(self.broadcast.socket);
 
     self.broadcast.enabled = true;
+    self.broadcast.ready = false;
 }
 
 fn deinitBroadcast(self: *Server) void {
@@ -401,6 +405,7 @@ packet_registry: *const net.PacketRegistry,
 allocator: Allocator,
 io: Io,
 
+// TODO: Move all the event loop bs to core/server/EventLoop.zig
 accept_options: Io.net.Server.AcceptOptions,
 v6_enabled: bool,
 sockv4_handle: Io.net.Socket.Handle,
@@ -409,6 +414,7 @@ ipv4: Io.net.Ip4Address,
 ipv6: Io.net.Ip6Address,
 broadcast: struct {
     enabled: bool,
+    ready: bool,
     socket: Io.net.Socket,
     last_broadcast: Io.Timestamp,
     coro: coro.Coroutine(BroadcastCoroError!void),
@@ -425,8 +431,6 @@ rsa_key: *crypto.EVP_PKEY,
 public_key_bytes: []u8,
 
 compression_threshold: u31,
-
-closing: bool,
 
 pub const server_id_header = "gecko_";
 
@@ -515,6 +519,7 @@ pub fn init(self: *Server, options: InitOptions) InitError!void {
         .ipv6 = if (sockv6) |s| s.socket.address.ip6 else undefined,
         .broadcast = .{
             .enabled = false,
+            .ready = false,
             .socket = undefined,
             .last_broadcast = .zero,
             .coro = undefined,
@@ -531,8 +536,6 @@ pub fn init(self: *Server, options: InitOptions) InitError!void {
         .public_key_bytes = der,
 
         .compression_threshold = options.compression_threshold,
-
-        .closing = false,
     };
 
     if (options.broadcast) {
@@ -629,11 +632,14 @@ pub fn tick(self: *Server) !void {
             },
             .broadcast => {
                 assert(self.broadcast.enabled);
+                self.broadcast.ready = true;
                 if (try self.broadcast.coro.@"resume"()) {
                     self.broadcast.enabled = false;
                     _ = self.poller.removeSocket(self.broadcast.socket);
                     net.datagram.close(self.broadcast.socket);
                     self.broadcast.coro.deinit();
+                } else {
+                    self.broadcast.ready = false;
                 }
             },
             .client => |conn| {
@@ -678,10 +684,14 @@ pub fn tick(self: *Server) !void {
                     }
                 }
 
-                if (ev.events.out and conn.send_queue.last != null) {
+                if (ev.events.out) {
+                    conn.write_ready = true;
+                }
+                if (conn.write_ready and conn.send_queue.last != null) {
                     // if (tagged.tag == .login) @breakpoint();
                     if (conn.write_coro.@"resume"()) |finished| {
                         assert(!finished or conn.write_closed);
+                        conn.write_ready = false;
                     } else |err| {
                         logger.err("[{f}] Connection closed: {t}", .{ conn, err });
                         conn.write_coro.deinit();
@@ -715,8 +725,6 @@ pub fn tick(self: *Server) !void {
                 }
             },
         }
-
-        if (self.closing) return;
     }
 }
 

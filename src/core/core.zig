@@ -7,6 +7,7 @@ const Writer = std.Io.Writer;
 
 const value_providers = @import("value_providers.zig");
 
+pub const server = @import("server/server.zig");
 pub const world = @import("world/world.zig");
 pub const packets_callback = @import("packets_callback.zig");
 

@@ -14,6 +14,7 @@
     - Make one myself ?
 - Multithreading
     - Preferable use/make "lock-free" data structs by exploiting atomics
+    - Concurrent List and Map
     - Split all the connections into blocks of *N* connections
     - Loaded chunks should be split into region
         - A region is tied to one or more players
