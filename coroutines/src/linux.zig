@@ -76,11 +76,13 @@ pub const EPollFD = enum(posix.fd_t) {
     }
 
     pub fn wait(self: EPollFD, events: []linux.epoll_event, timeout_ms: i32) usize {
+        if (events.len == 0) return 0;
+
         while (true) {
             const rc = system.epoll_wait(
                 @intFromEnum(self),
                 events.ptr,
-                @intCast(events.len),
+                @intCast(@min(events.len, std.math.maxInt(i32))),
                 timeout_ms,
             );
             return switch (errno(rc)) {

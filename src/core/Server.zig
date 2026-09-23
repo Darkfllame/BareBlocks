@@ -61,215 +61,6 @@ const PolledInfo = union(enum) {
     }
 };
 
-const OwnedConnection = struct {
-    const vtable = Connection.VTable{
-        .deinit = deinitImpl,
-    };
-
-    owner: *Server,
-    connection: Connection,
-    data: union(enum) {
-        none,
-        login: *LoginConnection,
-        config: *ConfigConnection,
-    },
-
-    fn deinitImpl(conn: *Connection, allocator: Allocator) void {
-        const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
-
-        switch (owned.data) {
-            .none => {},
-            .login => |loginging| allocator.destroy(loginging),
-            .config => |configing| allocator.destroy(configing),
-        }
-        allocator.destroy(owned);
-    }
-};
-
-const LoginConnection = struct {
-    const vtable = Connection.VTable{
-        .deinit = deinitImpl,
-        .disconnect = disconnectImpl,
-    };
-
-    fn deinitImpl(conn: *Connection, allocator: Allocator) void {
-        allocator.free(conn.name.?);
-        if (conn.encryption) |enc| {
-            enc.deinit();
-            allocator.destroy(enc);
-        }
-        if (conn.compression) |comp| {
-            allocator.destroy(comp);
-        }
-        OwnedConnection.deinitImpl(conn, allocator);
-    }
-
-    fn disconnectImpl(conn: *Connection, reason: *const utils.TextComponent) Connection.WritePacketError!void {
-        const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
-        assert(owned.data == .login);
-
-        const gpa = owned.owner.allocator;
-        var arena: std.heap.ArenaAllocator = .init(gpa);
-        defer arena.deinit();
-        try conn.sendPacket(.newWithArena(gpa, &arena), "login_disconnect", net.packets.login_disconnect_s2c, reason.*);
-    }
-
-    fn setupEncryption(self: *LoginConnection, owner: *Server, in_shared_secret: []const u8, verify_token: []const u8) LoginError!void {
-        self.encryption = try owner.allocator.create(Connection.Encryption);
-        errdefer {
-            owner.allocator.destroy(self.encryption.?);
-            self.encryption = null;
-        }
-        const shared_secret = &self.encryption.?.shared_secret;
-        var shared_buffer: [128]u8 = undefined;
-
-        const ctx = crypto.EVP_PKEY_CTX_new(owner.rsa_key, null) orelse return error.EncryptionContextCreation;
-        defer crypto.EVP_PKEY_CTX_free(ctx);
-
-        // logger.debug("created ctx", .{});
-
-        if (crypto.EVP_PKEY_decrypt_init(ctx) <= 0) return error.EncryptionContextCreation;
-        // logger.debug("context reset", .{});
-        if (crypto.EVP_PKEY_CTX_set_rsa_padding(ctx, crypto.RSA_PKCS1_PADDING) <= 0) return error.EncryptionContextCreation;
-        // logger.debug("padding set", .{});
-
-        var len: usize = shared_buffer.len;
-        var res = crypto.EVP_PKEY_decrypt(
-            ctx,
-            &shared_buffer,
-            &len,
-            in_shared_secret.ptr,
-            in_shared_secret.len,
-        );
-        // logger.debug("key size: {d}", .{len});
-        if (res <= 0 or len != shared_secret.len) return error.KeyDecryption;
-        @memcpy(shared_secret, shared_buffer[0..16]);
-        // logger.debug("key decrypted", .{});
-
-        if (crypto.EVP_PKEY_decrypt_init(ctx) <= 0) return error.EncryptionContextCreation;
-        // logger.debug("context reset", .{});
-        if (crypto.EVP_PKEY_CTX_set_rsa_padding(ctx, crypto.RSA_PKCS1_PADDING) <= 0) return error.EncryptionContextCreation;
-        // logger.debug("padding set", .{});
-
-        len = shared_buffer.len;
-        res = crypto.EVP_PKEY_decrypt(
-            ctx,
-            &shared_buffer,
-            &len,
-            verify_token.ptr,
-            verify_token.len,
-        );
-        if (res <= 0 or len != self.verify_token.len) return error.KeyDecryption;
-        // logger.debug("challenge decrypted", .{});
-
-        if (!std.mem.eql(u8, shared_buffer[0..self.verify_token.len], &self.verify_token)) return error.Challenge;
-
-        self.encryption.?.init(.fixed_secret) catch return error.EncryptionSetupFailed;
-    }
-
-    owned: *OwnedConnection,
-    profile: utils.GameProfile,
-    verify_token: [4]u8,
-    encryption: ?*Connection.Encryption = null,
-    compression: ?*Connection.Compression = null,
-
-    @"error": ?LoginError = null,
-};
-
-const ConfigPlayCommon = struct {
-    const keepalive_timeout_ms = 15_000;
-
-    fn getKeepAliveValue() u64 {
-        return @bitCast(Io.Timestamp.now(static_io, .boot).toMilliseconds());
-    }
-    fn getPingValue() u32 {
-        return @truncate(getKeepAliveValue());
-    }
-
-    keep_alive: ?u64,
-    ping: ?u32,
-    latency: u64,
-
-    fn keepAlive(self: *ConfigPlayCommon, conn: *Connection) net.Connection.WritePacketError!void {
-        const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
-
-        const now = getKeepAliveValue();
-        if (self.keep_alive) |ka| {
-            if (now - ka >= keepalive_timeout_ms) {
-                try conn.disconnect(&.timeout);
-            }
-        } else {
-            self.keep_alive = now;
-
-            var arena: std.heap.ArenaAllocator = undefined;
-            const apair = net.PacketType.AllocPair.newFromGpa(owned.owner.allocator, &arena);
-            defer arena.deinit();
-
-            try conn.sendPacket(apair, "keep_alive", net.packets.keep_alive, now);
-        }
-    }
-
-    fn handleCommonPing(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
-        const ping = net.packets.ping_pong;
-        const pack = try ping.readRoot(params, reader);
-        logger.debug("[{f}] Ping: {f}", .{ conn, ping.formatted(pack, params.toAllocPair()) });
-
-        try conn.sendPacket(params.toAllocPair(), "pong", ping, pack);
-    }
-
-    fn handleCommonKeepAlive(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
-        const keep_alive = net.packets.keep_alive;
-        const pack = try keep_alive.readRoot(params, reader);
-        logger.debug("[{f}] Keep Alive: {f}", .{ conn, keep_alive.formatted(pack, params.toAllocPair()) });
-
-        const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
-        const common = switch (owned.data) {
-            .none, .login => unreachable,
-            .config => |c| &c.common,
-        };
-
-        if (common.keep_alive) |ka| {
-            if (pack != ka) return conn.disconnect(&.timeout);
-            const diff = getKeepAliveValue() - ka;
-            common.latency = (common.latency * 3 + diff) / 4;
-            common.keep_alive = null;
-        }
-    }
-};
-
-const ConfigConnection = struct {
-    const vtable = Connection.VTable{
-        .deinit = LoginConnection.deinitImpl,
-        .disconnect = disconnectImpl,
-    };
-
-    fn deinitImpl(conn: *Connection, allocator: Allocator) void {
-        allocator.free(conn.name.?);
-        if (conn.encryption) |enc| {
-            enc.deinit();
-            allocator.destroy(enc);
-        }
-        if (conn.compression) |comp| {
-            allocator.destroy(comp);
-        }
-    }
-
-    fn disconnectImpl(conn: *Connection, reason: *const utils.TextComponent) Connection.WritePacketError!void {
-        const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
-        assert(owned.data == .config);
-
-        const gpa = owned.owner.allocator;
-        var arena: std.heap.ArenaAllocator = .init(gpa);
-        defer arena.deinit();
-        try conn.sendPacket(.newWithArena(gpa, &arena), "disconnect", net.packets.disconnect_s2c, reason.*);
-    }
-
-    owned: *OwnedConnection,
-    common: ConfigPlayCommon,
-    encryption: *Connection.Encryption,
-    compression: *Connection.Compression,
-};
-
 fn coro_acceptConnection(co: *coro.AnyCoroutine, self: *Server, which: enum { v4, v6 }) CoroAccpetError!void {
     const coio = co.io();
 
@@ -383,14 +174,10 @@ fn enableBroadcast(self: *Server) !void {
     try self.broadcast.coro.init(.{}, coro_broadcast, .{self});
     errdefer self.broadcast.coro.deinit();
 
-    try self.poller.addSocket(self.allocator, self.broadcast.socket, .{
-        .out = true,
-        .edge_triggered = true,
-    }, .broadcast);
+    try self.poller.addSocket(self.allocator, self.broadcast.socket, .writeonly, .broadcast);
     errdefer _ = self.poller.removeSocket(self.broadcast.socket);
 
     self.broadcast.enabled = true;
-    self.broadcast.ready = false;
 }
 
 fn deinitBroadcast(self: *Server) void {
@@ -414,14 +201,12 @@ ipv4: Io.net.Ip4Address,
 ipv6: Io.net.Ip6Address,
 broadcast: struct {
     enabled: bool,
-    ready: bool,
     socket: Io.net.Socket,
     last_broadcast: Io.Timestamp,
     coro: coro.Coroutine(BroadcastCoroError!void),
 },
 
 connections: std.HashMapUnmanaged(*Connection, void, Connection.HashContext, std.hash_map.default_max_load_percentage),
-poller_mutex: Io.Mutex,
 poller: coro.polling.Poller(PolledInfo),
 accept_coro: coro.Coroutine(CoroAccpetError!void),
 acceptv6_coro: coro.Coroutine(CoroAccpetError!void),
@@ -459,6 +244,215 @@ pub const AddressAlt = struct {
             try writer.print("({f})", .{v6});
         }
     }
+};
+
+pub const OwnedConnection = struct {
+    const vtable = Connection.VTable{
+        .deinit = deinitImpl,
+    };
+
+    owner: *Server,
+    connection: Connection,
+    data: union(enum) {
+        none,
+        login: *LoginConnection,
+        config: *ConfigConnection,
+    },
+
+    fn deinitImpl(conn: *Connection, allocator: Allocator) void {
+        const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
+
+        switch (owned.data) {
+            .none => {},
+            .login => |loginging| allocator.destroy(loginging),
+            .config => |configing| allocator.destroy(configing),
+        }
+        allocator.destroy(owned);
+    }
+};
+
+pub const LoginConnection = struct {
+    const vtable = Connection.VTable{
+        .deinit = deinitImpl,
+        .disconnect = disconnectImpl,
+    };
+
+    fn deinitImpl(conn: *Connection, allocator: Allocator) void {
+        allocator.free(conn.name.?);
+        if (conn.encryption) |enc| {
+            enc.deinit();
+            allocator.destroy(enc);
+        }
+        if (conn.compression) |comp| {
+            allocator.destroy(comp);
+        }
+        OwnedConnection.deinitImpl(conn, allocator);
+    }
+
+    fn disconnectImpl(conn: *Connection, reason: *const utils.TextComponent) Connection.WritePacketError!void {
+        const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
+        assert(owned.data == .login);
+
+        const gpa = owned.owner.allocator;
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        try conn.sendPacket(.newWithArena(gpa, &arena), "login_disconnect", net.packets.login_disconnect_s2c, reason.*);
+    }
+
+    fn setupEncryption(self: *LoginConnection, owner: *Server, in_shared_secret: []const u8, verify_token: []const u8) LoginError!void {
+        self.encryption = try owner.allocator.create(Connection.Encryption);
+        errdefer {
+            owner.allocator.destroy(self.encryption.?);
+            self.encryption = null;
+        }
+        const shared_secret = &self.encryption.?.shared_secret;
+        var shared_buffer: [128]u8 = undefined;
+
+        const ctx = crypto.EVP_PKEY_CTX_new(owner.rsa_key, null) orelse return error.EncryptionContextCreation;
+        defer crypto.EVP_PKEY_CTX_free(ctx);
+
+        // logger.debug("created ctx", .{});
+
+        if (crypto.EVP_PKEY_decrypt_init(ctx) <= 0) return error.EncryptionContextCreation;
+        // logger.debug("context reset", .{});
+        if (crypto.EVP_PKEY_CTX_set_rsa_padding(ctx, crypto.RSA_PKCS1_PADDING) <= 0) return error.EncryptionContextCreation;
+        // logger.debug("padding set", .{});
+
+        var len: usize = shared_buffer.len;
+        var res = crypto.EVP_PKEY_decrypt(
+            ctx,
+            &shared_buffer,
+            &len,
+            in_shared_secret.ptr,
+            in_shared_secret.len,
+        );
+        // logger.debug("key size: {d}", .{len});
+        if (res <= 0 or len != shared_secret.len) return error.KeyDecryption;
+        @memcpy(shared_secret, shared_buffer[0..16]);
+        // logger.debug("key decrypted", .{});
+
+        if (crypto.EVP_PKEY_decrypt_init(ctx) <= 0) return error.EncryptionContextCreation;
+        // logger.debug("context reset", .{});
+        if (crypto.EVP_PKEY_CTX_set_rsa_padding(ctx, crypto.RSA_PKCS1_PADDING) <= 0) return error.EncryptionContextCreation;
+        // logger.debug("padding set", .{});
+
+        len = shared_buffer.len;
+        res = crypto.EVP_PKEY_decrypt(
+            ctx,
+            &shared_buffer,
+            &len,
+            verify_token.ptr,
+            verify_token.len,
+        );
+        if (res <= 0 or len != self.verify_token.len) return error.KeyDecryption;
+        // logger.debug("challenge decrypted", .{});
+
+        if (!std.mem.eql(u8, shared_buffer[0..self.verify_token.len], &self.verify_token)) return error.Challenge;
+
+        self.encryption.?.init(.fixed_secret) catch return error.EncryptionSetupFailed;
+    }
+
+    owned: *OwnedConnection,
+    profile: utils.GameProfile,
+    verify_token: [4]u8,
+    encryption: ?*Connection.Encryption = null,
+    compression: ?*Connection.Compression = null,
+
+    @"error": ?LoginError = null,
+};
+
+pub const ConfigPlayCommon = struct {
+    const keepalive_timeout_ms = 15_000;
+
+    fn getKeepAliveValue() u64 {
+        return @bitCast(Io.Timestamp.now(static_io, .boot).toMilliseconds());
+    }
+    fn getPingValue() u32 {
+        return @truncate(getKeepAliveValue());
+    }
+
+    keep_alive: ?u64,
+    ping: ?u32,
+    latency: u64,
+
+    fn keepAlive(self: *ConfigPlayCommon, conn: *Connection) net.Connection.WritePacketError!void {
+        const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
+
+        const now = getKeepAliveValue();
+        if (self.keep_alive) |ka| {
+            if (now - ka >= keepalive_timeout_ms) {
+                try conn.disconnect(&.timeout);
+            }
+        } else {
+            self.keep_alive = now;
+
+            var arena: std.heap.ArenaAllocator = undefined;
+            const apair = net.PacketType.AllocPair.newFromGpa(owned.owner.allocator, &arena);
+            defer arena.deinit();
+
+            try conn.sendPacket(apair, "keep_alive", net.packets.keep_alive, now);
+        }
+    }
+
+    fn handleCommonPing(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
+        const ping = net.packets.ping_pong;
+        const pack = try ping.readRoot(params, reader);
+        logger.debug("[{f}] Ping: {f}", .{ conn, ping.formatted(pack, params.toAllocPair()) });
+
+        try conn.sendPacket(params.toAllocPair(), "pong", ping, pack);
+    }
+
+    fn handleCommonKeepAlive(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
+        const keep_alive = net.packets.keep_alive;
+        const pack = try keep_alive.readRoot(params, reader);
+        logger.debug("[{f}] Keep Alive: {f}", .{ conn, keep_alive.formatted(pack, params.toAllocPair()) });
+
+        const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
+        const common = switch (owned.data) {
+            .none, .login => unreachable,
+            .config => |c| &c.common,
+        };
+
+        if (common.keep_alive) |ka| {
+            if (pack != ka) return conn.disconnect(&.timeout);
+            const diff = getKeepAliveValue() - ka;
+            common.latency = (common.latency * 3 + diff) / 4;
+            common.keep_alive = null;
+        }
+    }
+};
+
+pub const ConfigConnection = struct {
+    const vtable = Connection.VTable{
+        .deinit = LoginConnection.deinitImpl,
+        .disconnect = disconnectImpl,
+    };
+
+    fn deinitImpl(conn: *Connection, allocator: Allocator) void {
+        allocator.free(conn.name.?);
+        if (conn.encryption) |enc| {
+            enc.deinit();
+            allocator.destroy(enc);
+        }
+        if (conn.compression) |comp| {
+            allocator.destroy(comp);
+        }
+    }
+
+    fn disconnectImpl(conn: *Connection, reason: *const utils.TextComponent) Connection.WritePacketError!void {
+        const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
+        assert(owned.data == .config);
+
+        const gpa = owned.owner.allocator;
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        try conn.sendPacket(.newWithArena(gpa, &arena), "disconnect", net.packets.disconnect_s2c, reason.*);
+    }
+
+    owned: *OwnedConnection,
+    common: ConfigPlayCommon,
+    encryption: *Connection.Encryption,
+    compression: *Connection.Compression,
 };
 
 pub fn init(self: *Server, options: InitOptions) InitError!void {
@@ -519,14 +513,12 @@ pub fn init(self: *Server, options: InitOptions) InitError!void {
         .ipv6 = if (sockv6) |s| s.socket.address.ip6 else undefined,
         .broadcast = .{
             .enabled = false,
-            .ready = false,
             .socket = undefined,
             .last_broadcast = .zero,
             .coro = undefined,
         },
 
         .connections = .empty,
-        .poller_mutex = .init,
         .poller = poller,
         .accept_coro = undefined,
         .acceptv6_coro = undefined,
@@ -602,19 +594,15 @@ pub fn deinit(self: *Server) void {
 }
 
 pub fn tick(self: *Server) !void {
-    var it = try self.poller.wait(50);
+    var it = try self.poller.wait(30_000);
     while (true) {
         const now = Io.Timestamp.now(static_io, .boot);
 
-        self.poller_mutex.lockUncancelable(self.io);
         if (self.broadcast.enabled and self.broadcast.last_broadcast.durationTo(now).nanoseconds >= broadcast_interval) {
             self.poller.modifySocket(self.broadcast.socket, .writeonly, null);
         }
 
-        const may_ev = it.next();
-        self.poller_mutex.unlock(self.io);
-
-        const ev = may_ev orelse break;
+        const ev = it.next() orelse break;
 
         // logger.debug("Event: {t}, {f}", .{ ev.data, ev.events });
 
@@ -632,20 +620,13 @@ pub fn tick(self: *Server) !void {
             },
             .broadcast => {
                 assert(self.broadcast.enabled);
-                self.broadcast.ready = true;
                 if (try self.broadcast.coro.@"resume"()) {
-                    self.broadcast.enabled = false;
                     _ = self.poller.removeSocket(self.broadcast.socket);
                     net.datagram.close(self.broadcast.socket);
                     self.broadcast.coro.deinit();
-                } else {
-                    self.broadcast.ready = false;
                 }
             },
             .client => |conn| {
-                conn.lockUncancelable(self.io);
-                errdefer conn.unlock(self.io);
-
                 const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
                 assert(owned.owner == self);
 
@@ -710,16 +691,11 @@ pub fn tick(self: *Server) !void {
                     logger.err("[{f}] Disconnected: Timeout", .{conn});
                 }
 
-                errdefer comptime unreachable;
-                conn.unlock(self.io);
-
                 if (ev.events.err or (conn.read_closed and conn.send_queue.last == null) or timedout or
                     ev.events.read_hang_up)
                 {
                     assert(self.connections.remove(conn));
-                    self.poller_mutex.lockUncancelable(self.io);
                     _ = self.poller.removeSocket(conn.getSocket());
-                    self.poller_mutex.unlock(self.io);
                     conn.release(self.allocator);
                     continue;
                 }

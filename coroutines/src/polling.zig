@@ -132,7 +132,7 @@ pub const Events = packed struct {
     edge_triggered: bool = false,
     /// Used by `EPoll` as input.
     ///
-    /// Signals the other end closed end of the connection.
+    /// Signals the other reading end of the connection closed.
     read_hang_up: bool = false,
 
     pub const rw = Events{ .in = true, .out = true };
@@ -485,37 +485,23 @@ pub fn EPoll(comptime Userdata: type) type {
             pub fn next(it: *EventIterator) ?PollEvent(Userdata) {
                 const self = it.self;
 
-                const State = enum { loop, wait };
+                while (true) {
+                    const idx = it.iter;
 
-                // I love state-machines 🤤
-                sw: switch (State.loop) {
-                    .loop => {
-                        if (it.iter >= it.count) continue :sw .wait;
+                    if (idx >= it.count) return null;
 
-                        const idx = it.iter;
-                        const ev = it.events[idx];
-                        it.iter += 1;
+                    const ev = it.events[idx];
+                    it.iter += 1;
 
-                        if (!self.used.isSet(idx)) continue :sw .loop;
+                    if (!self.used.isSet(idx)) continue;
 
-                        const data = self.datas.items[ev.data.ptr];
+                    const data = self.datas.items[ev.data.ptr];
 
-                        return .{
-                            .data = data[1],
-                            .events = fromLinuxEvents(ev.events),
-                        };
-                    },
-                    .wait => {
-                        const n = self.fd.wait(&it.events, it.timeout);
-                        it.count = @min(n, it.events.len);
-                        it.iter = 0;
-
-                        if (it.count > 0) continue :sw .loop;
-
-                        return null;
-                    },
+                    return .{
+                        .data = data[1],
+                        .events = fromLinuxEvents(ev.events),
+                    };
                 }
-                comptime unreachable;
             }
         };
 
@@ -566,11 +552,13 @@ pub fn EPoll(comptime Userdata: type) type {
         }
 
         pub inline fn wait(self: *Self, timeout_ms: i32) WaitError!EventIterator {
-            return .{
+            var it =  EventIterator{
                 .events = undefined,
                 .self = self,
                 .timeout = timeout_ms,
             };
+            it.count = self.fd.wait(&it.events, it.timeout);
+            return it;
         }
 
         //#endregion Common API
