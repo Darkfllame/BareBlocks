@@ -1,12 +1,8 @@
 const DimensionProperties = @This();
 const std = @import("std");
 const utils = @import("utils");
-const core = @import("core.zig");
-const world = core.world;
-
-const bits_for_y = @bitSizeOf(@FieldType(core.BlockPosition, "y"));
-const y_size = (1 << bits_for_y) - 32;
-const max_y = (y_size >> 1) - 1;
+const core = @import("../core.zig");
+const world = @import("world.zig");
 
 flags: Flags,
 coordinate_scale: f64,
@@ -26,12 +22,9 @@ skybox: Skybox,
 cardinal_light: enum { default, nether },
 default_clock: ?utils.Identifier,
 
-pub const height_range = utils.Range(HeightInt).init(16, y_size);
-pub const y_range = utils.Range(HeightInt).init(max_y - y_size + 1, max_y);
-pub const way_y_range = utils.Range(i16).init(
-    @as(comptime_int, y_range.min) << 4,
-    @as(comptime_int, y_range.max) << 4,
-);
+pub const height_range = utils.Range(HeightInt).init(world.min_world_height, world.max_world_height);
+pub const y_range = utils.Range(HeightInt).init(world.min_world_y, world.max_world_y);
+pub const way_y_range =utils.Range(std.math.IntFittingRange(world.way_below_min_y, world.way_above_max_y)).init(world.way_below_min_y, world.way_below_min_y);
 
 pub const overworld = DimensionProperties{
     .flags = .{
@@ -117,7 +110,7 @@ pub const overworld_caves = DimensionProperties{
     .default_clock = .vanilla("overworld"),
 };
 
-pub const HeightInt = @Int(.signed, bits_for_y + 1);
+pub const HeightInt = std.math.IntFittingRange(-1, world.max_world_height);
 
 pub const Skybox = enum { none, overworld, end };
 
@@ -132,7 +125,7 @@ pub inline fn coordScaleTo(self: *const DimensionProperties, other: *const Dimen
     return self.coordinate_scale / other.coordinate_scale;
 }
 
-pub fn buildRange(self: *const DimensionProperties) @Int(.unsigned, bits_for_y) {
+pub fn buildRange(self: *const DimensionProperties) @Int(.unsigned, @bitSizeOf(world.VerticalCoord)) {
     return @intCast(self.height.max - self.height.min + 1);
 }
 

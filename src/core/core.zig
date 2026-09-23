@@ -13,7 +13,6 @@ pub const packets_callback = @import("packets_callback.zig");
 
 pub const Registry = @import("registry.zig").Registry;
 pub const Block = @import("Block.zig");
-pub const DimensionProperties = @import("DimensionProperties.zig");
 pub const Server = @import("Server.zig");
 pub const RefCount = @import("RefCount.zig");
 
@@ -22,15 +21,7 @@ pub const FloatProvider = value_providers.FloatProvider;
 
 pub const logger = std.log.scoped(.bare_blocks);
 
-pub const BlockPosition = packed struct(u64) {
-    x: i26 = 0,
-    z: i26 = 0,
-    y: i12 = 0,
-
-    pub fn format(self: BlockPosition, writer: *Writer) Writer.Error!void {
-        return writer.print("{{ {d}, {d}, {d}}}", .{ self.x, self.y, self.z });
-    }
-};
+pub const BlockPosition = world.PackedBlockPos;
 
 pub const Direction = enum {
     down,

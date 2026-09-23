@@ -3,9 +3,9 @@ const std = @import("std");
 const utils = @import("utils");
 const core = @import("../core.zig");
 const world = @import("world.zig");
+const DimensionProperties = @import("DimensionProperties.zig");
 
 const Block = core.Block;
-const DimensionProperties = core.DimensionProperties;
 const Allocator = std.mem.Allocator;
 
 const assert = std.debug.assert;
