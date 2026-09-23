@@ -116,6 +116,12 @@ pub const UUID = extern union {
         }
     };
 
+    pub fn fromBytes(bytes: *const [16]u8, endianness: std.builtin.Endian) UUID {
+        var res = UUID{.bytes = bytes.*};
+        if (endianness != std.builtin.Endian.native) res.value = @byteSwap(res.value);
+        return res;
+    }
+
     pub fn parse(str: *const [stringified_length]u8) error{InvalidCharacter}!UUID {
         const sections: [5][2]usize = .{
             .{ 0, 8 },

@@ -86,6 +86,30 @@ pub fn Range(comptime T: type) type {
     };
 }
 
+pub fn OptionalData(comptime T: type, comptime exists: bool) type {
+    return struct {
+        const Self = @This();
+
+        value: if (exists) T else void,
+
+        pub fn init(value: T) Self {
+            return .{ .value = if (exists) value };
+        }
+
+        pub fn get(self: *Self) ?T {
+            return if (exists) self.value else null;
+        }
+
+        pub fn getPtr(self: *Self) ?*T {
+            return if (exists) &self.value else null;
+        }
+
+        pub fn getPtrConst(self: *const Self) ?*const T {
+            return if (exists) &self.value else null;
+        }
+    };
+}
+
 pub const Utf8Iterator = struct {
     bytes: []const u8,
     i: usize,
