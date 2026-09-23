@@ -510,7 +510,6 @@ last_packet_timestamp: Io.Timestamp,
 
 timeout: Io.Duration,
 
-write_ready: bool,
 write_buffer: [writer_buffer_size]u8,
 writer: Io.Writer,
 write_error: ?StreamWriteError,
@@ -749,7 +748,6 @@ pub fn init(self: *Connection, allocator: Allocator, options: InitOptions) InitE
         .last_packet_timestamp = Io.Timestamp.now(static_io, .boot),
         .timeout = options.timeout,
 
-        .write_ready = false,
         .write_buffer = undefined,
         .writer = .{
             .vtable = &writer_vtable,
