@@ -493,7 +493,29 @@ pub const MapWriter = struct {
     }
 
     pub inline fn serialize(self: *MapWriter, value: anytype) WriteError!void {
-        return value.serialize(self);
+        return self.serializeNamed("serialize", value);
+    }
+
+    pub inline fn serializeNamed(self: *MapWriter, comptime name: []const u8, value: anytype) WriteError!void {
+        // All this bs just to call a method like, why
+        const V = @TypeOf(value);
+        const v_info = @typeInfo(V);
+        const meth = @field(V, name);
+        const info = comptime sw: switch (@typeInfo(@TypeOf(meth))) {
+            .@"fn" => |f| f,
+            .pointer => |p| switch (@typeInfo(p.child)) {
+                .@"fn" => |f| f,
+                else => continue :sw .bool,
+            },
+            else => @compileError("\"" ++ name ++ "\" Not a method of " ++ @typeName(V)),
+        };
+        const param0_info = @typeInfo(info.params[0].type.?);
+        const value_self = switch (param0_info) {
+            .pointer => if (v_info == .pointer) value else &value,
+            else => if (v_info == .pointer) value.* else value,
+        };
+
+        return meth(value_self, self);
     }
 };
 
@@ -582,7 +604,11 @@ pub const MapReader = struct {
     }
 
     pub inline fn deserialize(self: *MapReader, comptime T: type) ReadError!T {
-        return T.deserialize(self);
+        return self.deserializeNamed(T, "deserialize");
+    }
+
+    pub inline fn deserializeNamed(self: *MapReader, comptime T: type, comptime name: []const u8) ReadError!T {
+        return @field(T, name)(self);
     }
 
     pub fn mapToWriter(self: *MapReader, comptime max_depth: usize, mapw: *MapWriter) (MapWriter.WriteError || ReadError)!void {
