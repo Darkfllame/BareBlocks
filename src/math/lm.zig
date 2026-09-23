@@ -115,6 +115,9 @@ pub fn Vec(comptime T: type, comptime DIM: comptime_int) type {
 
         fn convert(v: anytype, comptime get_value: bool) if (get_value) Self else bool {
             const V = @TypeOf(v);
+            if (V == Self) {
+                return if (get_value) v else true;
+            }
             if (isVec(V)) {
                 const vDIM = comptime @as(V, undefined).data.len;
                 if (get_value) {
@@ -423,7 +426,7 @@ pub fn Vec(comptime T: type, comptime DIM: comptime_int) type {
         /// **Returns**: The unit vector of `self`.
         pub fn normalize(self: Self) Self {
             if (self.length2() == 0) return zero;
-            return self.div(.from(self.length()));
+            return self.div(.newUniform(self.length()));
         }
 
         /// **Returns**: The homogeneous vector of `self`.
@@ -436,15 +439,15 @@ pub fn Vec(comptime T: type, comptime DIM: comptime_int) type {
         /// **Note**:
         /// - Uses `from` to convert `b` to `Self`.
         pub fn add(self: Self, b: Self) Self {
-            return from(self.vec + b.vec);
+            return .{.vec=self.vec + b.vec};
         }
         /// **Note**:
         /// - Uses `from` to convert `b` to `Self`.
         pub fn sub(self: Self, b: Self) Self {
-            return from(self.vec - b.vec);
+            return .{.vec=self.vec - b.vec};
         }
         pub fn neg(self: Self) Self {
-            return from(-self.vec);
+            return .{.vec=-self.vec};
         }
         /// **Note**:
         /// - Uses `from` to convert `b` to `Self`.
@@ -454,19 +457,19 @@ pub fn Vec(comptime T: type, comptime DIM: comptime_int) type {
         /// **Note**:
         /// - Uses `from` to convert `b` to `Self`.
         pub fn div(self: Self, b: Self) Self {
-            return from(self.vec / b.vec);
+            return .{.vec=self.vec / b.vec};
         }
         pub fn mod(self: Self, b: Self) Self {
-            return from(@mod(self.vec, b.vec));
+            return .{.vec=@mod(self.vec, b.vec)};
         }
         pub fn rem(self: Self, b: Self) Self {
-            return from(@rem(self.vec, b.vec));
+            return .{.vec=@rem(self.vec, b.vec)};
         }
         pub fn min(self: Self, b: Self) Self {
-            return from(@min(self.vec, b.vec));
+            return .{.vec=@min(self.vec, b.vec)};
         }
         pub fn max(self: Self, b: Self) Self {
-            return from(@max(self.vec, from(b).vec));
+            return .{.vec=@max(self.vec, b.vec)};
         }
         pub fn componentMin(self: Self) T {
             return @reduce(.Min, self.vec);
@@ -475,16 +478,16 @@ pub fn Vec(comptime T: type, comptime DIM: comptime_int) type {
             return @reduce(.Max, self.vec);
         }
         pub fn abs(self: Self) Self {
-            return from(@abs(self.vec));
+            return .{.vec=@abs(self.vec)};
         }
         pub fn round(self: Self) Self {
-            return from(@round(self.vec));
+            return .{.vec=@round(self.vec)};
         }
         pub fn floor(self: Self) Self {
-            return from(@floor(self.vec));
+            return .{.vec=@floor(self.vec)};
         }
         pub fn ceil(self: Self) Self {
-            return from(@ceil(self.vec));
+            return .{.vec=@ceil(self.vec)};
         }
 
         /// Checks raw equality (no threshold for floats).
@@ -505,7 +508,7 @@ pub fn Vec(comptime T: type, comptime DIM: comptime_int) type {
         }
 
         pub fn lerp(self: Self, b: Self, t: T) Self {
-            return self.add(b.sub(self).mul(.from(t)));
+            return self.add(b.sub(self).mul(.newUniform(t)));
         }
     };
 }
@@ -562,6 +565,9 @@ pub fn Mat(comptime T: type, comptime DIM: comptime_int) type {
             const V = @TypeOf(v);
             const tinfo = @typeInfo(V);
             var result: Self = zero;
+            if (V == Self) {
+                return if (get_value) v else true;
+            }
             if (isMat(V)) {
                 if (!get_value) return true;
                 const vDim = comptime sqrt(@as(V, undefined).fields.len);
@@ -703,11 +709,10 @@ pub fn Mat(comptime T: type, comptime DIM: comptime_int) type {
         }
 
         pub fn newTranslation(xyz: Vec3T) Mat4T {
-            const vec = Vec3T.from(xyz);
             return Mat4T.new(.{
-                1, 0, 0, vec.x(),
-                0, 1, 0, vec.y(),
-                0, 0, 1, vec.z(),
+                1, 0, 0, xyz.x(),
+                0, 1, 0, xyz.y(),
+                0, 0, 1, xyz.z(),
                 0, 0, 0, 1,
             });
         }
@@ -740,7 +745,7 @@ pub fn Mat(comptime T: type, comptime DIM: comptime_int) type {
         }
         /// **Parameters**:
         /// - `fovY`: The vertical field of view angle (in radians).
-        /// - `aspect`: The aspect ratio of the screen (height / width).
+        /// - `aspect`: The aspect ratio of the screen (width / height).
         /// - `near`: The near clip-plane of the projection matrix.
         /// - `far`: The far clip-plane of the projection matrix.
         ///
@@ -751,10 +756,10 @@ pub fn Mat(comptime T: type, comptime DIM: comptime_int) type {
             const invTanHalfFovY = 1 / @tan(fovY / 2);
 
             return Mat4T.new(.{
-                aspect * invTanHalfFovY, 0,              0,                  0,
-                0,                       invTanHalfFovY, 0,                  0,
-                0,                       0,              far / (far - near), (-far * near) / (far - near),
-                0,                       0,              1,                  0,
+                invTanHalfFovY, 0,                       0,                     0,
+                0,              aspect * invTanHalfFovY, 0,                     0,
+                0,              0,                       -(far / (far - near)), (-2 * far * near) / (far - near),
+                0,              0,                       -1,                    0,
             });
         }
         pub fn newOrthogonal(left: T, right: T, bottom: T, top: T, near: T, far: T) Mat4T {
@@ -1105,7 +1110,7 @@ pub fn Quat(comptime T: type) type {
             const half_rads = rads / 2;
             return fromVec(
                 @cos(half_rads),
-                axis.normalize().mul(.from(@sin(half_rads))),
+                axis.normalize().mul(.newUniform(@sin(half_rads))),
             );
         }
 
@@ -1463,10 +1468,10 @@ test "Quat.normalize" {
 }
 
 test "Quat.fromEuler" {
-    const a = Quat(f32).fromEuler(Vec3f.new(10, 5, 45).mul(.from(math.rad_per_deg)));
+    const a = Quat(f32).fromEuler(Vec3f.new(10, 5, 45).mul(.newUniform(math.rad_per_deg)));
     const a_res = a.toEuler();
 
-    const b = Quat(f32).fromEuler(Vec3f.new(0, 55, 22).mul(.from(math.rad_per_deg)));
+    const b = Quat(f32).fromEuler(Vec3f.new(0, 55, 22).mul(.newUniform(math.rad_per_deg)));
     const b_res = b.toEuler();
 
     try testing.expect(Vec3f.approxEqRel(
