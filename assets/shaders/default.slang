@@ -5,15 +5,24 @@ struct VertexInput {
     float3 color;
 };
 
+struct PCData {
+    float4x4 proj;
+    float4x4 view;
+    float4x4 model;
+}
+
 struct VertexOutput {
     float4 sv_position : SV_Position;
     float3 color;
 };
 
+[vk_push_constant]
+PCData pcd;
+
 [shader("vertex")]
-VertexOutput vertexMain(VertexInput in, uint vid : SV_VertexID) {
+VertexOutput vertexMain(VertexInput in) {
     VertexOutput output;
-    output.sv_position = float4(in.position, 1.0);
+    output.sv_position = mul(mul(mul(pcd.proj, pcd.view), pcd.model), float4(in.position, 1.0));
     output.color = in.color;
     return output;
 }
@@ -21,5 +30,5 @@ VertexOutput vertexMain(VertexInput in, uint vid : SV_VertexID) {
 [shader("fragment")]
 float4 fragmentMain(VertexOutput vout) : SV_Target
 {
-    return float4(vout.color, 1.0);
+    return float4(vout.color, 0.5);
 }

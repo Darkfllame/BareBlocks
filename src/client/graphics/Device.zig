@@ -2,6 +2,7 @@ const Device = @This();
 const std = @import("std");
 const vk = @import("vulkan");
 const MemoryManager = @import("MemoryManager.zig");
+const VMA = @import("VMA.zig");
 
 const assert = std.debug.assert;
 
@@ -271,6 +272,11 @@ fn createLogicalDevice(self: *Device, gpa: Allocator, wrapper: *vk.DeviceWrapper
             @field(self.queue_family_indices, f.name),
             @field(queue_indices, f.name),
         );
+        self.proxy.setDebugUtilsObjectNameEXT(&vk.DebugUtilsObjectNameInfoEXT{
+            .object_type = .queue,
+            .object_handle = @intFromPtr(@field(self.queues, f.name)),
+            .p_object_name = f.name.ptr,
+        }) catch {};
     }
 }
 

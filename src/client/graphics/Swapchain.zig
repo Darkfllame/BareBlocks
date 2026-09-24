@@ -184,14 +184,14 @@ fn destroySyncObjects(self: *Swapchain, allocator: Allocator, set: SyncObjectsSe
     for (set.psems[0..self.max_frames_in_flight]) |s| {
         self.vk_device.destroySemaphore(s, null);
     }
-    for (set.pfences[0..self.max_frames_in_flight]) |f| {
+    for (set.pfences[0 .. self.max_frames_in_flight * 2]) |f| {
         self.vk_device.destroyFence(f, null);
     }
     allocator.free(set.cmd_buffers[0..img_count]);
     allocator.free(set.tcmd_buffers[0..img_count]);
     allocator.free(set.rsems[0..img_count]);
     allocator.free(set.psems[0..self.max_frames_in_flight]);
-    allocator.free(set.pfences[0..self.max_frames_in_flight]);
+    allocator.free(set.pfences[0 .. self.max_frames_in_flight * 2]);
 }
 
 fn recreateSwapchain(self: *Swapchain, allocator: Allocator, vsync: VsyncMode) !void {
@@ -396,7 +396,7 @@ tcmd_buffers: [*]vk.CommandBuffer,
 render_semaphores: [*]vk.Semaphore,
 /// `len = max_frames_in_flight`
 present_semaphores: [*]vk.Semaphore,
-/// `len = max_frames_in_flight`
+/// `len = max_frames_in_flight * 2`
 presentation_fences: [*]vk.Fence,
 image_index: u32,
 current_frame: u8,
@@ -457,23 +457,7 @@ pub fn deinit(self: *Swapchain, allocator: Allocator) void {
     }
     self.device.queueWaitIdle(.present);
     self.deinitSwapchain(allocator);
-    for (self.render_semaphores[0 .. self.image_count * self.max_frames_in_flight]) |sem| {
-        self.vk_device.destroySemaphore(sem, null);
-    }
-    for (0..self.max_frames_in_flight) |i| {
-        self.vk_device.destroySemaphore(self.present_semaphores[i], null);
-        self.vk_device.destroyFence(self.presentation_fences[i * 2], null);
-        self.vk_device.destroyFence(self.presentation_fences[i * 2 + 1], null);
-    }
-    self.vk_device.freeCommandBuffers(self.device.command_pool, self.command_buffers[0 .. self.image_count * self.max_frames_in_flight]);
-    if (self.surface != .null_handle) {
-        self.device.instance.destroySurfaceKHR(self.surface, null);
-    }
-
-    allocator.free(self.command_buffers[0 .. self.image_count * self.max_frames_in_flight]);
-    allocator.free(self.render_semaphores[0 .. self.image_count * self.max_frames_in_flight]);
-    allocator.free(self.present_semaphores[0..self.max_frames_in_flight]);
-    allocator.free(self.presentation_fences[0 .. self.max_frames_in_flight * 2]);
+    self.destroySyncObjects(allocator, self.getSyncObjects());
 }
 
 pub fn recreate(self: *Swapchain, allocator: Allocator, options: RecreateOptions) !void {
@@ -645,9 +629,6 @@ pub fn cancelDraw(self: *Swapchain) void {
 
     const cmd = self.getCommandBuffer();
     cmd.resetCommandBuffer(.{}) catch unreachable;
-    // TODO: Gracefully cancel a frame on potential error, clearing any
-    // TODO: fences, semaphore and command buffers without triggering the
-    // TODO: validation layer.
 }
 
 pub fn endDraw(self: *Swapchain, allocator: Allocator) !void {
@@ -696,7 +677,7 @@ pub fn endDraw(self: *Swapchain, allocator: Allocator) !void {
         error.Unknown => unreachable,
     };
     retry_loop: while (true) {
-        _ = pqueue.presentKHR(&vk.PresentInfoKHR{
+        const res = pqueue.presentKHR(&vk.PresentInfoKHR{
             .wait_semaphore_count = 1,
             .p_wait_semaphores = self.render_semaphores[frame_index..],
             .swapchain_count = 1,
@@ -721,6 +702,14 @@ pub fn endDraw(self: *Swapchain, allocator: Allocator) !void {
             error.PresentTimingQueueFullEXT => unreachable,
             error.Unknown => unreachable,
         };
+        switch (res) {
+            .success => {},
+            .suboptimal_khr => {
+                logger.debug("Sub-optimal swapchain", .{});
+            },
+            else => unreachable,
+        }
+        break;
     }
     self.current_frame = (self.current_frame + 1) % self.max_frames_in_flight;
 }
