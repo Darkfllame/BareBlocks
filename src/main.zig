@@ -7,13 +7,22 @@ const Io = std.Io;
 
 var ert_buf: [8 * 1024]usize = undefined;
 
+pub const std_options = std.Options{
+    .log_scope_levels = &.{
+        // .{ .scope = .@"core/server", .level = .info },
+        // .{ .scope = .net, .level = .err },
+    },
+};
+
 pub fn main(init: std.process.Init) !void {
-    var server = try init.gpa.create(core.Server);
-    defer init.gpa.destroy(server);
+    try utils.translation.init(init.arena.allocator());
 
     if (@errorReturnTrace()) |ert| {
         ert.instruction_addresses = &ert_buf;
     }
+
+    var server = try init.gpa.create(core.Server);
+    defer init.gpa.destroy(server);
 
     // Should take no memory except in debug mode
 

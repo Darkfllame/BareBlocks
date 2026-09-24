@@ -130,7 +130,7 @@ fn coro_acceptConnection(co: *coro.AnyCoroutine, self: *Server, which: enum { v4
         try self.poller.addSocket(self.allocator, conn.getSocket(), .{
             .in = true,
             .out = true,
-            // .edge_triggered = true,
+            .edge_triggered = true,
             .read_hang_up = true,
         }, .{ .client = conn });
 
@@ -594,7 +594,8 @@ pub fn deinit(self: *Server) void {
 }
 
 pub fn tick(self: *Server) !void {
-    var it = try self.poller.wait(30_000);
+    const timeout: i32 = if (self.connections.count() == 0) 30_000 else 50;
+    var it = try self.poller.wait(timeout);
     while (true) {
         const now = Io.Timestamp.now(static_io, .boot);
 
@@ -604,7 +605,7 @@ pub fn tick(self: *Server) !void {
 
         const ev = it.next() orelse break;
 
-        // logger.debug("Event: {t}, {f}", .{ ev.data, ev.events });
+        logger.debug("Event: {t}, {f}", .{ ev.data, ev.events });
 
         switch (ev.data) {
             .server, .serverv6 => {
@@ -627,76 +628,100 @@ pub fn tick(self: *Server) !void {
                 }
             },
             .client => |conn| {
-                const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
-                assert(owned.owner == self);
+                conn.lockUncancelable(self.io);
+                defer conn.unlock(self.io);
 
-                try conn.tickSecond();
-
-                // if (use_epoll) self.poll_wait_info.event_count += 1;
-                // logger.debug("[{f}] Event: {f}", .{ conn, ev.events });
-                var handled_disc = false;
-                if (ev.events.in) {
-                    const res = conn.read_coro.@"resume"();
-                    // logger.debug("[{f}] Read result: {!}", .{ conn, res });
-                    if (res) |finished| {
-                        assert(!finished or conn.read_closed);
-                    } else |err| {
-                        const err2 = conn.handler_error orelse err;
-
-                        switch (err2) {
-                            error.CallbackHandlerFailed => {
-                                const mixed_err = switch (owned.data) {
-                                    .none, .config => error.Unknown,
-                                    .login => |l| l.@"error".?,
-                                };
-
-                                logger.err("[{f}] Connection closed: {t}", .{ conn, mixed_err });
-                            },
-                            error.Disconnected => logger.info("[{f}] Disconnected", .{conn}),
-                            else => logger.err("[{f}] Connection closed: {t}", .{ conn, err2 }),
-                        }
-
-                        conn.read_coro.deinit();
-                        conn.read_coro = .initFinished({});
-                        conn.shutdown(.recv) catch |e| {
-                            logger.err("[{f}] Failed to shutdown connection: {t}", .{ conn, e });
-                        };
-                        handled_disc = true;
-                    }
+                if (!conn.read_closed and ev.events.in and !ev.events.hang_up) {
+                    conn.read_ready = true;
+                } else if (ev.events.hang_up) {
+                    conn.shutdown(.recv) catch {};
                 }
 
-                if (ev.events.out and !ev.events.read_hang_up and conn.send_queue.last != null) {
-                    // if (tagged.tag == .login) @breakpoint();
-                    if (conn.write_coro.@"resume"()) |finished| {
-                        assert(!finished or conn.write_closed);
-                    } else |err| {
-                        logger.err("[{f}] Connection closed: {t}", .{ conn, err });
-                        conn.write_coro.deinit();
-                        conn.write_coro = .initFinished({});
-                        conn.shutdown(.send) catch |e| {
-                            logger.err("[{f}] Failed to shutdown connection: {t}", .{ conn, e });
-                        };
-                        handled_disc = true;
-                    }
+                if (!conn.write_closed and ev.events.out and !ev.events.read_hang_up) {
+                    conn.write_ready = true;
+                } else if (ev.events.read_hang_up) {
+                    conn.shutdown(.send) catch {};
                 }
 
                 const time_since_last_packet = conn.last_packet_timestamp.durationTo(now);
                 const timedout = time_since_last_packet.nanoseconds >= conn.timeout.nanoseconds;
 
-                if (timedout and !handled_disc) {
-                    logger.err("[{f}] Disconnected: Timeout", .{conn});
-                }
-
-                if (ev.events.err or (conn.read_closed and conn.send_queue.last == null) or timedout or
-                    ev.events.read_hang_up)
-                {
-                    assert(self.connections.remove(conn));
-                    _ = self.poller.removeSocket(conn.getSocket());
-                    conn.release(self.allocator);
-                    continue;
+                if (timedout) {
+                    conn.disconnect(.{ .static = &.timeout });
+                } else if (conn.read_closed and conn.send_queue.last == null and ev.events.hang_up) {
+                    conn.disconnect(.normal);
+                } else if (ev.events.err or (ev.events.read_hang_up and !conn.read_ready)) {
+                    conn.disconnect(.{ .static = &.disconnect_generic });
                 }
             },
         }
+    }
+
+    var conn_it = self.connections.keyIterator();
+    while (conn_it.next()) |conn_ptr| {
+        const conn = conn_ptr.*;
+        conn.lockUncancelable(self.io);
+        errdefer comptime unreachable;
+
+        const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
+        assert(owned.owner == self);
+
+        conn.tickSecond();
+
+        if (conn.read_ready) {
+            const res = conn.read_coro.@"resume"();
+            // logger.debug("[{f}] Read result: {!}", .{ conn, res });
+            if (res) |finished| {
+                assert(!finished or conn.read_closed);
+            } else |err| {
+                const err2 = conn.handler_error orelse err;
+
+                switch (err2) {
+                    error.CallbackHandlerFailed => {
+                        const mixed_err = switch (owned.data) {
+                            .none, .config => error.Unknown,
+                            .login => |l| l.@"error".?,
+                        };
+
+                        conn.disconnect(.{ .static = &.text(@errorName(mixed_err), .{}) });
+                    },
+                    error.Disconnected => conn.disconnect(.normal),
+                    else => conn.disconnect(.{ .static = &.text(@errorName(err2), .{}) }),
+                }
+
+                conn.read_coro.deinit();
+                conn.read_coro = .initFinished({});
+                conn.shutdown(.recv) catch {};
+            }
+            conn.read_ready = false;
+        }
+
+        if (conn.write_ready and conn.send_queue.last != null) {
+            // if (tagged.tag == .login) @breakpoint();
+            if (conn.write_coro.@"resume"()) |finished| {
+                assert(!finished or conn.write_closed);
+            } else |err| {
+                conn.disconnect(.{ .static = &.text(@errorName(err), .{}) });
+                conn.write_coro.deinit();
+                conn.write_coro = .initFinished({});
+                conn.shutdown(.send) catch {};
+            }
+            conn.write_ready = false;
+        }
+
+        switch (conn.disconnection_reason) {
+            .none => {
+                @branchHint(.likely);
+                conn.unlock(self.io);
+                continue;
+            },
+            .normal => logger.info("[{f}] Disconnected", .{conn}),
+            .reason => |*dc| logger.err("[{f}] Disconnected: {f}", .{ conn, dc }),
+        }
+        _ = self.poller.removeSocket(conn.getSocket());
+        assert(self.connections.remove(conn));
+        conn.unlock(self.io);
+        conn.release(self.allocator);
     }
 }
 
@@ -720,7 +745,7 @@ pub fn handleHandshake(conn: *Connection, reader: *Io.Reader, params: net.Packet
         .login => {
             conn.reconfigure(.{ .out_phase = .login });
             if (pack.protocol_version != current_version.protocol) {
-                try conn.disconnect(&.translate("multiplayer.status.incompatible", .{}));
+                conn.disconnect(.{ .static = &.translate("multiplayer.status.incompatible", .{}) });
                 return error.CallbackHandlerFailed;
             }
             conn.reconfigure(.{
@@ -731,7 +756,7 @@ pub fn handleHandshake(conn: *Connection, reader: *Io.Reader, params: net.Packet
         .transfer,
         => {
             conn.reconfigure(.{ .out_phase = .login });
-            try conn.disconnect(&.transfers_disabled); // TODO: transfers ?
+            conn.disconnect(.{ .static = &.transfers_disabled });
             return error.CallbackHandlerFailed;
         },
     }
@@ -779,12 +804,12 @@ pub fn handleLoginHello(conn: *Connection, reader: *Io.Reader, params: net.Packe
     const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
     if (owned.data != .none) {
         const logingin = owned.data.login;
-        try conn.disconnect(&.translate("disconnect.packetError", .{ .common = .{
+        conn.disconnect(.{ .static = &.translate("disconnect.packetError", .{ .common = .{
             .children = &.{
                 .text(": ", .{}),
                 .text("Double hello", .{}),
             },
-        } }));
+        } }) });
         logingin.@"error" = error.DoubleHello;
         return error.CallbackHandlerFailed;
     }
@@ -843,20 +868,20 @@ pub fn handleLoginKey(conn: *Connection, reader: *Io.Reader, params: net.PacketT
     const logingin = switch (owned.data) {
         .config => unreachable,
         .none => {
-            try conn.disconnect(&.text("Client didn't initialize login", .{ .color = .red }));
+            conn.disconnect(.{ .static = &.text("Client didn't initialize login", .{ .color = .red }) });
             return;
         },
         .login => |l| l,
     };
     if (logingin.encryption != null) {
-        try conn.disconnect(encryption_setup_failed_tc);
+        conn.disconnect(.{ .static = encryption_setup_failed_tc });
         logingin.@"error" = error.EncryptionAlreadySet;
         return error.CallbackHandlerFailed;
     }
 
     logingin.setupEncryption(owner, pack.shared_secret, pack.verify_token) catch |e| {
         logingin.encryption = null;
-        try conn.disconnect(encryption_setup_failed_tc);
+        conn.disconnect(.{ .static = encryption_setup_failed_tc });
         logingin.@"error" = e;
         return error.CallbackHandlerFailed;
     };
@@ -899,12 +924,12 @@ pub fn handleLoginAck(conn: *Connection, reader: *Io.Reader, params: net.PacketT
     const loginging = owned.data.login;
 
     if (loginging.encryption == null) {
-        try conn.disconnect(&.translate("disconnect.packetError", .{ .common = .{
+        conn.disconnect(.{ .static = &.translate("disconnect.packetError", .{ .common = .{
             .children = &.{
                 .text(": ", .{}),
                 .text("Hello packet wasn't sent", .{}),
             },
-        } }));
+        } }) });
         loginging.@"error" = error.HelloMissing;
         return error.CallbackHandlerFailed;
     }

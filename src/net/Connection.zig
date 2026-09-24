@@ -91,6 +91,7 @@ fn decryptStream(io_r: *Io.Reader, io_w: *Io.Writer, limit: Io.Limit) Io.Reader.
     const conn: *Connection = @alignCast(@fieldParentPtr("decrypt_reader", io_r));
     const enc = conn.encryption.?;
     if (limit == .nothing) return 0;
+    if (conn.read_closed) return error.EndOfStream;
 
     const dest = try io_w.writableSliceGreedy(1);
     const encrypted = try conn.reader.peekGreedy(1);
@@ -245,36 +246,25 @@ fn coro_readConnection(co: *coro.AnyCoroutine, self: *Connection, allocator: All
             logger.warn("[{f}] Failed to reset arena allocator", .{self});
         }
     }) {
-        self.readConnection(allocator, &read_arena) catch |e| {
-            const real_err = switch (e) {
+        self.readConnection(allocator, &read_arena) catch |e| return switch (e) {
+            error.Canceled => break,
+            error.ReadFailed => if (self.read_error) |rerr| switch (rerr) {
                 error.Canceled => break,
-                error.ReadFailed => if (self.read_error) |rerr| switch (rerr) {
-                    error.Canceled => break,
-                    error.SocketUnconnected, error.NetworkDown => error.Disconnected,
-                    error.SystemResources, error.ConnectionResetByPeer, error.Timeout, error.DecryptionFailed => |err| err,
-                    error.AccessDenied, error.Unexpected => unreachable,
-                } else error.CallbackHandlerFailed,
-                error.EndOfStream => if (self.read_closed) break else error.EndOfStream,
-                error.CallbackHandlerFailed,
-                error.Disconnected,
-                error.DecompressionFailed,
-                error.LegacyHandshake,
-                error.PacketTooSmall,
-                error.PacketTooLarge,
-                error.InvalidLength,
-                error.InvalidPacketID,
-                error.OutOfMemory,
-                => |err| err,
-            };
-
-            if (real_err != error.Disconnected) {
-                self.disconnect(&.text("Server caught error: ", .{ .children = &.{
-                    .text(@errorName(real_err), .{}),
-                } })) catch {};
-            }
-            self.shutdown(.recv) catch {};
-
-            return real_err;
+                error.SocketUnconnected, error.NetworkDown => error.Disconnected,
+                error.SystemResources, error.ConnectionResetByPeer, error.Timeout, error.DecryptionFailed => |err| err,
+                error.AccessDenied, error.Unexpected => unreachable,
+            } else error.CallbackHandlerFailed,
+            error.EndOfStream => if (self.read_closed) break else error.EndOfStream,
+            error.CallbackHandlerFailed,
+            error.Disconnected,
+            error.DecompressionFailed,
+            error.LegacyHandshake,
+            error.PacketTooSmall,
+            error.PacketTooLarge,
+            error.InvalidLength,
+            error.InvalidPacketID,
+            error.OutOfMemory,
+            => |err| err,
         };
     }
 }
@@ -382,7 +372,9 @@ fn readConnection(self: *Connection, gpa: Allocator, arena_alloc: *std.heap.Aren
         w.print("Couldn't read packet: \"{t}bound/{t}/{s}\" (id: 0x{x:0>2}): Work In Progress", .{
             curr_side, self.in_phase, entry.resource, pid,
         }) catch {};
-        self.disconnect(&.text(w.buffered(), .{})) catch {};
+        self.disconnect(.{ .copied = .{
+            gpa, &.text(w.buffered(), .{}),
+        } });
         return error.InvalidPacketID;
     };
 
@@ -471,6 +463,10 @@ fn deinit(self: *Connection, allocator: Allocator) void {
     self.write_coro.deinit();
     while (self.popPacket()) |packet| allocator.free(packet.getBytes());
     static_io.vtable.netClose(static_io.userdata, (&self.stream_handle)[0..1]);
+    switch (self.disconnection_reason) {
+        .none, .normal => {},
+        .reason => |dc| dc.deinit(allocator),
+    }
 
     self.vtable.deinit(self, allocator);
 }
@@ -494,12 +490,13 @@ rate_limited: ?*RateLimited,
 compression: ?*Compression,
 encryption: ?*Encryption,
 
-read_closed: bool,
-write_closed: bool,
-disconnect_done: bool,
+disconnection_reason: union(enum) { none, normal, reason: TextComponent },
 stream_handle: Io.net.Socket.Handle,
 ip_address: Io.net.IpAddress,
+timeout: Io.Duration,
 
+read_closed: bool,
+read_ready: bool,
 read_buffer: [reader_buffer_size]u8,
 reader: Io.Reader,
 decrypt_reader: Io.Reader,
@@ -508,8 +505,8 @@ handler_error: ?ReadCallbackError,
 read_coro: coro.Coroutine(CoroReadError!void),
 last_packet_timestamp: Io.Timestamp,
 
-timeout: Io.Duration,
-
+write_closed: bool,
+write_ready: bool,
 write_buffer: [writer_buffer_size]u8,
 writer: Io.Writer,
 write_error: ?StreamWriteError,
@@ -704,6 +701,12 @@ pub const VTable = struct {
     deinit: *const DeinitCallbackFn = noDeinit,
 };
 
+pub const DisconnectReason = union(enum) {
+    normal,
+    static: *const TextComponent,
+    copied: struct { Allocator, *const TextComponent },
+};
+
 /// `allocator` must remain valid until this connection is deinitalized
 pub fn init(self: *Connection, allocator: Allocator, options: InitOptions) InitError!void {
     self.* = .{
@@ -723,12 +726,13 @@ pub fn init(self: *Connection, allocator: Allocator, options: InitOptions) InitE
         .compression = options.compression,
         .encryption = options.encryption,
 
-        .read_closed = false,
-        .write_closed = false,
-        .disconnect_done = false,
+        .disconnection_reason = .none,
         .stream_handle = options.stream.socket.handle,
         .ip_address = options.stream.socket.address,
+        .timeout = options.timeout,
 
+        .read_closed = false,
+        .read_ready = false,
         .read_buffer = undefined,
         .reader = .{
             .vtable = &reader_vtable,
@@ -746,8 +750,9 @@ pub fn init(self: *Connection, allocator: Allocator, options: InitOptions) InitE
         .handler_error = null,
         .read_coro = undefined,
         .last_packet_timestamp = Io.Timestamp.now(static_io, .boot),
-        .timeout = options.timeout,
 
+        .write_closed = false,
+        .write_ready = false,
         .write_buffer = undefined,
         .writer = .{
             .vtable = &writer_vtable,
@@ -796,11 +801,21 @@ pub fn unlock(self: *Connection, io: Io) void {
     return self.mutex.unlock(io);
 }
 
-pub fn disconnect(self: *Connection, reason: *const TextComponent) (WritePacketError || Io.net.ShutdownError)!void {
-    if (self.disconnect_done or self.write_closed) return;
-    try self.vtable.disconnect(self, reason);
-    try self.shutdown(.recv);
-    self.disconnect_done = true;
+pub fn disconnect(self: *Connection, reason: DisconnectReason) void {
+    if (self.disconnection_reason == .none) return;
+    if (!self.write_closed) {
+        self.vtable.disconnect(self, switch (reason) {
+            .normal => &TextComponent.disconnect_generic,
+            .static => |tc| tc,
+            .copied => |p| p[1],
+        }) catch {};
+        self.shutdown(.recv) catch {};
+    }
+    self.disconnection_reason = switch (reason) {
+        .normal => .normal,
+        .static => |tc| .{ .reason = tc.* },
+        .copied => |p| .{ .reason = p[1].clone(p[0]) catch TextComponent.disconnect_generic },
+    };
     // more than one second of timeout is useless
     self.timeout = .fromSeconds(1);
 }
@@ -911,12 +926,12 @@ pub fn sendPacket(
 }
 
 pub fn shutdown(self: *Connection, how: Io.net.ShutdownHow) Io.net.ShutdownError!void {
-    try static_io.vtable.netShutdown(static_io.userdata, self.stream_handle, how);
     self.read_closed = self.read_closed or how != .send; // recv or both
     self.write_closed = self.write_closed or how != .recv; // send or both
+    try static_io.vtable.netShutdown(static_io.userdata, self.stream_handle, how);
 }
 
-pub fn tickSecond(self: *Connection) (WritePacketError || Io.net.ShutdownError)!void {
+pub fn tickSecond(self: *Connection) void {
     const now = Io.Timestamp.now(static_io, .boot);
     if (self.last_tick_sec.durationTo(now).toMilliseconds() < 1_000) return;
     self.last_tick_sec = now;
@@ -928,8 +943,7 @@ pub fn tickSecond(self: *Connection) (WritePacketError || Io.net.ShutdownError)!
         rl.received = 0;
         if (@as(RateLimited.Count, @trunc(rl.average_received)) >= rl.limit) {
             logger.warn("[{f}] Exceeded rate-limit (sent {d} packets per seconds)", .{ self, rl.average_received });
-            try self.vtable.disconnect(self, &.exceeded_packet_rate);
-            try self.shutdown(.recv);
+            self.disconnect(.{ .static = &.exceeded_packet_rate });
         }
     }
 }
