@@ -12,6 +12,7 @@ const buildzigzon: struct {
         vulkan_headers: Dep,
         sdl: Dep,
         openssl: Dep,
+        zio: Dep,
     },
     paths: []const []const u8,
 
@@ -64,6 +65,16 @@ pub fn build(b: *Build) !void {
         .optimize = optimize,
         .preferred_linkage = .dynamic,
     });
+    const zio_mod = b.dependency("zio", .{
+        .target = target,
+        .optimize = optimize,
+
+        .backend = "epoll",
+        // .@"resolve-beneath-mode" = .strict, // strict, best_effort
+        // .@"no-hack" = false,
+        // .@"task-migration" = true,
+        // .scheduler_metrics = true,
+    }).module("zio");
 
     const vulkan_mod = b.dependency("vulkan", .{
         .registry = vk_headers.path("registry/vk.xml"),
@@ -96,13 +107,14 @@ pub fn build(b: *Build) !void {
         .target = target,
         .optimize = optimize,
     }).module("coroutines");
+    _ = coro_mod;
 
     const config = b.addOptions();
     config.addOption(std.SemanticVersion, "version", version);
     const config_mod = config.createModule();
 
     const mc_downloader = downloadMCExec(b);
-    const mcd_cache = try mkdir(b, b.path("."), ".mccache");
+    const mcd_cache = mkdir(b, ".mccache");
     const mc_gendata = genDataMCExec(b);
 
     const mc26_2_jar = blk: {
@@ -129,7 +141,7 @@ pub fn build(b: *Build) !void {
         run_cmd.addArg(mc_version);
         break :blk out_dir;
     };
-    const mc_generated = try mcDatagenDir(b, mc26_2_jar, mc_version);
+    const mc_generated = mcDatagenDir(b, mc26_2_jar, mc_version);
     const mc_registries = blk: {
         const run_exe = b.addRunArtifact(mc_gendata);
         run_exe.addDirectoryArg(mc_generated);
@@ -170,11 +182,12 @@ pub fn build(b: *Build) !void {
         .name = "net",
         .root_source_file = b.path("src/net/net.zig"),
         .imports = &.{
+            .{ .name = "zio", .module = zio_mod },
             .{ .name = "crypto", .module = crypto_mod },
             .{ .name = "config", .module = config_mod },
         },
         .local_imports = &.{
-            "coro",
+            // "coro",
             "core",
             "utils",
             "serial",
@@ -184,11 +197,12 @@ pub fn build(b: *Build) !void {
         .name = "core",
         .root_source_file = b.path("src/core/core.zig"),
         .imports = &.{
+            .{ .name = "zio", .module = zio_mod },
             .{ .name = "crypto", .module = crypto_mod },
             .{ .name = "config", .module = config_mod },
         },
         .local_imports = &.{
-            "coro",
+            // "coro",
             "utils",
             "serial",
             "math",
@@ -231,11 +245,12 @@ pub fn build(b: *Build) !void {
         .link_libc = false,
         .error_tracing = true,
         .imports = &.{
+            .{ .name = "zio", .module = zio_mod },
             .{ .name = "crypto", .module = crypto_mod },
             .{ .name = "config", .module = config_mod },
         },
         .local_imports = &.{
-            "coro",
+            // "coro",
             "core",
             "utils",
             "serial",
@@ -264,7 +279,7 @@ pub fn build(b: *Build) !void {
         .module = packets_mod,
         .local_imports = &.{ "core", "net" },
     });
-    proj.addModule(.{ .name = "coro", .module = coro_mod });
+    // proj.addModule(.{ .name = "coro", .module = coro_mod });
 
     mc_gendata.root_module.addImport("utils", utils_mod);
     mc_gendata.root_module.addAnonymousImport("net", .{
@@ -295,7 +310,7 @@ pub fn build(b: *Build) !void {
     {
         const run_exe = b.addRunArtifact(main_exe);
         run_exe.step.dependOn(b.getInstallStep());
-        run_exe.addArgs(b.args orelse &.{});
+        run_exe.addPassthruArgs();
         run_exe.setCwd(b.path("."));
 
         run_step.dependOn(&run_exe.step);
@@ -305,7 +320,7 @@ pub fn build(b: *Build) !void {
     {
         const run_exe = b.addRunArtifact(main_client_exe);
         run_exe.step.dependOn(b.getInstallStep());
-        run_exe.addArgs(b.args orelse &.{});
+        run_exe.addPassthruArgs();
         run_exe.setCwd(b.path("."));
 
         run_cl_step.dependOn(&run_exe.step);
@@ -370,8 +385,8 @@ fn genDataMCExec(b: *Build) *Step.Compile {
     return gendata_exe;
 }
 
-fn mcDatagenDir(b: *Build, jar_path: LazyPath, _version: []const u8) !LazyPath {
-    const data_gen_dir = try mkdir(b, b.path("."), b.fmt("run_datagen_{s}", .{_version}));
+fn mcDatagenDir(b: *Build, jar_path: LazyPath, _version: []const u8) LazyPath {
+    const data_gen_dir = mkdir(b, b.fmt("run_datagen_{s}", .{_version}));
     const run_mc = b.addSystemCommand(&.{ "java", "-DbundlerMainClass=net.minecraft.data.Main", "-jar" });
     run_mc.setCwd(data_gen_dir);
     run_mc.addFileArg(jar_path);
@@ -381,16 +396,7 @@ fn mcDatagenDir(b: *Build, jar_path: LazyPath, _version: []const u8) !LazyPath {
     return run_mc.addOutputDirectoryArg("generated");
 }
 
-fn mkdir(b: *Build, root: LazyPath, path: []const u8) !LazyPath {
-    // b.root.createDirPath(b.graph.io, path) catch @panic("Failed to make path");
-    // if (true) return b.path(path);
-    if (true) {
-        const mkdir_cmd = b.addSystemCommand(&.{ "mkdir", "-p" });
-        mkdir_cmd.setCwd(root);
-        mkdir_cmd.addArg(path);
-        const gen = b.allocator.create(Build.GeneratedFile) catch @panic("OOM");
-        gen.* = .{ .step = &mkdir_cmd.step, .path = path };
-        return .{ .generated = .{ .file = gen } };
-    }
-    unreachable;
+fn mkdir(b: *Build, path: []const u8) LazyPath {
+    b.root.createDirPath(b.graph.io, path) catch @panic("Failed to make path");
+    return b.path(path);
 }

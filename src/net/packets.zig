@@ -37,7 +37,7 @@ test {
     std.testing.refAllDecls(StatusResponse.Version);
 }
 
-pub const HandshakeIntent = enum(u2) { invalid, status, login, transfer };
+pub const HandshakeIntent = enum(u2) { invalid = 0, status = 1, login = 2, transfer = 3 };
 pub const ServerLinkLabel = enum(u4) { bug_report, community_guidelines, support, statuts, feedback, community, website, forums, news, announcements };
 pub const ChatMode = enum { enabled, commands_only, hidden };
 pub const SkinPart = enum { cape, jacket, left_sleeve, right_sleeve, left_pants_leg, right_pants_leg, hat };

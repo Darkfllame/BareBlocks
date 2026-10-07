@@ -16,7 +16,7 @@ const Io = std.Io;
 const process = std.process;
 const assert = std.debug.assert;
 
-const is_debug = builtin.mode == .Debug;
+const is_debug = builtin.mode == .debug;
 
 const debug_required_extensions: []const [*:0]const u8 = &.{
     vk.extensions.ext_debug_utils.name.ptr,
@@ -37,7 +37,7 @@ const DebugUtilsDataFormatter = struct {
         if (self.callback_data.p_next) |next| {
             const dab: *const vk.DeviceAddressBindingCallbackDataEXT = @ptrCast(@alignCast(next));
             try writer.print("{s}device address {x:0>16}[0..{d}]: {s}\n", .{
-                if (dab.flags.internal_object_bit_ext) "internal " else "",
+                if (dab.flags.internal_object_ext) "internal " else "",
                 dab.base_address,
                 dab.size,
                 switch (dab.binding_type) {
@@ -96,12 +96,12 @@ fn FormattedFlags(comptime FlagsType: type) type {
             const max_back = std.math.maxInt(BackInt);
             const bits: BackInt = @bitCast(self.f);
             try writer.writeAll("{ ");
-            inline for (info.fields) |f| {
-                const offset = @bitOffsetOf(FlagsType, f.name);
+            inline for (info.field_names) |fname| {
+                const offset = @bitOffsetOf(FlagsType, fname);
                 const rem_mask = (max_back << (offset + 1)) & max_back;
                 const can_have_next = (offset + 1) < @bitSizeOf(BackInt);
-                if (@field(self.f, f.name)) {
-                    try writer.writeAll(f.name);
+                if (@field(self.f, fname)) {
+                    try writer.writeAll(fname);
                     if (can_have_next and bits & rem_mask != 0 and (bits >> (offset + 1)) & 1 != 0) try writer.writeAll(" | ");
                 }
             }
@@ -171,11 +171,11 @@ fn debugUtilsCallback(message_severity: vk.DebugUtilsMessageSeverityFlagsEXT, me
         DebugUtilsDataFormatter{ .callback_data = p_callback_data.? },
     };
 
-    if (message_severity.error_bit_ext) {
+    if (message_severity.error_ext) {
         vklog.err("[{f}, {f}] {f}", args);
-    } else if (message_severity.warning_bit_ext) {
+    } else if (message_severity.warning_ext) {
         vklog.warn("[{f}, {f}] {f}", args);
-    } else if (message_severity.info_bit_ext) {
+    } else if (message_severity.info_ext) {
         vklog.info("[{f}, {f}] {f}", args);
     } else {
         vklog.debug("[{f}, {f}] {f}", args);
@@ -300,16 +300,16 @@ fn createInstance(self: *Renderer, gpa: Allocator, arena: Allocator, sdl_vk_exts
     if (is_debug) {
         msg_cinfo = .{
             .message_severity = .{
-                .verbose_bit_ext = false,
-                .info_bit_ext = false,
-                .warning_bit_ext = true,
-                .error_bit_ext = true,
+                .verbose_ext = false,
+                .info_ext = false,
+                .warning_ext = true,
+                .error_ext = true,
             },
             .message_type = .{
-                .general_bit_ext = false,
-                .validation_bit_ext = true,
-                .performance_bit_ext = true,
-                .device_address_binding_bit_ext = false,
+                .general_ext = false,
+                .validation_ext = true,
+                .performance_ext = true,
+                .device_address_binding_ext = false,
             },
             .pfn_user_callback = &debugUtilsCallback,
             .p_user_data = self,

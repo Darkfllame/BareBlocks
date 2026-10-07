@@ -641,11 +641,11 @@ pub fn serialize(self: *const TextComponent, mapw: *serial.MapWriter) serial.Map
 
     const fmt_info = @typeInfo(Formatting).@"struct";
 
-    inline for (fmt_info.fields) |f| {
-        if (@field(self.formatting_mask.sub, f.name)) {
-            const value = @field(self.formatting, f.name);
-            try mapw.fieldName(f.name);
-            switch (f.type) {
+    inline for (fmt_info.field_names, fmt_info.field_types) |fname, ftype| {
+        if (@field(self.formatting_mask.sub, fname)) {
+            const value = @field(self.formatting, fname);
+            try mapw.fieldName(fname);
+            switch (ftype) {
                 Color => switch (value) {
                     else => |tag| try mapw.writeString(@tagName(tag)),
                     _ => |tag| {

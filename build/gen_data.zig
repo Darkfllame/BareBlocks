@@ -366,7 +366,7 @@ pub fn main(init: std.process.Init) !void {
     const written = aw.written();
     // std.log.err("attempted writing file:\n{s}", .{written});
 
-    var ast = try std.zig.Ast.parse(init.gpa, written[0 .. written.len - 1 :0], .zig);
+    var ast = try std.zig.Ast.parse(init.gpa, written[0 .. written.len - 1 :0], .{ .mode = .zig });
     defer ast.deinit(init.gpa);
 
     ast.render(init.gpa, &fw.interface, .{}) catch |e| return switch (e) {

@@ -509,7 +509,7 @@ pub const MapWriter = struct {
             },
             else => @compileError("\"" ++ name ++ "\" Not a method of " ++ @typeName(V)),
         };
-        const param0_info = @typeInfo(info.params[0].type.?);
+        const param0_info = @typeInfo(info.param_types[0].?);
         const value_self = switch (param0_info) {
             .pointer => if (v_info == .pointer) value else &value,
             else => if (v_info == .pointer) value.* else value,

@@ -175,12 +175,14 @@ pub const UUID = extern union {
 
     pub fn format(self: UUID, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         const info = @typeInfo(@FieldType(UUID, "v1")).@"struct";
-        inline for (0..info.fields.len) |i| {
-            const f = info.fields[info.fields.len - i - 1];
+        const flen = info.field_names.len;
+        inline for (0..flen) |i| {
+            const ftype = info.field_types[flen - i - 1];
+            const fname = info.field_names[flen - i - 1];
             if (i != 0) try writer.writeByte('-');
-            const bits = @bitSizeOf(f.type);
+            const bits = @bitSizeOf(ftype);
             const I = @Int(.unsigned, bits);
-            try writer.printInt(@as(I, @bitCast(@field(self.v1, f.name))), 16, .lower, .{
+            try writer.printInt(@as(I, @bitCast(@field(self.v1, fname))), 16, .lower, .{
                 .fill = '0',
                 .alignment = .right,
                 .width = bits / 4,

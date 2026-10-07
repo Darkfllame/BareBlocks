@@ -1,5 +1,5 @@
 //! A useful struct that's directly used by build.zig.
-//! 
+//!
 //! Allows modules to have a unique name. Facilitates the whole 1 test runner per module
 //! shenanigans.
 
@@ -41,7 +41,7 @@ pub const CreateModuleOptions = struct {
     imports: []const Module.Import = &.{},
 
     target: ?std.Build.ResolvedTarget = null,
-    optimize: ?std.builtin.OptimizeMode = null,
+    optimize: ?std.builtin.Optimize = null,
 
     /// `true` requires a compilation that includes this Module to link libc.
     /// `false` causes a build failure if a compilation that includes this Module would link libc.
@@ -71,6 +71,7 @@ pub const CreateModuleOptions = struct {
     omit_frame_pointer: ?bool = null,
     error_tracing: ?bool = null,
     no_builtin: ?bool = null,
+    patchable_function_entry: u16 = 0,
 };
 
 pub fn addModule(self: *Project, opt: AddModuleOptions) void {
@@ -87,8 +88,8 @@ pub fn addModule(self: *Project, opt: AddModuleOptions) void {
 
 pub fn createModule(self: *Project, b: *Build, opt: CreateModuleOptions) *Module {
     var mcreate_opt: Module.CreateOptions = undefined;
-    inline for (@typeInfo(Module.CreateOptions).@"struct".fields) |f| {
-        @field(mcreate_opt, f.name) = @field(opt, f.name);
+    inline for (@typeInfo(Module.CreateOptions).@"struct".field_names) |fname| {
+        @field(mcreate_opt, fname) = @field(opt, fname);
     }
 
     const mod = self.arena.create(Module) catch @panic("OOM");

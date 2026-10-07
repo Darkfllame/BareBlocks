@@ -9,7 +9,7 @@ const Io = std.Io;
 const process = std.process;
 const assert = std.debug.assert;
 
-const is_debug = builtin.mode == .Debug;
+const is_debug = builtin.mode == .debug;
 
 const logger = std.log.scoped(.@"bare_blocks/client");
 
@@ -28,8 +28,8 @@ const Wrapper = struct {
             if (e == error.DeviceLost) @panic("Unexpected DeviceLost error");
         }
         comptime {
-            for (@typeInfo(E).error_set.?) |err| {
-                if (std.mem.eql(u8, err.name, "DeviceLost")) {
+            for (@typeInfo(E).error_set.error_names.?) |ename| {
+                if (std.mem.eql(u8, ename, "DeviceLost")) {
                     @compileError("error.DeviceLost in error set");
                 }
             }

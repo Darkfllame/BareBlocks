@@ -14,6 +14,6 @@ pub const @"serverbound/handshake/intention" = Server.handleHandshake;
 pub const @"serverbound/status/status_request" = Server.handleStatus;
 pub const @"serverbound/status/ping_request" = Server.handleStatusPing;
 
-pub const @"serverbound/login/hello" = Server.handleLoginHello;
-pub const @"serverbound/login/key" = Server.handleLoginKey;
-pub const @"serverbound/login/login_acknowledged" = Server.handleLoginAck;
+// pub const @"serverbound/login/hello" = Server.handleLoginHello;
+// pub const @"serverbound/login/key" = Server.handleLoginKey;
+// pub const @"serverbound/login/login_acknowledged" = Server.handleLoginAck;

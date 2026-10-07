@@ -72,8 +72,8 @@ pub const Keybind = enum {
 
     pub const max_formatted_len = blk: {
         var max: usize = 0;
-        for (@typeInfo(Keybind).@"enum".fields) |f| {
-            max = @max(max, f.name.len);
+        for (@typeInfo(Keybind).@"enum".field_names) |fname| {
+            max = @max(max, fname.len);
         }
         break :blk max;
     };

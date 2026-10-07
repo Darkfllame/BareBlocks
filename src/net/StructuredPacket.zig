@@ -384,7 +384,7 @@ pub const Type = union(enum) {
             .structured => |desc| blk: {
                 var names: [desc.fields.len][]const u8 = undefined;
                 var types: [desc.fields.len]type = undefined;
-                var attrs: [desc.fields.len]std.builtin.Type.StructField.Attributes = undefined;
+                var attrs: [desc.fields.len]std.builtin.Type.Struct.FieldAttributes = undefined;
 
                 for (desc.fields, 0..) |field, i| {
                     names[i] = field.name;
@@ -538,7 +538,7 @@ pub const Type = union(enum) {
                         }
                         try writer.writeAll(" }");
                     },
-                    .@"enum" => try writer.print(".{t}({d})", .{ value, @intFromEnum(value) }),
+                    .@"enum" => try writer.print(".{t}({d})", .{ value, @backingInt(value) }),
                     .enum_set => |ib| {
                         try writer.print("EnumSet({any}) {{ ", .{ib.base});
                         var it = value.iterator();
@@ -580,7 +580,7 @@ pub const Type = union(enum) {
                     },
                     .either => |subs| switch (value) {
                         inline else => |v, tag| writer.print("XorY({f}, {f}).{t}{{{f}}}", .{
-                            subs[0], subs[1], tag, subs[@intFromEnum(tag)].formatted(v),
+                            subs[0], subs[1], tag, subs[@backingInt(tag)].formatted(v),
                         }),
                     },
                     .lpvec3 => try value.format(writer),
@@ -674,7 +674,7 @@ pub const Type = union(enum) {
                 .remaining, .prefixed => &.{},
                 .fixed => @splat(arr.sub.default()),
             },
-            .@"enum" => @enumFromInt(0),
+            .@"enum" => @fromBackingInt(@intCast(0)),
             .enum_set => .empty,
             .packed_struct => |ib| @bitCast(@as(@typeInfo(ib.base).@"struct".backing_integer.?, 0)),
             .id_or_x => .{ .id = 0 },
@@ -697,7 +697,7 @@ pub const Type = union(enum) {
                     try field.type.read(
                         params,
                         reader,
-                        if (@typeInfo(@TypeOf(parent)).@"struct".fields.len == 0) // pass `ret` if current call is root
+                        if (@typeInfo(@TypeOf(parent)).@"struct".field_names.len == 0) // pass `ret` if current call is root
                             ret.*
                         else
                             parent,
@@ -829,7 +829,7 @@ pub const Type = union(enum) {
                                     @compileError(ct_err_message);
                                 break :cond field == value_ptr.*;
                             },
-                            .@"enum" => std.math.compare(@intFromEnum(field), cmp.op, @intFromEnum(value_ptr.*)),
+                            .@"enum" => std.math.compare(@backingInt(field), cmp.op, @backingInt(value_ptr.*)),
                             else => @compileError(ct_err_message),
                         };
                     },
@@ -1163,8 +1163,8 @@ pub const Type = union(enum) {
                 for (val) |item| try arr.sub.write(apair, writer, item);
             },
             .@"enum" => |ib| switch (ib.backing) {
-                .var_int, .var_long => try writeVarInt(writer, @intFromEnum(val)),
-                else => try writer.writeInt(ib.backing.getProtoType(), @intFromEnum(val), .big),
+                .var_int, .var_long => try writeVarInt(writer, @backingInt(val)),
+                else => try writer.writeInt(ib.backing.getProtoType(), @backingInt(val), .big),
             },
             .enum_set => |ib| {
                 const ES = std.EnumSet(ib.base);

@@ -7,23 +7,25 @@
     .dependencies = .{
         .coroutines = .{ .path = "./coroutines" },
         .vulkan = .{
-            .url = "git+https://github.com/Darkfllame/vulkan-zig.git#3a60f9abf7f2c49579fd4a4aa1d0f4bd53325134",
-            .hash = "vulkan-0.0.0-r7YtxxaJAwBiuKx_FnWP-JjUmwMvbMQl5m_P_UY05Ckd",
-            // .lazy = true,
+            .url = "git+https://github.com/Darkfllame/vulkan-zig.git#b9c393af2c8699b4473aeb13b2a3044d13449478",
+            .hash = "vulkan-0.0.0-r7Ytx0aPAwCsAq01qIn5TgyJffSkU1yfq7VavsP1-vDd",
         },
         .vulkan_headers = .{
-            .url = "git+https://github.com/KhronosGroup/Vulkan-Headers#8cfaaa1d4deedc865e52a42e654c5ec0d7d75eb0",
-            .hash = "N-V-__8AAGfhdwLcch-RCImEQbiTe8n0-ZfevT6sXEEfSuKT",
+            .url = "git+https://github.com/KhronosGroup/Vulkan-Headers.git#c46850864f4661461b0f6cb9922c058ffea4915e",
+            .hash = "N-V-__8AALu5iAL64sSFBjPrvXzTQ0ZMxT00hE0_7tezz3z4",
             // .lazy = true,
         },
         .sdl = .{
-            .url = "git+https://github.com/castholm/SDL#21c6b79840d123e94a9f183f4b0fa1731668f48d",
-            .hash = "sdl-0.5.0+3.4.8-SDL--k4DpgH323IfF6cEaGzKUdtUQv1azbBmmcv0RMAu",
-            // .lazy = true,
+            .url = "git+https://github.com/castholm/SDL.git#b72b3671502a70e109350ecac90afdc480dcfcc6",
+            .hash = "sdl-0.5.4+3.4.16-SDL--sQ4qAH3kwC19Zs1kxdHplaSDnWl2MUptZD4AItI",
         },
         .openssl = .{
-            .url = "git+https://github.com/Darkfllame/openssl-zig.git#d236a43b0e6540bb8c3bb22a75b3d26237be0bf7",
-            .hash = "openssl-3.6.0-wZcA77Nn8QGiFQyxhn8CtckRlhgGXLYYWLMpmQMkiMVr",
+            .url = "git+https://github.com/Darkfllame/openssl-zig.git#15490fa9ac1ed5436a41724ef64d7b4a386b05b1",
+            .hash = "openssl-3.6.0-wZcA73uP8QHT8CNa45HlKpMb3ReSXH9gqLwHOKp5m8_y",
+        },
+        .zio = .{
+            .url = "git+https://github.com/lalinsky/zio?ref=v0.19.1#3bbd74d68a889e5d4da7274afdc7c7617ec614d6",
+            .hash = "zio-0.19.0-xHbVVMFBLACx1T0028HttNTseV6bDeL0AI4id51AHx57",
         },
     },
 
