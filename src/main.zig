@@ -52,7 +52,7 @@ pub fn main(init: std.process.Init.Minimal) @typeInfo(@TypeOf(asyncMain)).@"fn".
         std.process.fatal("failed to initialize ZIO runtime: {t}", .{err});
     defer rt.deinit();
 
-    const io = rt.blockingIo();
+    const io = rt.io();
 
     var main_fut = io.async(asyncMain, .{ .{
         .minimal = init,

@@ -19,7 +19,8 @@ pub const logger = std.log.scoped(.net);
 pub const packets = @import("packets.zig");
 pub const datagram = @import("datagram.zig");
 pub const StructuredPacket = @import("StructuredPacket.zig");
-pub const Connection = @import("Connection.zig");
+// pub const Connection = @import("Connection.zig");
+pub const Connection = @import("Connection2.zig");
 
 pub const PacketType = StructuredPacket.Type;
 

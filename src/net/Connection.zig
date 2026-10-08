@@ -6,7 +6,6 @@ const Connection = @This();
 const std = @import("std");
 const builtin = @import("builtin");
 const core = @import("core");
-const coro = @import("coro");
 const zio = @import("zio");
 const utils = @import("utils");
 const crypto = @import("crypto");

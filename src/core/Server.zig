@@ -62,71 +62,6 @@ const PolledInfo = union(enum) {
     }
 };
 
-fn tickConnectionInner(self: *Server, conn: *Connection) !void {
-    const io = self.runtime.io();
-
-    try conn.tick();
-
-    var closed = conn.read_closed.load(.monotonic);
-    if (closed) {
-        const res = conn.write_coro.cancel(io);
-        return res catch |e| (conn.write_error orelse e);
-    } else {
-        conn.send_channel.impl.mutex.lockUncancelable();
-        closed = conn.send_channel.impl.closed;
-        conn.send_channel.impl.mutex.unlock();
-
-        if (closed) {
-            const res = conn.read_coro.cancel(io);
-            return res catch |e| (conn.read_error orelse e);
-        }
-    }
-}
-
-fn coro_tickConnection(self: *Server) TickError!void {
-    const io = self.runtime.io();
-
-    main_loop: while (true) {
-        self.tick_connections.wait() catch break;
-
-        while (true) : (io.sleep(.fromMilliseconds(50), .boot) catch break :main_loop) {
-            self.connections_mutex.lock() catch break :main_loop;
-            defer self.connections_mutex.unlock();
-
-            if (self.connections.count() == 0) {
-                self.tick_connections.reset();
-                break;
-            }
-
-            var it = self.connections.keyIterator();
-            while (it.next()) |conn_ptr| {
-                const conn = conn_ptr.*;
-
-                conn.lockUncancelable();
-
-                if (self.tickConnectionInner(conn)) {
-                    conn.unlock();
-                } else |e| switch (e) {
-                    error.Canceled => break :main_loop,
-                    error.OutOfMemory, error.SystemResources => |err| return err,
-                    else => |err| {
-                        assert(self.connections.remove(conn));
-                        if (err != error.Disconnected) {
-                            logger.err("[{f}] Error on connection tick: {t}", .{ conn, err });
-                        }
-                        switch (conn.disconnection_reason) {
-                            .none => logger.err("[{f}] Disconnected", .{conn}),
-                            .normal => logger.info("[{f}] Disconnected", .{conn}),
-                            .reason => |tc| logger.err("[{f}] Disconnected: {f}", .{ conn, tc }),
-                        }
-                        conn.release(self.allocator);
-                    },
-                }
-            }
-        }
-    }
-}
-
 fn coro_acceptConnection(self: *Server, which: enum { v4, v6 }) CoroAccpetError!void {
     self.start.wait() catch return;
 
@@ -166,12 +101,14 @@ fn coro_acceptConnection(self: *Server, which: enum { v4, v6 }) CoroAccpetError!
         };
         errdefer if (stream) |s| s.close(io);
 
-        {
-            self.connections_mutex.lock() catch break;
-            defer self.connections_mutex.unlock();
+        logger.debug("Incomming connection: {d}:{f}", .{ stream.?.socket.handle, stream.?.socket.address });
 
-            try self.connections.ensureUnusedCapacity(self.allocator, 1);
-        }
+        // {
+        //     self.connections_mutex.lock() catch break;
+        //     defer self.connections_mutex.unlock();
+
+        //     try self.connections.ensureUnusedCapacity(self.allocator, 1);
+        // }
 
         const owned = try self.allocator.create(OwnedConnection);
         owned.* = .{
@@ -181,7 +118,7 @@ fn coro_acceptConnection(self: *Server, which: enum { v4, v6 }) CoroAccpetError!
         };
         const conn = &owned.connection;
 
-        conn.init(self.allocator, .{
+        conn.init(self.allocator, &self.group, .{
             .packet_registry = self.packet_registry,
             .runtime = self.runtime,
             .stream = stream.?,
@@ -200,22 +137,24 @@ fn coro_acceptConnection(self: *Server, which: enum { v4, v6 }) CoroAccpetError!
                 },
             }
         };
+        defer conn.release(.failing);
         stream = null;
-        errdefer conn.release(self.allocator);
+        logger.debug("[{f}] Initalized", .{conn});
 
-        {
-            self.connections_mutex.lockUncancelable();
-            defer self.connections_mutex.unlock();
+        // {
+        //     self.connections_mutex.lockUncancelable();
+        //     defer self.connections_mutex.unlock();
 
-            const gop = self.connections.getOrPutAssumeCapacity(conn);
-            if (gop.found_existing) {
-                logger.debug("Threw {f}: duplicate connection", .{conn.ip_address});
-                conn.release(self.allocator);
-            }
-        }
+        //     const gop = self.connections.getOrPutAssumeCapacity(conn);
+        //     if (gop.found_existing) {
+        //         logger.debug("Threw {f}: duplicate connection", .{conn.ip_address});
+        //         conn.release(self.allocator);
+        //     }
+        // }
 
         conn.start.set();
-        self.tick_connections.set();
+
+        logger.debug("[{f}] Accept finish", .{conn});
     }
 }
 
@@ -271,7 +210,6 @@ allocator: Allocator,
 runtime: *zio.Runtime,
 start: zio.Event,
 
-// TODO: Move all the event loop bs to core/server/EventLoop.zig
 accept_options: Io.net.Server.AcceptOptions,
 v6_enabled: bool,
 sockv4_handle: Io.net.Socket.Handle,
@@ -289,8 +227,7 @@ connections: std.HashMapUnmanaged(*Connection, void, Connection.HashContext, std
 accept_coro: Io.Future(CoroAccpetError!void),
 acceptv6_coro: Io.Future(CoroAccpetError!void),
 
-tick_connections: zio.Event,
-connection_ticker: Io.Future(TickError!void),
+group: Io.Group,
 
 server_id: [20]u8,
 rsa_key: *crypto.EVP_PKEY,
@@ -599,8 +536,7 @@ pub fn init(self: *Server, options: InitOptions) InitError!void {
         .accept_coro = .{ .any_future = null, .result = {} },
         .acceptv6_coro = .{ .any_future = null, .result = {} },
 
-        .tick_connections = .init,
-        .connection_ticker = .{ .any_future = null, .result = {} },
+        .group = .init,
 
         .server_id = undefined,
         .rsa_key = key.?,
@@ -629,14 +565,12 @@ pub fn init(self: *Server, options: InitOptions) InitError!void {
         self.deinitBroadcast();
         self.accept_coro.cancel(io) catch {};
         self.acceptv6_coro.cancel(io) catch {};
-        self.connection_ticker.cancel(io) catch {};
     }
 
     self.accept_coro = try io.concurrent(coro_acceptConnection, .{ self, .v4 });
     if (self.v6_enabled) {
         self.acceptv6_coro = try io.concurrent(coro_acceptConnection, .{ self, .v6 });
     }
-    self.connection_ticker = try io.concurrent(coro_tickConnection, .{self});
 }
 
 pub fn deinit(self: *Server) void {
@@ -644,13 +578,12 @@ pub fn deinit(self: *Server) void {
 
     self.deinitBroadcast();
 
+    self.group.cancel(io);
+
     self.accept_coro.cancel(io) catch |e| {
         logger.err("Caught error while closing server: {t}", .{e});
     };
     self.acceptv6_coro.cancel(io) catch |e| {
-        logger.err("Caught error while closing server: {t}", .{e});
-    };
-    self.connection_ticker.cancel(io) catch |e| {
         logger.err("Caught error while closing server: {t}", .{e});
     };
 
@@ -700,21 +633,18 @@ pub fn handleHandshake(conn: *Connection, reader: *Io.Reader, params: net.Packet
                 .out_phase = .status,
             });
         },
-        .login
-        //  => {
-        //     conn.reconfigure(.{ .out_phase = .login });
-        //     if (pack.protocol_version != current_version.protocol) {
-        //         conn.disconnect(.{ .static = &.translate("multiplayer.status.incompatible", .{}) });
-        //         return error.CallbackHandlerFailed;
-        //     }
-        //     conn.reconfigure(.{
-        //         .in_phase = .login,
-        //         .timeout = .fromSeconds(20),
-        //     });
-        // }
-        ,
-        .transfer,
-        => {
+        .login => {
+            conn.reconfigure(.{ .out_phase = .login });
+            if (pack.protocol_version != current_version.protocol) {
+                conn.disconnect(.{ .static = &.translate("multiplayer.status.incompatible", .{}) });
+                return error.CallbackHandlerFailed;
+            }
+            conn.reconfigure(.{
+                .in_phase = .login,
+                .timeout = .fromSeconds(20),
+            });
+        },
+        .transfer => {
             try conn.lock();
             defer conn.unlock();
 
@@ -857,13 +787,12 @@ pub fn handleLoginKey(conn: *Connection, reader: *Io.Reader, params: net.PacketT
     };
 
     logingin.compression = try owner.allocator.create(Connection.Compression);
-    errdefer owner.allocator.destroy(logingin.compression.?);
-    logingin.compression.?.* = .{
-        .threshold = owner.compression_threshold,
-        .decompression_error = null,
-        .decompress_buffer = undefined,
-        .compress_buffer = undefined,
-    };
+    errdefer {
+        owner.allocator.destroy(logingin.compression.?);
+        logingin.compression = null;
+    }
+    try logingin.compression.?.init(owner.allocator, owner.compression_threshold, 16);
+    errdefer logingin.compression.?.deinit(owner.allocator);
 
     conn.reconfigure(.{ .encryption = logingin.encryption.? });
 
