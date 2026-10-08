@@ -65,7 +65,7 @@ pub fn Vec(comptime T: type, comptime DIM: comptime_int) type {
     if (comptime !supportsArithmetics(T)) {
         @compileError("Vec subtype must support arithmetics (ints or floats)");
     }
-    return extern union {
+    return extern struct {
         const Self = @This();
         const VecSelf = @Vector(DIM, T);
 
@@ -97,20 +97,20 @@ pub fn Vec(comptime T: type, comptime DIM: comptime_int) type {
 
         fn newCropped(_x: T, _y: T, _z: T, _w: T) Self {
             var res: Self = undefined;
-            res.vec[0] = _x;
-            res.vec[1] = _y;
-            if (DIM >= 3) res.vec[2] = _z;
-            if (DIM >= 4) res.vec[3] = _w;
+            res.array[0] = _x;
+            res.array[1] = _y;
+            if (DIM >= 3) res.array[2] = _z;
+            if (DIM >= 4) res.array[3] = _w;
             return res;
         }
         fn new2(_x: T, _y: T) Self {
-            return .{ .vec = .{ _x, _y } };
+            return .{ .array = .{ _x, _y } };
         }
         fn new3(_x: T, _y: T, _z: T) Self {
-            return .{ .vec = .{ _x, _y, _z } };
+            return .{ .array = .{ _x, _y, _z } };
         }
         fn new4(_x: T, _y: T, _z: T, _w: T) Self {
-            return .{ .vec = .{ _x, _y, _z, _w } };
+            return .{ .array = .{ _x, _y, _z, _w } };
         }
 
         fn convert(v: anytype, comptime get_value: bool) if (get_value) Self else bool {
@@ -187,8 +187,10 @@ pub fn Vec(comptime T: type, comptime DIM: comptime_int) type {
             return if (get_value) @compileError("Cannot convert \"" ++ @typeName(V) ++ "\" to " ++ @typeName(Self)) else false;
         }
 
-        /// The data of this vector as a SIMD type.
-        vec: @Vector(DIM, T),
+        fn vector(self: *Self) @Vector(DIM, T) {
+            return @bitCast(self.array);
+        }
+
         /// The data of this vector as a simple array type.
         array: [DIM]T,
 

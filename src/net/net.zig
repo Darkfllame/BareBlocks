@@ -61,19 +61,19 @@ pub const PacketRegistry = struct {
     pub fn packedIDFromResource(self: *const PacketRegistry, side: NetworkingSide, phase: NetworkingPhase, resource: []const u8) ?PacketID {
         const list = self.entries.getPtrConst(side).get(phase);
         for (list, 0..) |entry, i| {
-            if (std.mem.eql(u8, entry.resource, resource)) return @enumFromInt(i);
+            if (std.mem.eql(u8, entry.resource, resource)) return @fromBackingInt(@intCast(i));
         }
         return null;
     }
 
     pub fn getEntry(self: *const PacketRegistry, side: NetworkingSide, phase: NetworkingPhase, id: PacketID) *const Entry {
-        return &self.entries.getPtrConst(side).get(phase)[@intFromEnum(id)];
+        return &self.entries.getPtrConst(side).get(phase)[@backingInt(id)];
     }
 
     pub fn getPacketID(self: *const PacketRegistry, side: NetworkingSide, phase: NetworkingPhase, id: i32) ?PacketID {
         const entries = self.entries.getPtrConst(side).get(phase);
         if (id < 0 or entries.len <= id) return null;
-        return @enumFromInt(id);
+        return @fromBackingInt(@intCast(id));
     }
 };
 

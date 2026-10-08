@@ -11,8 +11,8 @@ test {
     defer arena.deinit();
 
     const info = @typeInfo(@This()).@"struct";
-    inline for (info.decls) |d| {
-        const value = @field(@This(), d.name);
+    inline for (info.decl_names) |dname| {
+        const value = @field(@This(), dname);
         if (@TypeOf(value) == PacketType) {
             aw.clearRetainingCapacity();
             _ = arena.reset(.retain_capacity);

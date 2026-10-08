@@ -5,13 +5,10 @@ const core = @import("core");
 
 const Io = std.Io;
 
-const use_debug_allocator = !builtin.cpu.arch.isWasm() and switch (builtin.mode) {
-    .Debug => true,
-    .ReleaseSafe => !builtin.link_libc, // Not ideal, but the best we have for now.
-    .ReleaseFast, .ReleaseSmall => !builtin.link_libc and builtin.single_threaded, // Also not ideal.
+const use_safe_allocator = !builtin.cpu.arch.isWasm() and switch (builtin.mode) {
+    .debug, .safe => true,
+    .fast, .small => !builtin.link_libc and builtin.single_threaded, // Also not ideal.
 };
-
-var ert_buf: [8 * 1024]usize = undefined;
 
 pub const std_options = std.Options{
     .log_scope_levels = &.{
@@ -23,16 +20,12 @@ pub const std_options = std.Options{
 pub const std_options_debug_io = zio.debug_io;
 
 pub fn main(init: std.process.Init.Minimal) @typeInfo(@TypeOf(asyncMain)).@"fn".return_type.? {
-    if (@errorReturnTrace()) |ert| {
-        ert.instruction_addresses = &ert_buf;
-    }
+    // Initialization code STRAIGHT stolen from std/start.zig
+    var sa = if (use_safe_allocator) std.heap.SafeAllocator.init(std.heap.page_allocator, .{});
+    defer _ = if (use_safe_allocator) sa.deinit();
 
-    // Initialization code STRAIGHT stolen from std.start
-    var da = if (use_debug_allocator) std.heap.DebugAllocator(.{}).init;
-    defer _ = if (use_debug_allocator) da.deinit();
-
-    const gpa = if (use_debug_allocator)
-        da.allocator()
+    const gpa = if (use_safe_allocator)
+        sa.allocator()
     else if (builtin.link_libc)
         std.heap.c_allocator
     else if (builtin.cpu.arch.isWasm())

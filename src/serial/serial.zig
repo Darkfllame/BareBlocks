@@ -9,7 +9,7 @@ const Allocator = std.mem.Allocator;
 const IoReader = std.Io.Reader;
 const IoWriter = std.Io.Writer;
 
-const is_debug = builtin.mode == .Debug;
+const is_debug = builtin.mode == .debug;
 
 const assert = std.debug.assert;
 
@@ -792,7 +792,7 @@ pub const FieldProperty = struct {
 pub fn FieldGatherer(comptime fields: []const FieldProperty) type {
     var names: [fields.len][]const u8 = undefined;
     var types: [fields.len]type = undefined;
-    var attrs: [fields.len]std.builtin.Type.StructField.Attributes = undefined;
+    var attrs: [fields.len]std.builtin.Type.Struct.FieldAttributes = undefined;
     for (fields, 0..) |f, i| {
         names[i] = f.name;
         const T = f.type.GetType();

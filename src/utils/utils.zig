@@ -6,10 +6,10 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
-pub const is_debug = builtin.mode == .Debug;
+pub const is_debug = builtin.mode == .debug;
 pub const is_safe = switch (builtin.mode) {
-    .Debug, .ReleaseSafe => true,
-    .ReleaseSmall, .ReleaseFast => false,
+    .debug, .safe => true,
+    .small, .fast => false,
 };
 
 pub const translation = @import("translation.zig");
@@ -106,6 +106,129 @@ pub fn OptionalData(comptime T: type, comptime exists: bool) type {
 
         pub fn getPtrConst(self: *const Self) ?*const T {
             return if (exists) &self.value else null;
+        }
+    };
+}
+
+pub fn EmbeddedArray(comptime attribs: std.builtin.Type.Pointer.Attributes, comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        const self_align = attribs.@"align" orelse @max(@alignOf(usize), @alignOf(T));
+        const start_offset = std.mem.alignForward(usize, @sizeOf(Self), self_align);
+        const aligned_attribs = std.builtin.Type.Pointer.Attributes{
+            .@"const" = attribs.@"const",
+            .@"volatile" = attribs.@"volatile",
+            .@"allowzero" = attribs.@"allowzero",
+            .@"addrspace" = attribs.@"addrspace",
+            .@"align" = @min(@alignOf(T), self_align),
+        };
+
+        const SelfPtr = @Pointer(.one, .{
+            .@"const" = attribs.@"const",
+            .@"volatile" = attribs.@"volatile",
+            .@"allowzero" = attribs.@"allowzero",
+            .@"addrspace" = attribs.@"addrspace",
+            .@"align" = null,
+        }, Self, null);
+        const VarPtr = @Pointer(.one, .{
+            .@"const" = false,
+            .@"volatile" = attribs.@"volatile",
+            .@"allowzero" = false,
+            .@"addrspace" = attribs.@"addrspace",
+            .@"align" = null,
+        }, Self, null);
+
+        _: void align(self_align) = {},
+        length: usize,
+        refc: usize,
+
+        pub const empty = Self{ .length = 0, .refc = 1 };
+
+        pub const SubPtr = @Pointer(.one, aligned_attribs, T, null);
+        pub const SubMany = @Pointer(.many, aligned_attribs, T, null);
+        pub const SubSlice = @Pointer(.slice, aligned_attribs, T, null);
+        pub const SubC = @Pointer(.c, aligned_attribs, T, null);
+
+        pub fn slice(self: SelfPtr) SubSlice {
+            const bytes: @Pointer(.many, aligned_attribs, u8, null) = @ptrCast(self);
+            return @ptrCast(bytes[start_offset..][0 .. self.length * @sizeOf(T)]);
+        }
+
+        pub fn ptrAt(self: SelfPtr, i: usize) SubPtr {
+            return &self.slice()[i];
+        }
+
+        pub fn getAt(self: SelfPtr, i: usize) T {
+            return self.slice()[i];
+        }
+
+        pub fn atomicLoad(self: SelfPtr, i: usize, comptime order: std.builtin.AtomicOrder) T {
+            return @atomicLoad(T, &self.slice()[i], order);
+        }
+
+        pub fn atomicStore(self: SelfPtr, i: usize, value: T, comptime order: std.builtin.AtomicOrder) void {
+            @atomicStore(T, &self.slice()[i], value, order);
+        }
+
+        pub fn atomicRmw(self: SelfPtr, i: usize, comptime op: std.builtin.AtomicRmwOp, value: T, comptime order: std.builtin.AtomicOrder) T {
+            return @atomicRmw(T, &self.slice()[i], op, value, order);
+        }
+
+        pub fn cmpxchgWeak(self: SelfPtr, i: usize, expected: T, value: T, comptime success_order: std.builtin.AtomicOrder, comptime fail_order: std.builtin.AtomicOrder) ?T {
+            return @cmpxchgWeak(T, &self.slice()[i], expected, value, success_order, fail_order);
+        }
+
+        pub fn cmpxchgStrong(self: SelfPtr, i: usize, expected: T, value: T, comptime success_order: std.builtin.AtomicOrder, comptime fail_order: std.builtin.AtomicOrder) ?T {
+            return @cmpxchgStrong(T, &self.slice()[i], expected, value, success_order, fail_order);
+        }
+
+        pub fn setAt(self: SelfPtr, i: usize, value: T) void {
+            self.slice()[i] = value;
+        }
+
+        pub fn alloc(allocator: Allocator, size: usize) Allocator.Error!SelfPtr {
+            return dupeSlice(@constCast(&empty), allocator, 0, size, 0, 0);
+        }
+
+        pub fn dupe(self: SelfPtr, allocator: Allocator, new_len: usize) Allocator.Error!SelfPtr {
+            return self.dupeSlice(allocator, 0, new_len, 0, self.length);
+        }
+
+        pub fn dupeSlice(self: SelfPtr, allocator: Allocator, dst_start: usize, dst_end: usize, src_start: usize, src_end: usize) Allocator.Error!SelfPtr {
+            assert(dst_end >= dst_start);
+            assert(src_end >= src_start);
+
+            const min_len = @min(dst_end - dst_start, src_end - src_start);
+            
+            const source = blk: {
+                const elems: []align(aligned_attribs.@"align".?) T = @ptrCast(@constCast(@addrSpaceCast(@volatileCast(self.slice()))));
+                break :blk elems[src_start..min_len];
+            };
+
+            const new_bytes = try allocator.alignedAlloc(u8, .of(Self), start_offset + dst_end * @sizeOf(T));
+            const new: VarPtr = @ptrCast(new_bytes.ptr);
+            new.* = .{.length=dst_end,.refc=1};
+
+            const elems: []align(aligned_attribs.@"align".?) T = @ptrCast(@constCast(@addrSpaceCast(@volatileCast(new.slice()))));
+
+            @memcpy(elems[dst_start..min_len], source);
+            return @ptrCast(@alignCast(new));
+        }
+
+        pub fn acquire(self: SelfPtr) SelfPtr {
+            const selfv: VarPtr = @ptrCast(@alignCast(@constCast(self)));
+            _=@atomicRmw(usize, &selfv.refc, .Add, 1, .monotonic);
+            return self;
+        }
+
+        pub fn release(self: SelfPtr, allocator: Allocator) void {
+            const selfv: VarPtr = @ptrCast(@alignCast(@constCast(self)));
+            if (@atomicRmw(usize, &selfv.refc, .Sub, 1, .release) == 1) {
+                const bytes: [*]align(@alignOf(Self)) u8 = @ptrCast(@constCast(@addrSpaceCast(@volatileCast(self))));
+                const len = start_offset + self.length * @sizeOf(T);
+                allocator.free(bytes[0..len]);
+            }
         }
     };
 }
@@ -311,4 +434,24 @@ pub fn validateMethod(comptime Base: type, comptime name: []const u8, comptime p
 
 test {
     std.testing.refAllDecls(@This());
+    inline for (&[_]type{ u8, u16, u32, usize }) |T| {
+        inline for (0..5) |alignment| {
+            std.testing.refAllDecls(EmbeddedArray(.{
+                .@"align" = 1 << alignment,
+            }, T));
+            std.testing.refAllDecls(EmbeddedArray(.{
+                .@"volatile" = true,
+                .@"align" = 1 << alignment,
+            }, T));
+            std.testing.refAllDecls(EmbeddedArray(.{
+                .@"allowzero" = true,
+                .@"align" = 1 << alignment,
+            }, T));
+            std.testing.refAllDecls(EmbeddedArray(.{
+                .@"volatile" = true,
+                .@"allowzero" = true,
+                .@"align" = 1 << alignment,
+            }, T));
+        }
+    }
 }
