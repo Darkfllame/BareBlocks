@@ -302,6 +302,7 @@ pub const LoginConnection = struct {
             allocator.destroy(enc);
         }
         if (conn.compression) |comp| {
+            comp.deinit(allocator);
             allocator.destroy(comp);
         }
         OwnedConnection.deinitImpl(conn, allocator);
@@ -309,7 +310,6 @@ pub const LoginConnection = struct {
 
     fn disconnectImpl(conn: *Connection, reason: *const utils.TextComponent) Connection.WritePacketError!void {
         const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
-        assert(owned.data == .login);
 
         const gpa = owned.owner.allocator;
         var arena: std.heap.ArenaAllocator = .init(gpa);
@@ -445,17 +445,6 @@ pub const ConfigConnection = struct {
         .deinit = LoginConnection.deinitImpl,
         .disconnect = disconnectImpl,
     };
-
-    fn deinitImpl(conn: *Connection, allocator: Allocator) void {
-        allocator.free(conn.name.?);
-        if (conn.encryption) |enc| {
-            enc.deinit();
-            allocator.destroy(enc);
-        }
-        if (conn.compression) |comp| {
-            allocator.destroy(comp);
-        }
-    }
 
     fn disconnectImpl(conn: *Connection, reason: *const utils.TextComponent) Connection.WritePacketError!void {
         const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
@@ -642,6 +631,7 @@ pub fn handleHandshake(conn: *Connection, reader: *Io.Reader, params: net.Packet
             conn.reconfigure(.{
                 .in_phase = .login,
                 .timeout = .fromSeconds(20),
+                .vtable = &LoginConnection.vtable,
             });
         },
         .transfer => {
