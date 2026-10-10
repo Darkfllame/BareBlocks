@@ -68,12 +68,6 @@ pub fn build(b: *Build) !void {
     const zio_mod = b.dependency("zio", .{
         .target = target,
         .optimize = optimize,
-
-        .backend = "epoll",
-        // .@"resolve-beneath-mode" = .strict, // strict, best_effort
-        // .@"no-hack" = false,
-        // .@"task-migration" = true,
-        // .scheduler_metrics = true,
     }).module("zio");
 
     const vulkan_mod = b.dependency("vulkan", .{
