@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const zio = @import("zio");
 const core = @import("core");
+const utils = @import("utils");
 
 const Io = std.Io;
 
@@ -11,10 +12,20 @@ const use_safe_allocator = !builtin.cpu.arch.isWasm() and switch (builtin.mode) 
 };
 
 pub const std_options = std.Options{
+    // .log_level = .info,
     .log_scope_levels = &.{
+        // .{ .scope = .zio, .level = .info },
         // .{ .scope = .@"core/server", .level = .info },
-        // .{ .scope = .net, .level = .err },
+        // .{ .scope = .net, .level = .info },
     },
+};
+
+pub const zio_options = zio.Options{
+    .scheduling = .work_stealing,
+    .backend = .epoll,
+    .resolve_beneath_mode = .best_effort,
+    .no_hacks = true,
+    .scheduler_metrics = true,
 };
 
 pub const std_options_debug_io = zio.debug_io;
@@ -43,7 +54,7 @@ pub fn main(init: std.process.Init.Minimal) @typeInfo(@TypeOf(asyncMain)).@"fn".
     defer environ_map.deinit();
 
     const preopens = std.process.Preopens.init(arena.allocator()) catch |err|
-        std.process.fatal("failted to init preopens: {t}", .{err});
+        std.process.fatal("failed to init preopens: {t}", .{err});
 
     var rt: zio.Runtime = undefined;
     rt.initStatic(gpa, .{
@@ -52,7 +63,10 @@ pub fn main(init: std.process.Init.Minimal) @typeInfo(@TypeOf(asyncMain)).@"fn".
         std.process.fatal("failed to initialize ZIO runtime: {t}", .{err});
     defer rt.deinit();
 
-    const io = rt.io();
+    utils.translation.init(arena.allocator()) catch |err|
+        std.process.fatal("failed to initialize en_us translation table: {t}", .{err});
+
+    const io = rt.blockingIo();
 
     var main_fut = io.async(asyncMain, .{ .{
         .minimal = init,
@@ -76,12 +90,68 @@ fn asyncMain(init: std.process.Init, rt: *zio.Runtime) !void {
     });
     defer server.deinit();
 
-    var sig = try zio.Signal.init(.interrupt);
+    const SelectResult = union(enum) {
+        sig: @typeInfo(@TypeOf(signalWaiter)).@"fn".return_type.?,
+        console: @typeInfo(@TypeOf(readConsole)).@"fn".return_type.?,
+    };
+    var select_buf: [2]SelectResult = undefined;
+    var select = Io.Select(SelectResult).init(init.io, &select_buf);
+    defer select.cancelDiscard();
+
+    try select.concurrent(.sig, signalWaiter, .{&server.start});
+    try select.concurrent(.console, readConsole, .{ &server, init.gpa });
+
     server.start.set();
 
-    std.log.info("Listening on {f}", .{server.addressAlt()});
+    var current: ?SelectResult = select.await() catch unreachable;
 
-    sig.wait() catch unreachable;
+    while (current) |res| : (current = select.cancel()) {
+        const err = sw: switch (res) {
+            .sig => |result| if (result) continue else |err| err,
+            .console => |result| {
+                if (result) {
+                    break;
+                } else |err| break :sw err;
+            },
+        };
+        if (err == error.Canceled) continue;
+        core.logger.err("Error on {t}: {t}", .{ res, err });
+    }
+}
+
+fn signalWaiter(start_event: *zio.Event) error{ SetConsoleCtrlHandlerFailed, TooManySignalHandlers }!void {
+    var sig = try zio.Signal.init(.interrupt);
+    start_event.wait() catch return;
+    sig.wait() catch {};
+}
+
+fn readConsole(server: *core.Server, gpa: std.mem.Allocator) !void {
+    server.start.wait() catch return;
+
+    var buf: [64]u8 = undefined;
+    var file_reader = Io.File.stdin().readerStreaming(server.runtime.io(), &buf);
+    const reader = &file_reader.interface;
+
+    var w = try Io.Writer.Allocating.initCapacity(gpa, 16);
+    defer w.deinit();
+
+    while (true) {
+        w.clearRetainingCapacity();
+        const n = reader.streamDelimiterEnding(&w.writer, '\n') catch |e| switch (e) {
+            error.ReadFailed => return file_reader.err.?,
+            error.WriteFailed => return error.OutOfMemory,
+        };
+        if (n == 0) break;
+        reader.toss(1);
+
+        var it = std.mem.splitScalar(u8, w.written(), ' ');
+        const cmd = it.next() orelse continue;
+        if (std.mem.eql(u8, cmd, "close")) {
+            break;
+        } else {
+            core.logger.err("Couldn't parse command: {s}", .{cmd});
+        }
+    }
 }
 
 test {

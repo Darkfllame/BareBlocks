@@ -64,6 +64,7 @@ const PolledInfo = union(enum) {
 
 fn coro_acceptConnection(self: *Server, which: enum { v4, v6 }) CoroAccpetError!void {
     self.start.wait() catch return;
+    defer logger.info("Stopped listening for connections on ip{t} interface", .{which});
 
     const io = self.runtime.io();
 
@@ -84,12 +85,19 @@ fn coro_acceptConnection(self: *Server, which: enum { v4, v6 }) CoroAccpetError!
         },
     };
 
+    logger.info("Listening for connections on ip{t} interface: {f}", .{ which, sock.socket.address });
+
     while (true) {
         var stream: ?Io.net.Stream = sock.accept(io) catch |err| switch (err) {
             error.Unexpected, error.WouldBlock => unreachable,
             error.Canceled => break,
 
-            error.ProcessFdQuotaExceeded, error.SystemFdQuotaExceeded, error.ConnectionAborted, error.BlockedByFirewall, error.ProtocolFailure => |e| {
+            error.ProcessFdQuotaExceeded,
+            error.SystemFdQuotaExceeded,
+            error.ConnectionAborted,
+            error.BlockedByFirewall,
+            error.ProtocolFailure,
+            => |e| {
                 logger.err("Couldn't accept connection: {t}", .{e});
                 continue;
             },
@@ -101,7 +109,7 @@ fn coro_acceptConnection(self: *Server, which: enum { v4, v6 }) CoroAccpetError!
         };
         errdefer if (stream) |s| s.close(io);
 
-        logger.debug("Incomming connection: {d}:{f}", .{ stream.?.socket.handle, stream.?.socket.address });
+        logger.debug("Incomming connection to {f}", .{stream.?.socket.address});
 
         // {
         //     self.connections_mutex.lock() catch break;
@@ -132,7 +140,15 @@ fn coro_acceptConnection(self: *Server, which: enum { v4, v6 }) CoroAccpetError!
             switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => |e| {
-                    logger.err("Couldn't add connection to {f}: {t}", .{ stream.?.socket.address, e });
+                    var buf: [128]u8 = undefined;
+                    var stderr = std.debug.lockStderr(&buf);
+                    defer std.debug.unlockStderr();
+
+                    logger.err("Couldn't initialize connection to {f}: {t}", .{ stream.?.socket.address, e });
+                    if (@errorReturnTrace()) |ert| {
+                        std.debug.writeErrorReturnTrace(ert, stderr.terminal()) catch {};
+                    }
+                    stderr.file_writer.flush() catch {};
                     continue;
                 },
             }

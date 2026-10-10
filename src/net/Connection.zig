@@ -447,6 +447,10 @@ fn connectionHandlerInner(self: *Connection, allocator: Allocator) !void {
         return;
     };
 
+    if (res.? == .read and res.?.read == error.LegacyHandshake) {
+        self.disconnect(.{ .static = comptime &.text("LegacyHandshake", .{}) });
+    }
+
     self.send_state.channel.close(.graceful);
     self.writer_state.state.store(.closing, .monotonic);
     self.reader_state.state.store(.closing, .monotonic);
@@ -592,8 +596,8 @@ fn writeConnection(self: *Connection, allocator: Allocator) !void {
 
         assert(bytes.len <= max_packet_length);
 
-        logger.debug("[{f}] Sending packet: {Bi}", .{ self, bytes.len });
-        std.debug.dumpHex(bytes);
+        // logger.debug("[{f}] Sending packet: {Bi}", .{ self, bytes.len });
+        // std.debug.dumpHex(bytes);
 
         PacketType.writerNoAlloc(.var_int, writer, @intCast(bytes.len)) catch |e| switch (e) {
             error.WriteFailed => |err| return err,
@@ -663,17 +667,8 @@ fn deinit(self: *Connection, allocator: Allocator) void {
     self.vtable.deinit(self, allocator);
 }
 
+// TODO: Read timeout
 // TODO: Bandwidth monitor ?
-
-// I feel like going in a good direction. It's working at least, disconnect messages aren't sent though.
-// TODO: Check whether vanilla's timeout is on the socket options or when reading a new packet
-// TODO: Re-Organize like:
-//        Server::group
-//        └─handlerEntry() <- Only 1 acquire(). Since the lifetime of this functions acts as the one of the three below
-//          └─Io.Group | Io.Select
-//            ├─readEntry
-//            ├─writeEntry
-//            └─tickEntry
 
 stream_handle: Io.net.Socket.Handle,
 ip_address: Io.net.IpAddress,
