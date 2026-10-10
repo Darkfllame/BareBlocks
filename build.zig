@@ -212,6 +212,15 @@ pub fn build(b: *Build) !void {
         .local_imports = &.{"utils"},
     });
     _ = serial_mod;
+    const tui_mod = proj.createModule(b, .{
+        .name = "tui",
+        .root_source_file = b.path("src/tui/tui.zig"),
+        .imports = &.{
+            .{ .name = "zio", .module = zio_mod },
+        },
+        .local_imports = &.{"utils"},
+    });
+    _ = tui_mod;
 
     const client_mod = proj.createModule(b, .{
         .name = "client",
@@ -250,6 +259,7 @@ pub fn build(b: *Build) !void {
             "serial",
             "math",
             "net",
+            "tui",
         },
     });
 
