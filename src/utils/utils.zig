@@ -110,13 +110,13 @@ pub fn OptionalData(comptime T: type, comptime exists: bool) type {
     };
 }
 
-pub fn EmbeddedArray(comptime attribs: std.builtin.Type.Pointer.Attributes, comptime T: type) type {
+pub fn EmbeddedArray(comptime attribs: std.lang.Type.Pointer.Attributes, comptime T: type) type {
     return struct {
         const Self = @This();
 
         const self_align = attribs.@"align" orelse @max(@alignOf(usize), @alignOf(T));
         const start_offset = std.mem.alignForward(usize, @sizeOf(Self), self_align);
-        const aligned_attribs = std.builtin.Type.Pointer.Attributes{
+        const aligned_attribs = std.lang.Type.Pointer.Attributes{
             .@"const" = attribs.@"const",
             .@"volatile" = attribs.@"volatile",
             .@"allowzero" = attribs.@"allowzero",
@@ -163,23 +163,23 @@ pub fn EmbeddedArray(comptime attribs: std.builtin.Type.Pointer.Attributes, comp
             return self.slice()[i];
         }
 
-        pub fn atomicLoad(self: SelfPtr, i: usize, comptime order: std.builtin.AtomicOrder) T {
+        pub fn atomicLoad(self: SelfPtr, i: usize, comptime order: std.lang.AtomicOrder) T {
             return @atomicLoad(T, &self.slice()[i], order);
         }
 
-        pub fn atomicStore(self: SelfPtr, i: usize, value: T, comptime order: std.builtin.AtomicOrder) void {
+        pub fn atomicStore(self: SelfPtr, i: usize, value: T, comptime order: std.lang.AtomicOrder) void {
             @atomicStore(T, &self.slice()[i], value, order);
         }
 
-        pub fn atomicRmw(self: SelfPtr, i: usize, comptime op: std.builtin.AtomicRmwOp, value: T, comptime order: std.builtin.AtomicOrder) T {
+        pub fn atomicRmw(self: SelfPtr, i: usize, comptime op: std.lang.AtomicRmwOp, value: T, comptime order: std.lang.AtomicOrder) T {
             return @atomicRmw(T, &self.slice()[i], op, value, order);
         }
 
-        pub fn cmpxchgWeak(self: SelfPtr, i: usize, expected: T, value: T, comptime success_order: std.builtin.AtomicOrder, comptime fail_order: std.builtin.AtomicOrder) ?T {
+        pub fn cmpxchgWeak(self: SelfPtr, i: usize, expected: T, value: T, comptime success_order: std.lang.AtomicOrder, comptime fail_order: std.lang.AtomicOrder) ?T {
             return @cmpxchgWeak(T, &self.slice()[i], expected, value, success_order, fail_order);
         }
 
-        pub fn cmpxchgStrong(self: SelfPtr, i: usize, expected: T, value: T, comptime success_order: std.builtin.AtomicOrder, comptime fail_order: std.builtin.AtomicOrder) ?T {
+        pub fn cmpxchgStrong(self: SelfPtr, i: usize, expected: T, value: T, comptime success_order: std.lang.AtomicOrder, comptime fail_order: std.lang.AtomicOrder) ?T {
             return @cmpxchgStrong(T, &self.slice()[i], expected, value, success_order, fail_order);
         }
 

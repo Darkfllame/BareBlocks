@@ -116,9 +116,9 @@ pub const UUID = extern union {
         }
     };
 
-    pub fn fromBytes(bytes: *const [16]u8, endianness: std.builtin.Endian) UUID {
+    pub fn fromBytes(bytes: *const [16]u8, endianness: std.lang.Endian) UUID {
         var res = UUID{.bytes = bytes.*};
-        if (endianness != std.builtin.Endian.native) res.value = @byteSwap(res.value);
+        if (endianness != std.lang.Endian.native) res.value = @byteSwap(res.value);
         return res;
     }
 
@@ -137,7 +137,7 @@ pub const UUID = extern union {
             inline for (pairs, 0..) |c, off| {
                 const i = sec[0] + (off * 2);
                 const be_index = @divExact(i - j, 2);
-                const byte_index = switch (std.builtin.Endian.native) {
+                const byte_index = switch (std.lang.Endian.native) {
                     .little => res.bytes.len - be_index - 1,
                     .big => be_index,
                 };

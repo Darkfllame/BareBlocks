@@ -6,7 +6,7 @@ const LM = @This();
 const std = @import("std");
 const testing = std.testing;
 
-const Type = std.builtin.Type;
+const Type = std.lang.Type;
 const ctPrint = std.fmt.comptimePrint;
 const math = std.math;
 const sqrt = math.sqrt;
@@ -14,7 +14,7 @@ const assert = std.debug.assert;
 
 const LMType = enum { vector, matrix, quaternion };
 
-fn _nonPtrTypeInfo(comptime T: type) std.builtin.Type {
+fn _nonPtrTypeInfo(comptime T: type) Type {
     const info = @typeInfo(T);
     const ptrInfo = if (info == .pointer)
         @typeInfo(info.pointer.child)
@@ -1344,7 +1344,7 @@ pub fn lerp(comptime T: type, a: T, b: T, t: T) T {
     return a + (b - a) * t;
 }
 
-inline fn isLMTypeInner(comptime T: type, comptime LM_TYPE: LMType) ?std.builtin.Type {
+inline fn isLMTypeInner(comptime T: type, comptime LM_TYPE: LMType) ?Type {
     comptime {
         const info = _nonPtrTypeInfo(T);
         if (info != .@"struct") return null;

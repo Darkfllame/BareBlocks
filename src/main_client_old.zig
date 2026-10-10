@@ -129,7 +129,7 @@ const QueueFamilyIndices = struct {
     const Queues = blk: {
         var names: [fields.len][]const u8 = undefined;
         var types: [fields.len]type = undefined;
-        var attribs: [fields.len]std.builtin.Type.StructField.Attributes = undefined;
+        var attribs: [fields.len]std.lang.Type.Struct.FieldAttributes = undefined;
         for (fields, &names, &types, &attribs) |f, *name, *T, *att| {
             name.* = f.name;
             T.* = vk.Queue;

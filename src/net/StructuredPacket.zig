@@ -149,10 +149,10 @@ pub const Type = union(enum) {
     bool,
     /// The value is whether the value is
     /// signed/unsigned.
-    byte: std.builtin.Signedness,
+    byte: std.lang.Signedness,
     /// The value is whether the value is
     /// signed/unsigned.
-    short: std.builtin.Signedness,
+    short: std.lang.Signedness,
     int,
     long,
     float,
@@ -384,7 +384,7 @@ pub const Type = union(enum) {
             .structured => |desc| blk: {
                 var names: [desc.fields.len][]const u8 = undefined;
                 var types: [desc.fields.len]type = undefined;
-                var attrs: [desc.fields.len]std.builtin.Type.Struct.FieldAttributes = undefined;
+                var attrs: [desc.fields.len]std.lang.Type.Struct.FieldAttributes = undefined;
 
                 for (desc.fields, 0..) |field, i| {
                     names[i] = field.name;

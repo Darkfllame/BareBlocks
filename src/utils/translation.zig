@@ -68,8 +68,7 @@ pub fn init(allocator: std.mem.Allocator) !void {
 
         var array = try std.ArrayList(Component)
             .initCapacity(allocator, fmt_count * 2 + 1);
-        var arg_mask: std.bit_set.ArrayBitSet(usize, @bitSizeOf(Component.ArgumentIdx)) =
-            .initFull();
+        var arg_mask: std.bit_set.ArrayBitSet(usize, @bitSizeOf(Component.ArgumentIdx)) = .full;
 
         var start: usize = 0;
         var i: usize = 0;

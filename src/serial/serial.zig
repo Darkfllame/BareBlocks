@@ -192,7 +192,7 @@ pub const Value = union(BaseType) {
 
         pub fn getIndex(self: Aggregate, index: usize) Entry {
             if (is_debug and index >= self.count)
-                @call(.always_inline, std.builtin.panic.outOfBounds, .{ index, self.count });
+                @call(.always_inline, std.lang.panic.outOfBounds, .{ index, self.count });
             return .{ self.names[index], self.convertValueAtIndex(index) };
         }
 
@@ -792,7 +792,7 @@ pub const FieldProperty = struct {
 pub fn FieldGatherer(comptime fields: []const FieldProperty) type {
     var names: [fields.len][]const u8 = undefined;
     var types: [fields.len]type = undefined;
-    var attrs: [fields.len]std.builtin.Type.Struct.FieldAttributes = undefined;
+    var attrs: [fields.len]std.lang.Type.Struct.FieldAttributes = undefined;
     for (fields, 0..) |f, i| {
         names[i] = f.name;
         const T = f.type.GetType();

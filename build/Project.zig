@@ -41,7 +41,7 @@ pub const CreateModuleOptions = struct {
     imports: []const Module.Import = &.{},
 
     target: ?std.Build.ResolvedTarget = null,
-    optimize: ?std.builtin.Optimize = null,
+    optimize: ?std.lang.Optimize = null,
 
     /// `true` requires a compilation that includes this Module to link libc.
     /// `false` causes a build failure if a compilation that includes this Module would link libc.
@@ -53,9 +53,9 @@ pub const CreateModuleOptions = struct {
     link_libcpp: ?bool = null,
     single_threaded: ?bool = null,
     strip: ?bool = null,
-    unwind_tables: ?std.builtin.UnwindTables = null,
+    unwind_tables: ?std.lang.UnwindTables = null,
     dwarf_format: ?std.dwarf.Format = null,
-    code_model: std.builtin.CodeModel = .default,
+    code_model: std.lang.CodeModel = .default,
     stack_protector: ?bool = null,
     stack_check: ?bool = null,
     sanitize_c: ?std.zig.SanitizeC = null,

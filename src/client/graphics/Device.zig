@@ -34,40 +34,28 @@ const create_device_chain = vk.PhysicalDeviceFeatures2{
 };
 
 const QueueFamilyIndices = struct {
-    const fields = @typeInfo(QueueFamilyIndices).@"struct".fields;
-    const queue_priorities = blk: {
-        var values: [fields.len]f32 = undefined;
-        @memset(&values, 0);
-        break :blk values;
-    };
+    const info = @typeInfo(QueueFamilyIndices).@"struct";
+    const queue_priorities: [info.field_names.len]f32 = @splat(0);
 
     graphics: u32,
     transfer: u32,
     present: u32,
 
     /// Has same field names as `QueueFamilyIndices` but as `vk.Queue`.
-    const Queues = blk: {
-        var names: [fields.len][]const u8 = undefined;
-        var types: [fields.len]type = undefined;
-        var attribs: [fields.len]std.builtin.Type.StructField.Attributes = undefined;
-        for (fields, &names, &types, &attribs) |f, *name, *T, *att| {
-            name.* = f.name;
-            T.* = vk.Queue;
-            att.* = .{};
-        }
-        break :blk @Struct(.auto, null, &names, &types, &attribs);
-    };
-    const TagInt = std.math.Log2Int(@Int(.unsigned, fields.len));
-    const FieldsEnum = blk: {
-        var names: [fields.len][]const u8 = undefined;
-        var values: [fields.len]TagInt = undefined;
-        for (fields, 0..) |f, i| {
-            names[i] = f.name;
-            values[i] = i;
-        }
-
-        break :blk @Enum(TagInt, .nonexhaustive, &names, &values);
-    };
+    const Queues = @Struct(
+        .auto,
+        null,
+        info.field_names,
+        &@splat(vk.Queue),
+        &@splat(.{}),
+    );
+    const TagInt = std.math.Log2Int(@Int(.unsigned, info.field_names.len));
+    const FieldsEnum =  @Enum(
+        TagInt,
+        .nonexhaustive,
+        info.field_names,
+        std.simd.iota(TagInt, info.field_names.len),
+    );
 
     fn init(
         self: *QueueFamilyIndices,
@@ -126,12 +114,12 @@ const QueueFamilyIndices = struct {
         info_buffer: []vk.DeviceQueueCreateInfo,
     ) []const vk.DeviceQueueCreateInfo {
         var len: usize = 0;
-        inline for (fields) |f| {
-            const qfi = @field(self, f.name);
+        inline for (info.field_names) |fname| {
+            const qfi = @field(self, fname);
 
             buf_search: for (info_buffer[0..len]) |*qci| {
                 if (qci.queue_family_index == qfi) {
-                    @field(queueIndices, f.name) = qci.queue_count;
+                    @field(queueIndices, fname) = qci.queue_count;
                     qci.queue_count += 1;
                     break :buf_search;
                 }
@@ -141,7 +129,7 @@ const QueueFamilyIndices = struct {
                     .queue_count = 1,
                     .p_queue_priorities = &queue_priorities,
                 };
-                @field(queueIndices, f.name) = 0;
+                @field(queueIndices, fname) = 0;
                 len += 1;
             }
         }
