@@ -12,14 +12,22 @@
     - `std.http` kinda trash
     - httpx-zig doesn't offer streaming
     - Make one myself ?
-- Multithreading
-    - Preferable use/make "lock-free" data structs by exploiting atomics
-    - Concurrent List and Map
-    - Split all the connections into blocks of *N* connections
-    - Loaded chunks should be split into region
-        - A region is tied to one or more players
-            - And world logic should be run on their "logic thread"
-        - Loaded regions can merge into a single one
-            - Based on overlapping size
-        - Orphan regions (player-less, basically not owned by a player- YES THIS IS FUNNY) would all run on
-            the same thread. For resource conservation; Since they're not actively being useful.
+- Command parser and handler
+- TUI
+    - Separate console input/outputs. Kinda like:
+        ╭─────────────────╮╭─────────────────╮╭──────────────────────────────────╮
+        │ current scope   ││ show scope tree ││ ...                              │
+        ╞═════════════════╧╧═════════════════╧╡ old command 9                    │
+        │                                     │ old command 8                    │
+        │                                     │ old command 7                    │
+        │                                     │ old command 6                    │
+        │                                     │ old command 5                    │
+        │                                     │ old command 4                    │
+        │                                     │ old command 3                    │
+        │                                     │ old command 2                    │
+        │                                     │ old command 1                    │
+        │                                     │ old command 0                    │
+        ├─────────────────────────────────────┴──────────────────────────────────┤
+        │ input section                                                          │
+        ╰────────────────────────────────────────────────────────────────────────╯
+    - Can be substituted with `zig build run &> /dev/pts/X > /dev/ptr/X`. The exact path can be obtained by opening a new terminal and typing `clear && tty && tee`

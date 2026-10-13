@@ -99,7 +99,7 @@ fn asyncMain(init: std.process.Init, rt: *zio.Runtime) !void {
     defer select.cancelDiscard();
 
     try select.concurrent(.sig, signalWaiter, .{&server.start});
-    try select.concurrent(.console, readConsole, .{ &server, init.gpa });
+    try select.concurrent(.console, readConsole, .{ &server, init.gpa, init.environ_map });
 
     server.start.set();
 
@@ -125,12 +125,18 @@ fn signalWaiter(start_event: *zio.Event) error{ SetConsoleCtrlHandlerFailed, Too
     sig.wait() catch {};
 }
 
-fn readConsole(server: *core.Server, gpa: std.mem.Allocator) !void {
+fn readConsole(server: *core.Server, gpa: std.mem.Allocator, evm: *const std.process.Environ.Map) !void {
     server.start.wait() catch return;
 
+    const stdin = Io.File.stdin();
+    const io = server.runtime.io();
+
     var buf: [64]u8 = undefined;
-    var file_reader = Io.File.stdin().readerStreaming(server.runtime.io(), &buf);
+    var buf2: [64]u8 = undefined;
+    var file_reader = stdin.readerStreaming(io, &buf);
+    var file_writer = stdin.writerStreaming(io, &buf2);
     const reader = &file_reader.interface;
+    var writer = StdinLogger(.@"core/server").init(&file_writer, evm) catch return;
 
     var w = try Io.Writer.Allocating.initCapacity(gpa, 16);
     defer w.deinit();
@@ -149,9 +155,73 @@ fn readConsole(server: *core.Server, gpa: std.mem.Allocator) !void {
         if (std.mem.eql(u8, cmd, "close")) {
             break;
         } else {
-            core.logger.err("Couldn't parse command: {s}", .{cmd});
+            writer.err("Couldn't parse command: {s}", .{cmd});
         }
     }
+}
+
+fn StdinLogger(comptime scope: @EnumLiteral()) type {
+    return struct {
+        const Self = @This();
+
+        fn logFn(self: *Self, comptime level: std.log.Level, comptime format: []const u8, args: anytype) void {
+            if (self.writer) |w| blk: {
+                std.log.defaultLogFileTerminal(level, scope, format, args, .{
+                    .writer = w,
+                    .mode = self.mode,
+                }) catch {
+                    self.writer = null;
+                    break :blk;
+                };
+                w.flush() catch {
+                    self.writer = null;
+                    break :blk;
+                };
+                return;
+            }
+            return std.options.logFn(level, scope, format, args);
+        }
+
+        writer: ?*Io.Writer,
+        mode: Io.Terminal.Mode,
+
+        pub fn init(writer: *Io.File.Writer, env: *const std.process.Environ.Map) Io.Cancelable!Self {
+            if (!try writer.file.isTty(writer.io)) return .{ .writer = null, .mode = undefined };
+            return .{
+                .writer = &writer.interface,
+                .mode = try .detect(
+                    writer.io,
+                    writer.file,
+                    env.get("NO_COLOR") != null,
+                    env.get("CLCOLOR_FORCE") != null,
+                ),
+            };
+        }
+
+        pub fn debug(self: *Self, comptime format: []const u8, args: anytype) void {
+            if (comptime !std.log.logEnabled(.debug, scope)) return;
+
+            self.logFn(.debug, format, args);
+        }
+
+        pub fn info(self: *Self, comptime format: []const u8, args: anytype) void {
+            if (comptime !std.log.logEnabled(.info, scope)) return;
+
+            self.logFn(.info, format, args);
+        }
+
+        pub fn warn(self: *Self, comptime format: []const u8, args: anytype) void {
+            if (comptime !std.log.logEnabled(.warn, scope)) return;
+
+            self.logFn(.warn, format, args);
+        }
+
+        pub fn err(self: *Self, comptime format: []const u8, args: anytype) void {
+            if (comptime !std.log.logEnabled(.err, scope)) return;
+
+            self.logFn(.err, format, args);
+        }
+    };
 }
 
 test {
