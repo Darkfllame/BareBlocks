@@ -5,7 +5,6 @@
     .minimum_zig_version = "0.16.0",
 
     .dependencies = .{
-        .coroutines = .{ .path = "./coroutines" },
         .vulkan = .{
             .url = "git+https://github.com/Darkfllame/vulkan-zig.git#b9c393af2c8699b4473aeb13b2a3044d13449478",
             .hash = "vulkan-0.0.0-r7Ytx0aPAwCsAq01qIn5TgyJffSkU1yfq7VavsP1-vDd",

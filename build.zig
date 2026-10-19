@@ -7,7 +7,6 @@ const buildzigzon: struct {
     version: []const u8,
     minimum_zig_version: []const u8,
     dependencies: struct {
-        coroutines: Dep,
         vulkan: Dep,
         vulkan_headers: Dep,
         sdl: Dep,
@@ -97,12 +96,6 @@ pub fn build(b: *Build) !void {
         break :blk mod;
     };
 
-    const coro_mod = b.dependency("coroutines", .{
-        .target = target,
-        .optimize = optimize,
-    }).module("coroutines");
-    _ = coro_mod;
-
     const config = b.addOptions();
     config.addOption(std.SemanticVersion, "version", version);
     const config_mod = config.createModule();
@@ -181,7 +174,6 @@ pub fn build(b: *Build) !void {
             .{ .name = "config", .module = config_mod },
         },
         .local_imports = &.{
-            // "coro",
             "core",
             "utils",
             "serial",
@@ -196,7 +188,6 @@ pub fn build(b: *Build) !void {
             .{ .name = "config", .module = config_mod },
         },
         .local_imports = &.{
-            // "coro",
             "utils",
             "serial",
             "math",
@@ -253,7 +244,6 @@ pub fn build(b: *Build) !void {
             .{ .name = "config", .module = config_mod },
         },
         .local_imports = &.{
-            // "coro",
             "core",
             "utils",
             "serial",
@@ -278,12 +268,7 @@ pub fn build(b: *Build) !void {
     });
 
     proj.addModule(.{ .name = "registries", .module = registries_mod });
-    proj.addModule(.{
-        .name = "packets",
-        .module = packets_mod,
-        .local_imports = &.{ "core", "net" },
-    });
-    // proj.addModule(.{ .name = "coro", .module = coro_mod });
+    proj.addModule(.{ .name = "packets", .module = packets_mod });
 
     mc_gendata.root_module.addImport("utils", utils_mod);
     mc_gendata.root_module.addAnonymousImport("net", .{
