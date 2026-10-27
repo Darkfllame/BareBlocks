@@ -103,7 +103,7 @@ const FormatContext = struct {
 
             var is_first = true;
             if (self.formatting_mask.get(self.formatting, .color)) |color| {
-                const hex: u24 = @intFromEnum(color);
+                const hex: u24 = @backingInt(color);
                 fba.print("38;2;{d};{d};{d}", .{
                     (hex >> 16) & 0xFF,
                     (hex >> 8) & 0xFF,
@@ -650,7 +650,7 @@ pub fn serialize(self: *const TextComponent, mapw: *serial.MapWriter) serial.Map
                     else => |tag| try mapw.writeString(@tagName(tag)),
                     _ => |tag| {
                         const w = try mapw.stringWriter(null, &string_buffer);
-                        try w.print("#{x:0>6}", .{@intFromEnum(tag)});
+                        try w.print("#{x:0>6}", .{@backingInt(tag)});
                         try w.flush();
                     },
                 },
@@ -896,7 +896,10 @@ pub fn deserialize(mapr: *serial.MapReader) serial.MapReader.ReadError!TextCompo
             var next_token = try mapr.peek();
             switch (next_token) {
                 .string, .aggregate_start, .array_start => current = try deserialize(mapr),
-                .array_end => return .empty,
+                .array_end => {
+                    _ = mapr.next() catch unreachable;
+                    return .empty;
+                },
                 else => return error.UnexpectedToken,
             }
 
@@ -907,7 +910,10 @@ pub fn deserialize(mapr: *serial.MapReader) serial.MapReader.ReadError!TextCompo
                 next_token = try mapr.peek();
                 switch (next_token) {
                     .string, .aggregate_start, .array_start => try list.append(gpa, try deserialize(mapr)),
-                    .array_end => break,
+                    .array_end => {
+                        _ = mapr.next() catch unreachable;
+                        break;
+                    },
                     else => return error.UnexpectedToken,
                 }
             }

@@ -347,6 +347,8 @@ pub const SerialReader = struct {
     pub fn deinit(self: *SerialReader) void {
         self.string_buffer.deinit(self.getAllocator());
         self.mapr.nesting.deinit(self.getAllocator());
+        self.mapr.arena.deinit();
+        self.* = undefined;
     }
 
     pub fn redeemArena(self: *SerialReader, arena: *std.heap.ArenaAllocator) void {
@@ -377,6 +379,7 @@ pub const SerialReader = struct {
                             .list => .value,
                             .aggregate => .field_name,
                         } else return error.EndOfStream;
+                        try self.skipWhitespace();
                         continue :sw self.state;
                     },
                     else => return error.UnexpectedToken,

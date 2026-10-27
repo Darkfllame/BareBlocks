@@ -390,6 +390,15 @@ pub const Token = union(TokenType) {
         };
     }
 
+    pub fn parseEnum(self: Token, comptime E: type) ?E {
+        return sw: switch (self) {
+            .boolean => |b| continue :sw .{ .byte = @intFromBool(b) },
+            .byte, .short, .int, .long => |v| std.enums.fromInt(E, v),
+            .string => |s| std.meta.stringToEnum(E, s),
+            else => null,
+        };
+    }
+
     pub fn format(self: Token, writer: *IoWriter) IoWriter.Error!void {
         try writer.print(".{t}", .{self});
         switch (self) {
@@ -538,6 +547,7 @@ pub const MapReader = struct {
         UnknownField,
         DuplicateField,
         InvalidEnumTag,
+        Overflow,
     };
 
     pub const NestingType = enum(u1) { aggregate, list };
@@ -556,17 +566,17 @@ pub const MapReader = struct {
     }
 
     pub inline fn pushNesting(self: *MapReader, nt: NestingType) Allocator.Error!void {
-        return self.nesting.push(self.getAlloctor(), @intFromEnum(nt));
+        return self.nesting.push(self.getAlloctor(), @backingInt(nt));
     }
 
     pub inline fn popNesting(self: *MapReader) ?NestingType {
         if (self.nesting.bit_len == 0) return null;
-        return @enumFromInt(self.nesting.pop());
+        return @fromBackingInt(@intCast(self.nesting.pop()));
     }
 
     pub inline fn peekNesting(self: *MapReader) ?NestingType {
         if (self.nesting.bit_len < 1) return null;
-        return @enumFromInt(self.nesting.peek());
+        return @fromBackingInt(@intCast(self.nesting.peek()));
     }
 
     pub fn peek(self: *MapReader) ReadError!TokenType {
@@ -584,10 +594,12 @@ pub const MapReader = struct {
     }
 
     pub inline fn nextMax(self: *MapReader, max_value_len: usize) ReadError!Token {
-        return self.vtable.next(self, max_value_len);
+        const res = self.vtable.next(self, max_value_len);
+        // std.log.debug("nextMax: {!f}", .{res});
+        return res;
     }
 
-    pub inline fn skipValue(self: *MapReader) ReadError!void {
+    pub noinline fn skipValue(self: *MapReader) ReadError!void {
         return self.vtable.skip(self, self.nesting.bit_len);
     }
 
@@ -608,13 +620,13 @@ pub const MapReader = struct {
     }
 
     pub inline fn deserializeNamed(self: *MapReader, comptime T: type, comptime name: []const u8) ReadError!T {
-        return @field(T, name)(self);
+        return @call(.never_inline, @field(T, name), .{self});
     }
 
     pub fn mapToWriter(self: *MapReader, comptime max_depth: usize, mapw: *MapWriter) (MapWriter.WriteError || ReadError)!void {
         const base_height = self.stackHeight();
 
-        var bstack: [max_depth]u8 = undefined;
+        var bstack: [@divCeil(max_depth, 8)]u8 = undefined;
         var depth: usize = 0;
         var count: u1 = 0;
         while (true) {
@@ -903,7 +915,7 @@ pub fn FieldGatherer(comptime fields: []const FieldProperty) type {
 
                     self.readValue(field_enum, gpa, arena, mapr) catch |e| {
                         if (fp.type == .enumeration and fp.type.enumeration.ignore_invalid and e == error.InvalidEnumTag) {
-                            return @enumFromInt(fields.len);
+                            return @fromBackingInt(@intCast(fields.len));
                         }
                         return e;
                     };
@@ -911,7 +923,7 @@ pub fn FieldGatherer(comptime fields: []const FieldProperty) type {
                 }
             } else if (!self.opts.ignore_unknown_fields) return error.UnknownField;
             try mapr.skipValue();
-            return @enumFromInt(fields.len); // always out of range
+            return @fromBackingInt(@intCast(fields.len)); // always out of range
         }
 
         pub fn set(self: *Self, comptime field: FieldEnum, value: @FieldType(Values, @tagName(field))) void {
