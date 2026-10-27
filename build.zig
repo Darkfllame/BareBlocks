@@ -202,7 +202,6 @@ pub fn build(b: *Build) !void {
         .root_source_file = b.path("src/serial/serial.zig"),
         .local_imports = &.{"utils"},
     });
-    _ = serial_mod;
     const tui_mod = proj.createModule(b, .{
         .name = "tui",
         .root_source_file = b.path("src/tui/tui.zig"),
@@ -270,6 +269,7 @@ pub fn build(b: *Build) !void {
     proj.addModule(.{ .name = "registries", .module = registries_mod });
     proj.addModule(.{ .name = "packets", .module = packets_mod });
 
+    mc_gendata.root_module.addImport("serial", serial_mod);
     mc_gendata.root_module.addImport("utils", utils_mod);
     mc_gendata.root_module.addAnonymousImport("net", .{
         .root_source_file = net_mod.root_source_file.?,

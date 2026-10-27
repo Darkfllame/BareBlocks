@@ -11,6 +11,9 @@ const logger = std.log.scoped(.@"utils/identifier");
 
 namespace_ptr: [*]const u8,
 path_ptr: [*]const u8,
+// TODO: Refactor this to u8 to allow for for flags (owned, length properties etc)
+// TODO: Maybe even more than 32 bytes for namespace is useless.
+// TODO: However, path shouldn't need more than 8 bits for length
 namespace_len: u16,
 path_len: u16,
 
@@ -68,8 +71,12 @@ pub fn path(self: Identifier) []const u8 {
     return self.path_ptr[0..self.path_len];
 }
 
+pub fn dupeLen(self: Identifier) usize {
+    return self.namespace_len + self.path_len;
+}
+
 pub fn dupe(self: Identifier, allocator: std.mem.Allocator) std.mem.Allocator.Error!Identifier {
-    const duped = try allocator.alloc(u8, self.namespace_len + self.path_len);
+    const duped = try allocator.alloc(u8, self.dupeLen());
     @memcpy(duped[0..self.namespace_len], self.namespace_ptr);
     @memcpy(duped[self.namespace_len..], self.path_ptr);
     return .{
@@ -124,6 +131,10 @@ pub inline fn vanilla(comptime _path: []const u8) Identifier {
         literal(_path)
     else
         literal("minecraft:" ++ _path);
+}
+
+pub fn isVanilla(self: Identifier) bool {
+    return std.mem.eql(u8, self.namespace(), "minecraft");
 }
 
 pub fn format(self: Identifier, writer: *std.Io.Writer) std.Io.Writer.Error!void {
