@@ -435,6 +435,7 @@ pub const SerialReader = struct {
                                 'r', 'u', 'e', 'a', 'l', 's' => {},
                                 else => return error.UnexpectedToken,
                             }
+                            reader.toss(1);
                             self.string_buffer.appendBounded(byte) catch return error.UnexpectedToken;
                         }
                         self.state = .end_value;
