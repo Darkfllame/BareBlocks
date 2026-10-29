@@ -28,3 +28,7 @@ pub fn release(self: *RefCount) bool {
     }
     return false;
 }
+
+test {
+    std.testing.refAllDecls(@This());
+}

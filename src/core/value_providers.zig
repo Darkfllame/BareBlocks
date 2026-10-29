@@ -75,3 +75,7 @@ pub const FloatProvider = union(enum) {
         plateau: f32,
     },
 };
+
+test {
+    std.testing.refAllDecls(@This());
+}
