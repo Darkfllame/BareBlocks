@@ -30,7 +30,7 @@ pub const zio_options = zio.Options{
 
 pub const std_options_debug_io = zio.debug_io;
 
-pub fn main(init: std.process.Init.Minimal) @typeInfo(@TypeOf(asyncMain)).@"fn".return_type.? {
+pub fn main(init: std.process.Init.Minimal) !@typeInfo(@typeInfo(@TypeOf(asyncMain)).@"fn".return_type.?).error_union.payload {
     // Initialization code STRAIGHT stolen from std/start.zig
     var sa = if (use_safe_allocator) std.heap.SafeAllocator.init(std.heap.page_allocator, .{});
     defer _ = if (use_safe_allocator) sa.deinit();
@@ -49,22 +49,30 @@ pub fn main(init: std.process.Init.Minimal) @typeInfo(@TypeOf(asyncMain)).@"fn".
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
 
-    var environ_map = std.process.Environ.createMap(.{ .block = init.environ.block }, gpa) catch |err|
-        std.process.fatal("failed to parse environment variables: {t}", .{err});
+    var environ_map = std.process.Environ.createMap(.{ .block = init.environ.block }, gpa) catch |err| {
+        std.log.err("Failed to parse environment variables", .{});
+        return err;
+    };
     defer environ_map.deinit();
 
-    const preopens = std.process.Preopens.init(arena.allocator()) catch |err|
-        std.process.fatal("failed to init preopens: {t}", .{err});
+    const preopens = std.process.Preopens.init(arena.allocator()) catch |err| {
+        std.log.err("Failed to init preopens", .{});
+        return err;
+    };
 
     var rt: zio.Runtime = undefined;
     rt.initStatic(gpa, .{
         .executors = .auto,
-    }) catch |err|
-        std.process.fatal("failed to initialize ZIO runtime: {t}", .{err});
+    }) catch |err| {
+        std.log.err("Failed to initialize ZIO runtime", .{});
+        return err;
+    };
     defer rt.deinit();
 
-    utils.translation.init(arena.allocator()) catch |err|
-        std.process.fatal("failed to initialize en_us translation table: {t}", .{err});
+    utils.translation.init(arena.allocator()) catch |err| {
+        std.log.err("Failed to initialize en_us translation table", .{});
+        return err;
+    };
 
     const io = rt.blockingIo();
 
