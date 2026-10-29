@@ -20,7 +20,9 @@ height: utils.Range(HeightInt),
 infiniburn: utils.Identifier.Tag,
 skybox: Skybox,
 cardinal_light: enum { default, nether },
-default_clock: ?utils.Identifier,
+attributes: void = {},
+default_clock: ?utils.Identifier = null,
+timelines: void = {},
 
 pub const height_range = utils.Range(HeightInt).init(world.min_world_height, world.max_world_height);
 pub const y_range = utils.Range(HeightInt).init(world.min_world_y, world.max_world_y);
