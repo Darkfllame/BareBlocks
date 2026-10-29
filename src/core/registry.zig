@@ -225,6 +225,8 @@ pub const TypeErasedRegistry = struct {
 
 pub const RootRegistry = struct {
     type_erased: TypeErasedRegistry = .{ .type = .registry_type },
+
+    // pub fn register(self: *RootRegistry, )
 };
 
 pub fn Registry(comptime SubType: type, comptime enum_type: RegistryType) type {
@@ -274,6 +276,10 @@ pub inline fn isRegistry(comptime T: type) bool {
 
 test {
     std.testing.refAllDecls(@This());
+    inline for (comptime std.meta.declarations(registries)) |decl| {
+        const T = @field(registries, decl);
+        if (@TypeOf(T) == type) _ = std.testing.refAllDecls(T);
+    }
 }
 
 test isRegistry {

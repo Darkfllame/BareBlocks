@@ -188,7 +188,7 @@ fn printRegistriesFile(reg_file: *const RegistriesReport, dpr: *const DatapackRe
 
     var dp_reg_it = dpr.registries.iterator();
     while (dp_reg_it.next()) |entry| {
-        try out.print("    .{{ \"{f}\", .{{ .dynamic = {}, .stable = {}, .has_tags = {} }} }},\n", .{
+        try out.print("    .{{ \"{f}\", RegistryProperties{{ .dynamic = {}, .stable = {}, .has_tags = {} }} }},\n", .{
             entry.key_ptr.alt(.full),
             entry.value_ptr.dynamic,
             entry.value_ptr.stable,
