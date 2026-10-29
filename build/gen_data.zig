@@ -6,6 +6,7 @@ const serial = @import("serial");
 
 const RegistriesReport = @import("reports/RegistriesReport.zig");
 const PacketsReport = @import("reports/PacketsReport.zig");
+const DatapackReport = @import("reports/DatapackReport.zig");
 
 const json = std.json;
 const Io = std.Io;
@@ -17,76 +18,6 @@ const gen_file_header =
     \\
     \\
 ;
-
-pub fn IdentifierList(comptime T: type) type {
-    return struct {
-        const Self = @This();
-
-        const SliceType = if (@sizeOf(T) == 0) void else [*]T;
-        const entries_default = if (SliceType == void) {} else &[_]T{};
-
-        map: std.HashMapUnmanaged(utils.Identifier, u32, utils.Identifier.HashCtx, std.hash_map.default_max_load_percentage) = .empty,
-        entries: SliceType = entries_default,
-        mask: std.DynamicBitSetUnmanaged = .{},
-        capacity: u32 = 0,
-
-        pub const Iterator = struct {
-            list: *const Self,
-            mask_it: std.DynamicBitSetUnmanaged.Iterator(.{}),
-
-            pub fn next(self: *Iterator) ?struct { utils.Identifier, u32, T } {
-                const idx: u32 = @intCast(self.mask_it.next() orelse return null);
-                var map_it = self.list.map.iterator();
-                while (map_it.next()) |en| {
-                    if (en.value_ptr.* != idx) continue;
-                    return .{ en.key_ptr.*, idx, if (SliceType == void) {} else self.list.entries[idx] };
-                }
-                unreachable; // should not happen
-            }
-        };
-
-        pub fn deinit(self: *Self, allocator: Allocator) void {
-            self.map.deinit(allocator);
-            allocator.free(self.entries);
-            self.mask.deinit(allocator);
-        }
-
-        pub fn ensureTotalCapacity(self: *Self, allocator: Allocator, capacity: u32) Allocator.Error!void {
-            try self.map.ensureTotalCapacity(allocator, capacity);
-            if (self.capacity < capacity) {
-                try self.mask.resize(allocator, capacity, false);
-                if (SliceType != void) {
-                    const better_capacity = std.ArrayList(u32).growCapacity(capacity);
-                    self.entries = (try allocator.realloc(self.entries[0..self.capacity], better_capacity)).ptr;
-                }
-                self.capacity = capacity;
-            }
-        }
-
-        pub fn set(self: *Self, allocator: Allocator, id: utils.Identifier, idn: u32, v: T) !void {
-            try self.ensureTotalCapacity(allocator, idn + 1);
-
-            if (self.mask.isSet(idn)) return error.DuplicateField;
-
-            const gop = try self.map.getOrPut(allocator, id);
-            if (gop.found_existing) return error.DuplicateField;
-            errdefer self.map.removeByPtr(gop.key_ptr);
-
-            gop.value_ptr.* = idn;
-            self.mask.set(idn);
-            if (SliceType != void) self.entries[idn] = v;
-        }
-
-        pub fn clearRetainingCapacity(self: *Self) void {
-            self.map.clearRetainingCapacity();
-            self.mask.unsetAll();
-        }
-
-        pub fn iterator(self: *const Self) Iterator {
-            return .{ .list = self, .mask_it = self.mask.iterator(.{}) };
-        }
-    };
-}
 
 // NOTE: Need to read `datapack.json` to know which registries are dynamic/synchronized (elements),
 // NOTE: can have tags refering their elements (tags) or are stable
@@ -202,10 +133,266 @@ fn RegistryFieldsFormatter(comptime T: type) type {
                     });
                 }
 
-                try writer.print("pub const self_type: RegistryType = .@\"{s}{f}{s}\";", .{
-                    e.ps.prefix, e.self_name.alt(.omit_minecraft), e.ps.suffix,
-                });
+                try writer.print("pub const self_type: RegistryType = .@\"{f}\";", .{e.self_name.alt(.omit_minecraft)});
             }
+        }
+    };
+}
+
+fn printAstErrors(ast: std.zig.Ast, writer: *Io.Writer) Io.Writer.Error!void {
+    for (ast.errors) |err| {
+        try std.zig.Ast.renderError(ast, err, writer);
+        try writer.writeByte('\n');
+    }
+}
+
+fn pascalizeInto(str: []const u8, writer: *Io.Writer) Io.Writer.Error!void {
+    var next_upper: bool = true;
+    for (str) |c| {
+        try writer.writeByte(sw: switch (c) {
+            '0'...'9' => {
+                next_upper = true;
+                break :sw c;
+            },
+            'a'...'z', 'A'...'Z' => if (next_upper) {
+                next_upper = false;
+                break :sw c & (~@as(u8, 32));
+            } else c,
+            else => {
+                next_upper = true;
+                continue;
+            },
+        });
+    }
+}
+
+fn pascalize(str: []const u8, alloc: Allocator) Allocator.Error![]u8 {
+    const res = try alloc.alloc(u8, str.len);
+    errdefer alloc.free(res);
+
+    var w = Io.Writer.fixed(res);
+    pascalizeInto(str, &w) catch unreachable;
+
+    return alloc.realloc(res, w.end);
+}
+
+fn printRegistriesFile(reg_file: *const RegistriesReport, dpr: *const DatapackReport, out: *Io.Writer) !void {
+    try out.writeAll(gen_file_header ++
+        \\const root = @This();
+        \\const std = @import("std");
+        \\
+        \\pub const RegistryProperties = struct { dynamic: bool, stable: bool, has_tags: bool };
+        \\pub const properties = std.StaticStringMap(RegistryProperties).initComptime(.{
+        \\
+    );
+
+    var dp_reg_it = dpr.registries.iterator();
+    while (dp_reg_it.next()) |entry| {
+        try out.print("    .{{ \"{f}\", .{{ .dynamic = {}, .stable = {}, .has_tags = {} }} }},\n", .{
+            entry.key_ptr.alt(.full),
+            entry.value_ptr.dynamic,
+            entry.value_ptr.stable,
+            entry.value_ptr.has_tags,
+        });
+    }
+
+    try out.writeAll(
+        \\
+        \\});
+    );
+
+    try out.print(
+        \\pub const RegistryType = enum(u32) {{
+        \\    registry_type = std.math.maxInt(u32),
+        \\    {f}
+        \\    
+        \\    pub fn RealType(comptime self: RegistryType) type {{
+        \\        return switch(self) {{
+        \\            .registry_type => RegistryType,
+        \\            {f}
+        \\        }};
+        \\    }}
+        \\
+        \\    pub fn identifier(self: RegistryType) []const u8 {{
+        \\        return switch(self) {{
+        \\            .registry_type => "minecraft:root",
+        \\            {f}
+        \\        }};
+        \\    }}
+        \\}};
+        \\
+    , .{
+        RegistryFieldsFormatter(RegistriesReport.Registry){
+            .reg = &reg_file.entries,
+            .mode = .{ .@"enum" = .{
+                .self_name = .vanilla("registry_type"),
+                .no_trail_limit = std.math.maxInt(usize),
+                .exaustive = true,
+            } },
+            .entry_mode = .number,
+        },
+        RegistryFieldsFormatter(RegistriesReport.Registry){
+            .reg = &reg_file.entries,
+            .mode = .@"switch",
+            .entry_mode = .{ .pascal_name = .{ .suffix = "Registry" } },
+        },
+        RegistryFieldsFormatter(RegistriesReport.Registry){
+            .reg = &reg_file.entries,
+            .mode = .@"switch",
+            .entry_mode = .{ .id = .{} },
+            .write_quotes = true,
+        },
+    });
+
+    var count: usize = 0;
+    var regs_it = reg_file.entries.iterator();
+    while (regs_it.next()) |entry| : (count += 1) {
+        const id, _, const reg = entry;
+
+        try out.print(
+            \\pub const @"{f}{f}Registry" = enum(u32) {{
+            \\    {f}
+            \\
+            \\    pub const properties: RegistryProperties = root.properties.get(self_type.identifier()).?;
+            \\}};
+            \\
+        , .{
+            PascalFormatter.from(if (!id.isVanilla()) id.namespace() else ""),
+            PascalFormatter.from(id.path()),
+            RegistryFieldsFormatter(void){
+                .reg = &reg.entries,
+                .mode = .{ .@"enum" = .{
+                    .self_name = id,
+                    .ps = .{ .suffix = "Registry" },
+                    .no_trail_limit = std.math.maxInt(usize),
+                    .default = reg.default,
+                } },
+                .entry_mode = .number,
+            },
+        });
+    }
+}
+
+fn printPacketsFile(pack_file: *const PacketsReport, out: *Io.Writer) !void {
+    const pack_file_mut = @constCast(pack_file);
+    try out.writeAll(gen_file_header ++
+        \\pub fn registry(comptime PacketRegistry: type, comptime source: type) PacketRegistry {
+        \\    return .{.entries = .init(.{
+    );
+
+    var side_it = pack_file_mut.ids.iterator();
+    while (side_it.next()) |entry| {
+        const side = entry.key;
+        try out.print(".{t} = .init(.{{", .{side});
+
+        var phase_it = entry.value.iterator();
+        while (phase_it.next()) |entry2| {
+            const phase = entry2.key;
+            try out.print(".{t} = &.{{", .{phase});
+
+            var last_id: u32 = 0;
+            var packet_it = entry2.value.iterator();
+            while (packet_it.next()) |entry3| {
+                const id, const idn, _ = entry3;
+                if (idn - last_id > 1) {
+                    for (last_id..idn - 1) |_| {
+                        try out.writeAll(".{.write_cushion=0, .resource=\"none\",.callback=null},");
+                    }
+                }
+
+                try out.print(
+                    \\.{{
+                    \\  .write_cushion=512,
+                    \\  .resource="{f}",
+                    \\  .callback= if (@hasDecl(source, "{t}bound/{t}/{0f}")) source.@"{1t}bound/{2t}/{0f}" else null,
+                    \\}},
+                , .{
+                    id.alt(.omit_minecraft),
+                    side,
+                    phase,
+                });
+
+                last_id = idn;
+            }
+
+            try out.writeAll("},");
+        }
+
+        try out.writeAll("}),");
+    }
+
+    try out.writeAll(
+        \\    })};
+        \\}
+    );
+}
+
+pub fn IdentifierList(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        const SliceType = if (@sizeOf(T) == 0) void else [*]T;
+        const entries_default = if (SliceType == void) {} else &[_]T{};
+
+        map: std.HashMapUnmanaged(utils.Identifier, u32, utils.Identifier.HashCtx, std.hash_map.default_max_load_percentage) = .empty,
+        entries: SliceType = entries_default,
+        mask: std.DynamicBitSetUnmanaged = .{},
+        capacity: u32 = 0,
+
+        pub const Iterator = struct {
+            list: *const Self,
+            mask_it: std.DynamicBitSetUnmanaged.Iterator(.{}),
+
+            pub fn next(self: *Iterator) ?struct { utils.Identifier, u32, T } {
+                const idx: u32 = @intCast(self.mask_it.next() orelse return null);
+                var map_it = self.list.map.iterator();
+                while (map_it.next()) |en| {
+                    if (en.value_ptr.* != idx) continue;
+                    return .{ en.key_ptr.*, idx, if (SliceType == void) {} else self.list.entries[idx] };
+                }
+                unreachable; // should not happen
+            }
+        };
+
+        pub fn deinit(self: *Self, allocator: Allocator) void {
+            self.map.deinit(allocator);
+            allocator.free(self.entries);
+            self.mask.deinit(allocator);
+        }
+
+        pub fn ensureTotalCapacity(self: *Self, allocator: Allocator, capacity: u32) Allocator.Error!void {
+            try self.map.ensureTotalCapacity(allocator, capacity);
+            if (self.capacity < capacity) {
+                try self.mask.resize(allocator, capacity, false);
+                if (SliceType != void) {
+                    const better_capacity = std.ArrayList(u32).growCapacity(capacity);
+                    self.entries = (try allocator.realloc(self.entries[0..self.capacity], better_capacity)).ptr;
+                }
+                self.capacity = capacity;
+            }
+        }
+
+        pub fn set(self: *Self, allocator: Allocator, id: utils.Identifier, idn: u32, v: T) !void {
+            try self.ensureTotalCapacity(allocator, idn + 1);
+
+            if (self.mask.isSet(idn)) return error.DuplicateField;
+
+            const gop = try self.map.getOrPut(allocator, id);
+            if (gop.found_existing) return error.DuplicateField;
+            errdefer self.map.removeByPtr(gop.key_ptr);
+
+            gop.value_ptr.* = idn;
+            self.mask.set(idn);
+            if (SliceType != void) self.entries[idn] = v;
+        }
+
+        pub fn clearRetainingCapacity(self: *Self) void {
+            self.map.clearRetainingCapacity();
+            self.mask.unsetAll();
+        }
+
+        pub fn iterator(self: *const Self) Iterator {
+            return .{ .list = self, .mask_it = self.mask.iterator(.{}) };
         }
     };
 }
@@ -260,8 +447,24 @@ pub fn main(init: std.process.Init) !void {
         switch (which) {
             .registries => {
                 const reg_file = try json_r.mapr.deserialize(RegistriesReport);
+                const dpr = blk: {
+                    var buf2: [buf.len]u8 = undefined;
+                    const datapack_file = try dir.openFile(init.io, "reports/datapack.json", .{ .lock = .shared });
+                    defer datapack_file.close(init.io);
 
-                printRegFile(&reg_file, init.gpa, &aw.writer) catch |e| return switch (e) {
+                    var fr2 = datapack_file.reader(init.io, &buf2);
+
+                    var json_r2: serial.JsonReader = undefined;
+                    json_r2.initWithArena(&json_r.mapr.arena, &fr2.interface);
+                    defer {
+                        json_r2.redeemArena(&json_r.mapr.arena);
+                        json_r2.deinit();
+                    }
+
+                    break :blk try json_r2.mapr.deserialize(DatapackReport);
+                };
+
+                printRegistriesFile(&reg_file, &dpr, &aw.writer) catch |e| return switch (e) {
                     error.WriteFailed => error.OutOfMemory,
                     // else => |err| err,
                 };
@@ -269,7 +472,7 @@ pub fn main(init: std.process.Init) !void {
             .packets => {
                 const pack_file = try json_r.mapr.deserialize(PacketsReport);
 
-                printPackFile(&pack_file, &aw.writer) catch |e| return switch (e) {
+                printPacketsFile(&pack_file, &aw.writer) catch |e| return switch (e) {
                     error.WriteFailed => error.OutOfMemory,
                     // else => |err| err,
                 };
@@ -303,165 +506,4 @@ pub fn main(init: std.process.Init) !void {
     };
 
     try fw.flush();
-}
-
-fn printAstErrors(ast: std.zig.Ast, writer: *Io.Writer) Io.Writer.Error!void {
-    for (ast.errors) |err| {
-        try std.zig.Ast.renderError(ast, err, writer);
-        try writer.writeByte('\n');
-    }
-}
-
-fn printRegFile(reg_file: *const RegistriesReport, gpa: Allocator, out: *Io.Writer) !void {
-    _ = gpa;
-    try out.print(gen_file_header ++
-        \\pub const RegistryType = enum(u32) {{
-        \\    /// This field basically represent the 'root' registry.
-        \\    registry_type = ~@as(u32, 0),
-        \\    {f}
-        \\    
-        \\    pub fn RealType(comptime self: RegistryType) type {{
-        \\        return switch(self) {{
-        \\            .registry_type => RegistryType,
-        \\            {f}
-        \\        }};
-        \\    }}
-        \\
-        \\    pub fn identifier(self: RegistryType) []const u8 {{
-        \\        return switch(self) {{
-        \\            .registry_type => "minecraft:registry_type",
-        \\            {f}
-        \\        }};
-        \\    }}
-        \\}};
-    , .{
-        RegistryFieldsFormatter(RegistriesReport.Registry){
-            .reg = &reg_file.entries,
-            .mode = .{ .@"enum" = .{
-                .self_name = .vanilla("registry_type"),
-                .no_trail_limit = std.math.maxInt(usize),
-                .exaustive = true,
-            } },
-            .entry_mode = .number,
-        },
-        RegistryFieldsFormatter(RegistriesReport.Registry){
-            .reg = &reg_file.entries,
-            .mode = .@"switch",
-            .entry_mode = .{ .pascal_name = .{ .suffix = "Registry" } },
-        },
-        RegistryFieldsFormatter(RegistriesReport.Registry){
-            .reg = &reg_file.entries,
-            .mode = .@"switch",
-            .entry_mode = .{ .id = .{} },
-            .write_quotes = true,
-        },
-    });
-
-    var count: usize = 0;
-    var regs_it = reg_file.entries.iterator();
-    while (regs_it.next()) |entry| : (count += 1) {
-        const id, _, const reg = entry;
-
-        try out.print(
-            \\pub const @"{f}{f}Registry" = enum(u32) {{
-            \\  {f}
-            \\}};
-        , .{
-            PascalFormatter.from(if (!id.isVanilla()) id.namespace() else ""),
-            PascalFormatter.from(id.path()),
-            RegistryFieldsFormatter(void){
-                .reg = &reg.entries,
-                .mode = .{ .@"enum" = .{
-                    .self_name = id,
-                    .ps = .{ .suffix = "Registry" },
-                    .default = reg.default,
-                } },
-                .entry_mode = .number,
-            },
-        });
-    }
-}
-
-fn pascalizeInto(str: []const u8, writer: *Io.Writer) Io.Writer.Error!void {
-    var next_upper: bool = true;
-    for (str) |c| {
-        try writer.writeByte(sw: switch (c) {
-            '0'...'9' => {
-                next_upper = true;
-                break :sw c;
-            },
-            'a'...'z', 'A'...'Z' => if (next_upper) {
-                next_upper = false;
-                break :sw c & (~@as(u8, 32));
-            } else c,
-            else => {
-                next_upper = true;
-                continue;
-            },
-        });
-    }
-}
-
-fn pascalize(str: []const u8, alloc: Allocator) Allocator.Error![]u8 {
-    const res = try alloc.alloc(u8, str.len);
-    errdefer alloc.free(res);
-
-    var w = Io.Writer.fixed(res);
-    pascalizeInto(str, &w) catch unreachable;
-
-    return alloc.realloc(res, w.end);
-}
-
-fn printPackFile(pack_file: *const PacketsReport, out: *Io.Writer) !void {
-    const pack_file_mut = @constCast(pack_file);
-    try out.writeAll(gen_file_header ++
-        \\pub fn registry(comptime PacketRegistry: type, comptime source: type) PacketRegistry {
-        \\    return .{.entries = .init(.{
-    );
-
-    var side_it = pack_file_mut.ids.iterator();
-    while (side_it.next()) |entry| {
-        const side = entry.key;
-        try out.print(".{t} = .init(.{{", .{side});
-
-        var phase_it = entry.value.iterator();
-        while (phase_it.next()) |entry2| {
-            const phase = entry2.key;
-            try out.print(".{t} = &.{{", .{phase});
-
-            var last_id: u32 = 0;
-            var packet_it = entry2.value.iterator();
-            while (packet_it.next()) |entry3| {
-                const id, const idn, _ = entry3;
-                if (idn - last_id > 1) {
-                    for (last_id..idn - 1) |_| {
-                        try out.writeAll(".{.write_cushion=0, .resource=\"none\",.callback=null},");
-                    }
-                }
-
-                try out.print(
-                    \\.{{
-                    \\  .write_cushion=512,
-                    \\  .resource="{f}",
-                    \\  .callback= if (@hasDecl(source, "{t}bound/{t}/{0f}")) source.@"{1t}bound/{2t}/{0f}" else null,
-                    \\}},
-                , .{
-                    id.alt(.omit_minecraft),
-                    side,
-                    phase,
-                });
-
-                last_id = idn;
-            }
-
-            try out.writeAll("},");
-        }
-
-        try out.writeAll("}),");
-    }
-
-    try out.writeAll(
-        \\    })};
-        \\}
-    );
 }

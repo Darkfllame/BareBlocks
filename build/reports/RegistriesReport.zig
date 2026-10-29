@@ -34,12 +34,12 @@ pub fn deserialize(mapr: *serial.MapReader) !RegistriesReport {
             .{ .name = "entries", .type = .{ .external = IdentifierList(void) } },
             .{ .name = "protocol_id", .type = .int },
             .{ .name = "default", .type = .{ .deserializeable = utils.Identifier } },
-        }){};
+        }){ .opts = .{ .ignore_unknown_fields = false } };
         defer fg.deinit(gpa);
 
         try mapr.nextExpect(.aggregate_start);
         while (try fg.next(gpa, arena, mapr)) |field| {
-            std.log.debug("registries.{f}.{t}", .{ registry_id.alt(.full), field });
+            // std.log.debug("registries.{f}.{t}", .{ registry_id.alt(.full), field });
             switch (field) {
                 .entries => {
                     var values = IdentifierList(void){};
@@ -58,7 +58,7 @@ pub fn deserialize(mapr: *serial.MapReader) !RegistriesReport {
 
                         var entry_fg = serial.FieldGatherer(&.{
                             .{ .name = "protocol_id", .type = .int },
-                        }){};
+                        }){ .opts = .{ .ignore_unknown_fields = false } };
                         defer entry_fg.deinit(gpa);
 
                         try mapr.nextExpect(.aggregate_start);

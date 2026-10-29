@@ -28,13 +28,12 @@ fn parsePhase(self: *PacketsReport, phase: net.NetworkingPhase, mapr: *serial.Ma
         list.clearRetainingCapacity();
 
         // std.log.debug("Packets.{t}.{t}", .{ side, phase });
-        try self.parseSide(list, mapr);
+        try parseSide(list, mapr);
         // std.log.debug("End of Packets.{t}.{t}", .{ side, phase });
     }
 }
 
-fn parseSide(self: *PacketsReport, list: *IdentifierList(void), mapr: *serial.MapReader) !void {
-    _ = self; // autofix
+fn parseSide(list: *IdentifierList(void), mapr: *serial.MapReader) !void {
     const gpa = mapr.getAlloctor();
     const arena = mapr.getArena();
 
@@ -53,7 +52,7 @@ fn parseSide(self: *PacketsReport, list: *IdentifierList(void), mapr: *serial.Ma
 
         var fg = serial.FieldGatherer(&.{
             .{ .name = "protocol_id", .type = .int },
-        }){};
+        }){ .opts = .{ .ignore_unknown_fields = false } };
         defer fg.deinit(gpa);
 
         try mapr.nextExpect(.aggregate_start);
