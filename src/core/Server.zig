@@ -4,7 +4,6 @@ const builtin = @import("builtin");
 const zio = @import("zio");
 const net = @import("net");
 const utils = @import("utils");
-const registries = @import("registries");
 const packets = @import("packets");
 const crypto = @import("crypto");
 const core = @import("core.zig");
@@ -519,7 +518,7 @@ pub fn init(self: *Server, options: InitOptions) InitError!void {
     errdefer options.allocator.free(der);
 
     self.* = .{
-        .packet_registry = &packets.registry,
+        .packet_registry = comptime &packets.registry(net.PacketRegistry, Server),
         .allocator = options.allocator,
         .runtime = options.runtime,
         .start = .init,
@@ -623,7 +622,7 @@ pub fn addressAlt(self: *const Server) AddressAlt {
     };
 }
 
-pub fn handleHandshake(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
+pub fn @"serverbound/handshake/intention"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
     const hs = net.packets.handshake_c2s;
     const pack = try hs.readRoot(params, reader);
     logger.debug("[{f}] Hanshake: {f}", .{ conn, hs.formatted(pack, params.toAllocPair()) });
@@ -661,7 +660,7 @@ pub fn handleHandshake(conn: *Connection, reader: *Io.Reader, params: net.Packet
     }
 }
 
-pub fn handleStatus(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
+pub fn @"serverbound/status/status_request"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
     const status = net.packets.status_request_c2s;
     const pack = try status.readRoot(params, reader);
     logger.debug("[{f}] Status: {f}", .{ conn, status.formatted(pack, params.toAllocPair()) });
@@ -687,7 +686,7 @@ pub fn handleStatus(conn: *Connection, reader: *Io.Reader, params: net.PacketTyp
     );
 }
 
-pub fn handleStatusPing(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
+pub fn @"serverbound/status/ping_request"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
     const ping = net.packets.ping_pong;
     const pack = try ping.readRoot(params, reader);
     logger.debug("[{f}] Ping: {f}", .{ conn, ping.formatted(pack, params.toAllocPair()) });
@@ -700,7 +699,7 @@ pub fn handleStatusPing(conn: *Connection, reader: *Io.Reader, params: net.Packe
     );
 }
 
-pub fn handleLoginHello(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
+pub fn @"serverbound/login/hello"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
     const hello = net.packets.login_start_c2s;
     const pack = try hello.readRoot(params, reader);
     logger.debug("[{f}] Login Start: {f}", .{ conn, hello.formatted(pack, params.toAllocPair()) });
@@ -758,7 +757,7 @@ pub fn handleLoginHello(conn: *Connection, reader: *Io.Reader, params: net.Packe
     owned.data = .{ .login = loginging };
 }
 
-pub fn handleLoginKey(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
+pub fn @"serverbound/login/key"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
     const encryption_setup_failed_tc = &utils.TextComponent.text("Internal Error: couldn't setup encryption", .{ .color = .red });
 
     const key = net.packets.key;
@@ -819,7 +818,7 @@ pub fn handleLoginKey(conn: *Connection, reader: *Io.Reader, params: net.PacketT
     conn.reconfigure(.{ .out_phase = .configuration });
 }
 
-pub fn handleLoginAck(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
+pub fn @"serverbound/login/login_acknowledged"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
     const ack = net.packets.login_acknowledged_c2s;
     const pack = try ack.readRoot(params, reader);
     logger.debug("[{f}] Login Ack: {f}", .{ conn, ack.formatted(pack, params.toAllocPair()) });
