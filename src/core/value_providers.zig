@@ -1,8 +1,8 @@
 const std = @import("std");
 const utils = @import("utils");
+const serial = @import("serial");
 
 const Io = std.Io;
-const serial = utils.serial;
 const MapWriter = serial.MapWriter;
 const MapReader = serial.MapReader;
 

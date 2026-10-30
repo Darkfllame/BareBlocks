@@ -194,6 +194,7 @@ pub const Direction = enum {
 };
 
 test {
+    _ = value_providers;
     std.testing.refAllDecls(@This());
     std.testing.refAllDecls(BlockPosition);
     std.testing.refAllDecls(Direction);
