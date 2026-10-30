@@ -5,6 +5,7 @@ const registries = @import("registries");
 
 const Allocator = std.mem.Allocator;
 const Identifier = utils.Identifier;
+const ArenaState = std.heap.ArenaAllocator.State;
 const assert = std.debug.assert;
 
 const logger = std.log.scoped(.@"bare_blocks/registry");
@@ -77,7 +78,11 @@ pub const TypeErasedRegistry = struct {
                 self.nid_continuous = null;
             }
             try self.resizeIfNeeded(gpa, int);
-            if (self.nid_mask.isSet(int)) return error.InvalidNumericId;
+            if (self.nid_mask.isSet(int)) {
+                // ERROR: nid_continuous is badly handled and causes error
+                logger.err("Index {d} was already set", .{int});
+                return error.InvalidNumericId;
+            }
         }
 
         self.nid_mask.set(int);
@@ -96,7 +101,6 @@ pub const TypeErasedRegistry = struct {
         }
     }
 
-    type: RegistryType,
     frozen: bool = false,
     /// Check if numeric id is valid
     nid_mask: std.bit_set.Dynamic = .{},
@@ -146,8 +150,97 @@ pub const TypeErasedRegistry = struct {
         value: *anyopaque,
     };
 
-    pub fn new(@"type": RegistryType) TypeErasedRegistry {
-        return .{ .type = @"type" };
+    pub const Dynamic = struct {
+        type_erased: TypeErasedRegistry,
+        arena_state: ArenaState = .init,
+
+        pub const RegisterOptions = struct {
+            gpa: Allocator,
+            id: Identifier,
+            nid: ?RegistryEntryId = null,
+
+            pub fn named(gpa: Allocator, id: Identifier) Dynamic.RegisterOptions {
+                return .{ .gpa = gpa, .id = id };
+            }
+            pub fn namedNumeric(gpa: Allocator, id: Identifier, nid: RegistryEntryId) Dynamic.RegisterOptions {
+                return .{ .gpa = gpa, .id = id, .nid = nid };
+            }
+
+            pub fn fromManyOptions(m: Dynamic.RegisterManyOptions, id: Identifier) Dynamic.RegisterOptions {
+                return .{ .gpa = m.gpa, .arena = m.arena, .id = id };
+            }
+
+            pub fn fromManyOptionsNumeric(m: Dynamic.RegisterManyOptions, id: Identifier, nid: RegistryEntryId) Dynamic.RegisterOptions {
+                return .{ .gpa = m.gpa, .arena = m.arena, .id = id, .nid = nid };
+            }
+        };
+
+        pub const RegisterManyOptions = struct { gpa: Allocator };
+
+        pub fn new() TypeErasedRegistry.Dynamic {
+            return .{ .type_erased = .{} };
+        }
+
+        pub fn deinit(self: *Dynamic, gpa: Allocator) void {
+            self.type_erased.deinit(gpa);
+            self.arena_state.promote(gpa).deinit();
+        }
+
+        pub fn clearRetainingCapacity(self: *Dynamic, gpa: Allocator) void {
+            self.type_erased.clearRetainingCapacity();
+            _ = self.arena_state.promote(gpa).reset(.retain_capacity);
+        }
+
+        pub inline fn freeze(self: *Dynamic) void {
+            self.type_erased.freeze();
+        }
+
+        pub inline fn register(self: *Dynamic, options: Dynamic.RegisterOptions, value: *anyopaque) RegisterError!RegistryEntryId {
+            var out: RegistryEntryId = undefined;
+            try self.registerInto(options, value, &out);
+            return out;
+        }
+
+        pub inline fn registerInto(self: *Dynamic, options: Dynamic.RegisterOptions, value: *anyopaque, out: *RegistryEntryId) RegisterError!void {
+            return self.registerMany(.{ .gpa = options.gpa }, &.{.{
+                .id = options.id,
+                .nid = options.nid,
+                .value = value,
+            }}, out[0..1]);
+        }
+
+        pub fn registerMany(self: *Dynamic, options: Dynamic.RegisterManyOptions, entries: []const RegisterManyEntry, out: []RegistryEntryId) RegisterError!void {
+            var aa = self.arena_state.promote(options.gpa);
+            defer self.arena_state = aa.state;
+
+            return self.type_erased.registerMany(.{ .gpa = options.gpa, .arena = aa.allocator() }, entries, out);
+        }
+
+        pub inline fn getEntry(self: *Dynamic, nid: RegistryEntryId) ?*anyopaque {
+            return self.type_erased.getEntry(nid);
+        }
+
+        pub inline fn getNamedEntry(self: *Dynamic, id: Identifier) ?*anyopaque {
+            return self.type_erased.getNamedEntry(id);
+        }
+    };
+
+    pub fn new() TypeErasedRegistry {
+        return .{};
+    }
+
+    pub fn deinit(self: *TypeErasedRegistry, gpa: Allocator) void {
+        self.nid_mask.deinit(gpa);
+        self.id2num.deinit(gpa);
+        gpa.free(self.ids);
+        gpa.free(self.data);
+    }
+
+    pub fn clearRetainingCapacity(self: *TypeErasedRegistry) void {
+        self.frozen = false;
+        self.nid_mask.unsetAll();
+        self.nid_continuous = 0;
+        self.id2num.clearRetainingCapacity();
     }
 
     pub fn freeze(self: *TypeErasedRegistry) void {
@@ -185,17 +278,20 @@ pub const TypeErasedRegistry = struct {
             if (ov == 1) return error.OutOfMemory;
         }
         const buf = try options.arena.alloc(u8, id_len);
-        const fba = std.heap.FixedBufferAllocator.init(&buf);
+        var fba = std.heap.FixedBufferAllocator.init(buf);
 
         for (entries, out) |entry, *nid_out| {
             const id = try entry.id.dupe(fba.allocator());
 
+            logger.debug("Setting id {?d} to {f}", .{ entry.nid, id.alt(.omit_minecraft) });
             nid_out.* = if (entry.nid) |nid|
                 try self.newNumericIdFixed(options.gpa, nid, id)
             else
                 try self.newNumericId(options.gpa, id);
-            self.id2num.putAssumeCapacityNoClobber(id, nid_out.*);
-            self.data[@backingInt(nid_out.*)] = entry.value;
+            const idx = @backingInt(nid_out.*);
+            logger.debug("  - Set id {d} to {f}", .{ idx, id.alt(.omit_minecraft) });
+            self.id2num.putAssumeCapacityNoClobber(id, idx);
+            self.data[idx] = entry.value;
         }
     }
 
@@ -223,22 +319,116 @@ pub const TypeErasedRegistry = struct {
     }
 };
 
+// TODO: 1 arena for all static registries.
+// TODO: 1 arena per dynamic registry.
+// TODO:   - Same for tags registries.
 pub const RootRegistry = struct {
-    type_erased: TypeErasedRegistry = .{ .type = .registry_type },
+    const props = registries.properties;
+    const props_calc = blk: {
+        var arr: [props.keys().len]?RegistryEntryId = @splat(null);
+        var _max_id_len: usize = 0;
+        @setEvalBranchQuota(std.math.maxInt(u32));
 
-    // pub fn register(self: *RootRegistry, )
+        for (&arr, props.keys()) |*nid, key| {
+            const id = Identifier.validate(key) catch unreachable;
+            const id_s = std.fmt.comptimePrint("{f}", .{id.alt(.omit_minecraft)});
+            _max_id_len = @max(_max_id_len, id_s.len);
+            if (std.meta.stringToEnum(RegistryType, id_s)) |val| {
+                nid.* = @fromBackingInt(@backingInt(val));
+            }
+        }
+        const c_nids = arr;
+        break :blk .{ &c_nids, _max_id_len };
+    };
+    const nids = props_calc[0];
+    const max_id_len = props_calc[1];
+
+    fn freeAtIndex(self: *RootRegistry, gpa: Allocator, buf: []u8, idx: usize) !void {
+        const id = self.type_erased.ids[idx];
+        const id_s = try std.mem.print(buf, "{f}", .{id.alt(.omit_minecraft)});
+        const entry_props = props.get(id_s) orelse return error.IdkThisGuy; // #ref #tuff #jjs #imgoingmadithink
+        const reg: *TypeErasedRegistry = @ptrCast(@alignCast(self.type_erased.data[idx]));
+        if (entry_props.dynamic) {
+            const dreg: *TypeErasedRegistry.Dynamic = @fieldParentPtr("type_erased", reg);
+            dreg.deinit(gpa);
+        } else {
+            reg.deinit(gpa);
+        }
+    }
+
+    allocator: Allocator,
+    static_arena: ArenaState = .init,
+    type_erased: TypeErasedRegistry = .{},
+
+    pub fn init(gpa: Allocator) TypeErasedRegistry.RegisterError!RootRegistry {
+        var self = RootRegistry{ .allocator = gpa };
+
+        var aa = self.static_arena.promote(gpa);
+        defer self.static_arena = aa.state;
+        errdefer aa.deinit();
+
+        const arena = aa.allocator();
+
+        try self.type_erased.resizeIfNeeded(gpa, props.keys().len);
+        errdefer self.type_erased.deinit(gpa);
+
+        for (nids, props.keys(), props.values()) |nid, key, value| {
+            const ptr = blk: {
+                if (value.dynamic) {
+                    const dreg = try arena.create(TypeErasedRegistry.Dynamic);
+                    dreg.* = .new();
+                    break :blk &dreg.type_erased;
+                } else {
+                    const reg = try arena.create(TypeErasedRegistry);
+                    reg.* = .new();
+                    break :blk reg;
+                }
+            };
+
+            _ = try self.type_erased.register(.{
+                .gpa = gpa,
+                .arena = arena,
+                .id = Identifier.validate(key) catch unreachable,
+                .nid = nid,
+            }, ptr);
+        }
+
+        self.type_erased.freeze();
+
+        return self;
+    }
+
+    pub fn deinit(self: *RootRegistry, gpa: Allocator) void {
+        var buf: [max_id_len]u8 = undefined;
+        var it = self.type_erased.id2num.valueIterator();
+        while (it.next()) |idx| {
+            const id = self.type_erased.ids[idx.*];
+            self.freeAtIndex(gpa, &buf, idx.*) catch {
+                logger.warn("I don't know what is RootRegistry[{f}]", .{id.alt(.omit_minecraft)});
+            };
+        }
+        self.type_erased.deinit(gpa);
+        self.static_arena.promote(gpa).deinit();
+    }
 };
 
-pub fn Registry(comptime SubType: type, comptime enum_type: RegistryType) type {
+pub fn Registry(comptime SubType: type) type {
     return struct {
         const Self = @This();
 
         comptime SubType: type = SubType,
-        comptime type: RegistryType = enum_type,
-        type_erased: TypeErasedRegistry = .{ .type = enum_type },
+        type_erased: TypeErasedRegistry = .new(),
 
         pub fn new() Self {
             return .{};
+        }
+
+        pub fn deinit(self: *Self, gpa: Allocator) void {
+            self.type_erased.deinit(gpa);
+        }
+
+        pub fn clearRetainingCapacity(self: *Self) void {
+            self.type_erased.clearRetainingCapacity();
         }
 
         pub inline fn freeze(self: *Self) void {
@@ -267,11 +457,56 @@ pub fn Registry(comptime SubType: type, comptime enum_type: RegistryType) type {
     };
 }
 
+pub fn DynamicRegistry(comptime SubType: type) type {
+    return struct {
+        const Self = @This();
+
+        comptime SubType: type = SubType,
+        type_erased: TypeErasedRegistry.Dynamic = .new(),
+
+        pub fn new() Self {
+            return .{};
+        }
+
+        pub fn deinit(self: *Self, gpa: Allocator) void {
+            self.type_erased.deinit(gpa);
+        }
+
+        pub fn clearRetainingCapacity(self: *Self, gpa: Allocator) void {
+            self.type_erased.clearRetainingCapacity(gpa);
+        }
+
+        pub inline fn freeze(self: *Self) void {
+            return self.type_erased.freeze();
+        }
+
+        pub inline fn register(self: *Self, options: TypeErasedRegistry.Dynamic.RegisterOptions, value: *SubType) TypeErasedRegistry.RegisterError!RegistryEntryId {
+            return self.type_erased.register(options, value);
+        }
+
+        pub inline fn registerInto(self: *Self, options: TypeErasedRegistry.Dynamic.RegisterOptions, value: *SubType, out: *RegistryEntryId) TypeErasedRegistry.RegisterError!void {
+            return self.type_erased.registerInto(options, value, out);
+        }
+
+        pub inline fn registerMany(self: *Self, options: TypeErasedRegistry.Dynamic.RegisterManyOptions, entries: []const TypeErasedRegistry.RegisterManyEntry, out: []RegistryEntryId) TypeErasedRegistry.RegisterError!void {
+            return self.type_erased.registerMany(options, entries, out);
+        }
+
+        pub inline fn getEntry(self: *Self, nid: RegistryEntryId) ?*SubType {
+            return @ptrCast(@alignCast(self.type_erased.getEntry(nid)));
+        }
+
+        pub inline fn getNamedEntry(self: *Self, id: Identifier) ?*SubType {
+            return @ptrCast(@alignCast(self.type_erased.getNamedEntry(id)));
+        }
+    };
+}
+
 /// Tell whether `T` is a product of `Registry()` or not.
 pub inline fn isRegistry(comptime T: type) bool {
-    comptime return @hasField(T, "SubType") and @hasField(T, "type") and
-        @FieldType(T, "SubType") == type and @FieldType(T, "type") == RegistryType and
-        T == Registry(@as(T, undefined).SubType, @as(T, undefined).type);
+    comptime return @hasField(T, "SubType") and
+        @FieldType(T, "SubType") == type and
+        T == Registry(@as(T, undefined).SubType);
 }
 
 test {
@@ -280,10 +515,17 @@ test {
         const T = @field(registries, decl);
         if (@TypeOf(T) == type) _ = std.testing.refAllDecls(T);
     }
+
+    const types2test: []const type = &.{ u32, void, struct { []const u8, u32 } };
+
+    inline for (types2test) |T| {
+        try std.testing.expectEqual(@sizeOf(TypeErasedRegistry), @sizeOf(Registry(T)));
+        try std.testing.expectEqual(@sizeOf(TypeErasedRegistry.Dynamic), @sizeOf(DynamicRegistry(T)));
+    }
 }
 
 test isRegistry {
-    try std.testing.expect(isRegistry(Registry(struct {}, .registry_type)));
-    try std.testing.expect(isRegistry(Registry(u32, .block)));
-    try std.testing.expect(isRegistry(Registry(enum { a, b, c }, .@"worldgen/feature")));
+    try std.testing.expect(isRegistry(Registry(struct {})));
+    try std.testing.expect(isRegistry(Registry(u32)));
+    try std.testing.expect(isRegistry(Registry(enum { a, b, c })));
 }
