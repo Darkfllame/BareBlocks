@@ -11,7 +11,7 @@ pub const server = @import("server/server.zig");
 pub const world = @import("world/world.zig");
 
 pub const registry = @import("registry.zig");
-pub const Block = @import("Block.zig");
+pub const block = @import("block/block.zig");
 pub const Server = @import("Server.zig");
 pub const RefCount = @import("RefCount.zig");
 
