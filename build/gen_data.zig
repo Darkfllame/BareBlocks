@@ -133,7 +133,12 @@ fn RegistryFieldsFormatter(comptime T: type) type {
                     });
                 }
 
-                try writer.print("pub const self_type: RegistryType = .@\"{f}\";", .{e.self_name.alt(.omit_minecraft)});
+                if (e.self_name.eql(.vanilla("builtin_registry"))) {
+                    try writer.writeAll("pub const self_type: BuiltinRegistry = .root;");
+                } else 
+                try writer.print("pub const self_type: BuiltinRegistry = .@\"{f}\";", .{
+                    e.self_name.alt(.omit_minecraft),
+                });
             }
         }
     };
@@ -183,39 +188,80 @@ fn printRegistriesFile(reg_file: *const RegistriesReport, dpr: *const DatapackRe
         \\
         \\pub const RegistryProperties = struct { dynamic: bool, stable: bool, has_tags: bool };
         \\pub const properties = std.StaticStringMap(RegistryProperties).initComptime(.{
+        \\    .{ "minecraft:root", RegistryType.getProperties(.root) },
         \\
     );
 
     var dp_reg_it = dpr.registries.iterator();
     while (dp_reg_it.next()) |entry| {
-        try out.print("    .{{ \"{f}\", RegistryProperties{{ .dynamic = {}, .stable = {}, .has_tags = {} }} }},\n", .{
-            entry.key_ptr.alt(.full),
-            entry.value_ptr.dynamic,
-            entry.value_ptr.stable,
-            entry.value_ptr.has_tags,
+        try out.print("    .{{ RegistryType.getIdentifier(.@\"{0f}\"), RegistryType.getProperties(.@\"{0f}\") }},\n", .{
+            entry.key_ptr.alt(.omit_minecraft),
         });
     }
 
     try out.writeAll(
         \\
         \\});
+        \\pub const RegistryType = enum {
+        \\    root,
+        \\
+    );
+    dp_reg_it = dpr.registries.iterator();
+    while (dp_reg_it.next()) |entry| {
+        try out.print("    @\"{f}\",\n", .{entry.key_ptr.alt(.omit_minecraft)});
+    }
+    try out.writeAll(
+        \\pub fn getProperties(self: RegistryType) RegistryProperties {
+        \\    return switch (self) {
+        \\        .root => .{ .dynamic = false, .stable = false, .has_tags = false },
+        \\
+    );
+    dp_reg_it = dpr.registries.iterator();
+    while (dp_reg_it.next()) |entry| {
+        try out.print("        .@\"{f}\" => .{{ .dynamic = {}, .stable = {}, .has_tags = {} }},\n", .{
+            entry.key_ptr.alt(.omit_minecraft),
+            entry.value_ptr.dynamic,
+            entry.value_ptr.stable,
+            entry.value_ptr.has_tags,
+        });
+    }
+    try out.writeAll(
+        \\    };
+        \\}
+        \\
+        \\pub fn getIdentifier(self: RegistryType) []const u8 {
+        \\    return switch(self) {
+        \\        .root => "minecraft:root",
+        \\
+    );
+    dp_reg_it = dpr.registries.iterator();
+    while (dp_reg_it.next()) |entry| {
+        try out.print("        .@\"{f}\" => \"{f}\",\n", .{
+            entry.key_ptr.alt(.omit_minecraft), entry.key_ptr.alt(.full),
+        });
+    }
+    try out.writeAll(
+        \\    };
+        \\}
+        \\};
+        \\
     );
 
     try out.print(
-        \\pub const RegistryType = enum(u32) {{
-        \\    registry_type = std.math.maxInt(u32),
+        \\pub const BuiltinRegistry = enum(u32) {{
+        \\    root = std.math.maxInt(u32),
         \\    {f}
         \\    
-        \\    pub fn RealType(comptime self: RegistryType) type {{
+        \\    pub fn RealType(comptime self: BuiltinRegistry) type {{
         \\        return switch(self) {{
-        \\            .registry_type => RegistryType,
+        \\            .root => BuiltinRegistry,
         \\            {f}
         \\        }};
         \\    }}
         \\
-        \\    pub fn identifier(self: RegistryType) []const u8 {{
+        \\    pub fn identifier(self: BuiltinRegistry) []const u8 {{
         \\        return switch(self) {{
-        \\            .registry_type => "minecraft:root",
+        \\            .root => "minecraft:root",
         \\            {f}
         \\        }};
         \\    }}
@@ -225,7 +271,7 @@ fn printRegistriesFile(reg_file: *const RegistriesReport, dpr: *const DatapackRe
         RegistryFieldsFormatter(RegistriesReport.Registry){
             .reg = &reg_file.entries,
             .mode = .{ .@"enum" = .{
-                .self_name = .vanilla("registry_type"),
+                .self_name = .vanilla("builtin_registry"),
                 .no_trail_limit = std.math.maxInt(usize),
                 .exaustive = true,
             } },

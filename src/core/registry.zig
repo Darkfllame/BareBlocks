@@ -13,6 +13,7 @@ const logger = std.log.scoped(.@"bare_blocks/registry");
 pub const max_registry_id = std.math.maxInt(i32);
 
 pub const RegistryType = registries.RegistryType;
+pub const BuiltinRegistry = registries.BuiltinRegistry;
 
 pub const RegistryEntryId = enum(u32) { _ };
 
@@ -78,11 +79,7 @@ pub const TypeErasedRegistry = struct {
                 self.nid_continuous = null;
             }
             try self.resizeIfNeeded(gpa, int);
-            if (self.nid_mask.isSet(int)) {
-                // ERROR: nid_continuous is badly handled and causes error
-                logger.err("Index {d} was already set", .{int});
-                return error.InvalidNumericId;
-            }
+            if (self.nid_mask.isSet(int)) return error.InvalidNumericId;
         }
 
         self.nid_mask.set(int);
@@ -122,6 +119,7 @@ pub const TypeErasedRegistry = struct {
         arena: Allocator,
         id: Identifier,
         nid: ?RegistryEntryId = null,
+        copy_id: bool = true,
 
         pub fn named(gpa: Allocator, arena: Allocator, id: Identifier) RegisterOptions {
             return .{ .gpa = gpa, .arena = arena, .id = id };
@@ -142,6 +140,7 @@ pub const TypeErasedRegistry = struct {
     pub const RegisterManyOptions = struct {
         gpa: Allocator,
         arena: Allocator,
+        copy_ids: bool = true,
     };
 
     pub const RegisterManyEntry = struct {
@@ -256,7 +255,11 @@ pub const TypeErasedRegistry = struct {
 
     pub fn registerInto(self: *TypeErasedRegistry, options: RegisterOptions, value: *anyopaque, out: *RegistryEntryId) RegisterError!void {
         try self.registerMany(
-            .{ .gpa = options.gpa, .arena = options.arena },
+            .{
+                .gpa = options.gpa,
+                .arena = options.arena,
+                .copy_ids = options.copy_id,
+            },
             &.{.{
                 .id = options.id,
                 .nid = options.nid,
@@ -272,16 +275,18 @@ pub const TypeErasedRegistry = struct {
 
         const size = @min(self.nid_mask.count(), self.ids.len, self.data.len);
         try self.resizeIfNeeded(options.gpa, size + entries.len);
-        var id_len: usize = 0;
-        for (entries) |entry| {
-            id_len, const ov = @addWithOverflow(id_len, entry.id.dupeLen());
-            if (ov == 1) return error.OutOfMemory;
+
+        if (options.copy_ids) {
+            var id_len: usize = 0;
+            for (entries) |entry| {
+                id_len, const ov = @addWithOverflow(id_len, entry.id.dupeLen());
+                if (ov == 1) return error.OutOfMemory;
+            }
+            options.arena.free(try options.arena.alloc(u8, id_len));
         }
-        const buf = try options.arena.alloc(u8, id_len);
-        var fba = std.heap.FixedBufferAllocator.init(buf);
 
         for (entries, out) |entry, *nid_out| {
-            const id = try entry.id.dupe(fba.allocator());
+            const id = if (options.copy_ids) try entry.id.dupe(options.arena) else entry.id;
 
             logger.debug("Setting id {?d} to {f}", .{ entry.nid, id.alt(.omit_minecraft) });
             nid_out.* = if (entry.nid) |nid|
@@ -325,19 +330,24 @@ pub const TypeErasedRegistry = struct {
 pub const RootRegistry = struct {
     const props = registries.properties;
     const props_calc = blk: {
-        var arr: [props.keys().len]?RegistryEntryId = @splat(null);
-        var _max_id_len: usize = 0;
         @setEvalBranchQuota(std.math.maxInt(u32));
+        var fixed_buf: [props.keys().len]?RegistryEntryId = @splat(null);
+        var _max_id_len: usize = 0;
 
-        for (&arr, props.keys()) |*nid, key| {
+        var fixed_arr = std.ArrayList(?RegistryEntryId).initBuffer(&fixed_buf);
+        var dynamic_count: usize = 0;
+
+        for (props.keys()) |key| {
             const id = Identifier.validate(key) catch unreachable;
             const id_s = std.fmt.comptimePrint("{f}", .{id.alt(.omit_minecraft)});
-            _max_id_len = @max(_max_id_len, id_s.len);
-            if (std.meta.stringToEnum(RegistryType, id_s)) |val| {
-                nid.* = @fromBackingInt(@backingInt(val));
+            _max_id_len = @max(_max_id_len, std.fmt.count("{f}", .{id.alt(.full)}));
+            if (std.meta.stringToEnum(BuiltinRegistry, id_s)) |val| {
+                fixed_arr.appendAssumeCapacity(@fromBackingInt(@backingInt(val)));
+            } else {
+                dynamic_count += 1;
             }
         }
-        const c_nids = arr;
+        const c_nids = fixed_arr.items.* ++ @as([dynamic_count]?RegistryEntryId, @splat(null));
         break :blk .{ &c_nids, _max_id_len };
     };
     const nids = props_calc[0];
@@ -345,7 +355,7 @@ pub const RootRegistry = struct {
 
     fn freeAtIndex(self: *RootRegistry, gpa: Allocator, buf: []u8, idx: usize) !void {
         const id = self.type_erased.ids[idx];
-        const id_s = try std.mem.print(buf, "{f}", .{id.alt(.omit_minecraft)});
+        const id_s = try std.mem.print(buf, "{f}", .{id.alt(.full)});
         const entry_props = props.get(id_s) orelse return error.IdkThisGuy; // #ref #tuff #jjs #imgoingmadithink
         const reg: *TypeErasedRegistry = @ptrCast(@alignCast(self.type_erased.data[idx]));
         if (entry_props.dynamic) {
@@ -364,7 +374,7 @@ pub const RootRegistry = struct {
         var self = RootRegistry{ .allocator = gpa };
 
         var aa = self.static_arena.promote(gpa);
-        defer self.static_arena = aa.state;
+        // defer self.static_arena = aa.state; // So this causes a memory leak work somehow ????
         errdefer aa.deinit();
 
         const arena = aa.allocator();
@@ -390,10 +400,12 @@ pub const RootRegistry = struct {
                 .arena = arena,
                 .id = Identifier.validate(key) catch unreachable,
                 .nid = nid,
+                .copy_id = false,
             }, ptr);
         }
 
         self.type_erased.freeze();
+        self.static_arena = aa.state;
 
         return self;
     }
@@ -403,12 +415,34 @@ pub const RootRegistry = struct {
         var it = self.type_erased.id2num.valueIterator();
         while (it.next()) |idx| {
             const id = self.type_erased.ids[idx.*];
-            self.freeAtIndex(gpa, &buf, idx.*) catch {
-                logger.warn("I don't know what is RootRegistry[{f}]", .{id.alt(.omit_minecraft)});
+            self.freeAtIndex(gpa, &buf, idx.*) catch |err| {
+                logger.warn("I don't know what is RootRegistry[{f}] ({t})", .{ id.alt(.omit_minecraft), err });
             };
         }
         self.type_erased.deinit(gpa);
         self.static_arena.promote(gpa).deinit();
+    }
+
+    pub fn get(self: *RootRegistry, comptime T: type, typ: RegistryType) ?*Registry(T) {
+        const id = Identifier.validate(typ.getIdentifier()) catch unreachable;
+        const _props = typ.getProperties();
+        if (_props.dynamic) {
+            logger.err("Registry {f} is not static", .{id.alt(.full)});
+            return null;
+        }
+        return @ptrCast(@alignCast(self.type_erased.getNamedEntry(id)));
+    }
+
+    pub fn getDynamic(self: *RootRegistry, comptime T: type, typ: RegistryType) ?*DynamicRegistry(T) {
+        const id = Identifier.validate(typ.getIdentifier()) catch unreachable;
+
+        const _props = typ.getProperties();
+        if (!_props.dynamic) {
+            logger.err("Registry {f} is not dynamic", .{id.alt(.full)});
+            return null;
+        }
+        const ptr: *TypeErasedRegistry = @ptrCast(@alignCast(self.type_erased.getNamedEntry(id) orelse return null));
+        return @fieldParentPtr("type_erased", ptr);
     }
 };
 
@@ -509,18 +543,20 @@ pub inline fn isRegistry(comptime T: type) bool {
         T == Registry(@as(T, undefined).SubType);
 }
 
+comptime {
+    const types2test: []const type = &.{ u32, void, struct { []const u8, u32 } };
+
+    for (types2test) |T| {
+        std.debug.assert(@sizeOf(TypeErasedRegistry), @sizeOf(Registry(T)));
+        std.debug.assert(@sizeOf(TypeErasedRegistry.Dynamic), @sizeOf(DynamicRegistry(T)));
+    }
+}
+
 test {
     std.testing.refAllDecls(@This());
     inline for (comptime std.meta.declarations(registries)) |decl| {
         const T = @field(registries, decl);
         if (@TypeOf(T) == type) _ = std.testing.refAllDecls(T);
-    }
-
-    const types2test: []const type = &.{ u32, void, struct { []const u8, u32 } };
-
-    inline for (types2test) |T| {
-        try std.testing.expectEqual(@sizeOf(TypeErasedRegistry), @sizeOf(Registry(T)));
-        try std.testing.expectEqual(@sizeOf(TypeErasedRegistry.Dynamic), @sizeOf(DynamicRegistry(T)));
     }
 }
 
