@@ -14,10 +14,46 @@ Also be a somewhat serious project but seeing so many different r\*st (ew) minec
 popping up everywhere (PumpkinMC, SteelMC, and others idk) kinda discourages me 'cause they have so many things
 done RAAAAH.
 
-# What is done ?
-Fucking nothing, mostly backend stuff, as I'm trying to build a solid foundation before trying networking, worldgen and other all the other fancy bs. Though I did implement a pretty good `Connection` struct/interface with coroutines and
-compression (encryption WIP).
+# TODO
+  - [ ] Networking
+    - [x] Compression
+    - [x] Encryption
+    - [ ] Transfers
+    - [ ] Legacy server listing
+      - Not planned
+    - [x] Handshake
+      - [x] Serverbound
+      - [x] Clientbound (technically none)
+    - [x] Status
+      - [x] Serverbound
+      - [x] Clientbound
+    - [x] Login
+      - [x] Serverbound
+      - [x] Clientbound
+    - [ ] Configuration
+      - [ ] Serverbound
+      - [ ] Clientbound
+    - [ ] Play
+      - [ ] Serverbound
+      - [ ] Clientbound
+  - [ ] Game Logic
+    - [x] Registries (Only the in-memory layout is figured, but they'll be filled during dev)
+    - [ ] Chat
+    - [ ] Commands
+    - [ ] Entities
+    - [ ] Threaded world
+    - [ ] Per-players worlds
+      - [ ] Per-player world borders
+    - [ ] World generation
+        - [ ] Overworld
+        - [ ] Nether
+        - [ ] The End
+  - [ ] Modding/plugin support
+    - [ ] Wasm, lua, custom or smth
+  - [ ] Utilities
+    - [ ] Custom implementation for encryption (openssl works well, just for the statically linking haven)
+    - [ ] TUI for dedicated servers
+    - [ ] Custom (de)serialisation (like for storing worlds and stuff)
 
-# License ?
-Yeah license is ARR since the codebase is really trash and I'm already trying to figure myself, you can still
-support by starring the repo or whatnot. Just PR's prob gonna be rejected, straight up ignored (i don't look at gh a lot; only if the mobile app gives me a push notification lol) or require weird formatting from me :/
+# Contributing and issues
+If you want to participate in this ambitious project, you can try to file a PR as issues would be kinda useless. I am expecting a somewhat decent quality from PR's. You can look at the repo's content to see how I organise files, code and such.
