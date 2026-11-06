@@ -57,3 +57,5 @@ done RAAAAH.
 
 # Contributing and issues
 If you want to participate in this ambitious project, you can try to file a PR as issues would be kinda useless. I am expecting a somewhat decent quality from PR's. You can look at the repo's content to see how I organise files, code and such.
+
+You can join this project's discord server [here](https://discord.gg/k9YMj7eDQc)
