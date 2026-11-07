@@ -1,27 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Project = @import("build/Project.zig");
-const buildzigzon: struct {
-    name: @EnumLiteral(),
-    fingerprint: u64,
-    version: []const u8,
-    minimum_zig_version: []const u8,
-    dependencies: struct {
-        vulkan: Dep,
-        vulkan_headers: Dep,
-        sdl: Dep,
-        openssl: Dep,
-        zio: Dep,
-    },
-    paths: []const []const u8,
-
-    const Dep = struct {
-        path: ?[]const u8 = null,
-        hash: ?[]const u8 = null,
-        url: ?[]const u8 = null,
-        lazy: bool = false,
-    };
-} = @import("build.zig.zon");
+const buildzigzon = @import("build.zig.zon");
 
 const Build = std.Build;
 const LazyPath = Build.LazyPath;
@@ -29,6 +9,49 @@ const Module = Build.Module;
 const Step = Build.Step;
 
 const version = std.SemanticVersion.parse(buildzigzon.version) catch unreachable;
+
+const MixinHooksProvider = struct {
+    module: *Module,
+    ordinal: u32 = 0,
+    providers_content: std.ArrayList(u8) = .empty,
+
+    const nameless_prefix = "provider";
+
+    fn init(mixin_module: *Module) MixinHooksProvider {
+        const owner = mixin_module.owner;
+        const mod = owner.createModule(.{});
+        mixin_module.addImport("hooks_providers", mod);
+        return .{ .module = mod };
+    }
+
+    fn addProvider(self: *MixinHooksProvider, name: ?[]const u8, module: *Module) void {
+        const owner = self.module.owner;
+
+        var aw = std.Io.Writer.Allocating.fromArrayList(owner.graph.arena, &self.providers_content);
+        defer self.providers_content = aw.toArrayList();
+
+        if (name) |nm| {
+            if (std.mem.startsWith(u8, nm, nameless_prefix)) {
+                std.debug.panic("Mixin hook provider name shouldn't start with {s}: got {s}", .{ nameless_prefix, nm });
+            }
+            aw.writer.print("pub const {s} = @import(\"{0s}\");\n", .{nm}) catch @panic("OOM");
+
+            self.module.addImport(nm, module);
+        } else {
+            const ordinal = self.ordinal;
+            self.ordinal += 1;
+
+            aw.writer.print("pub const {s}{d} = @import(\"{0s}{1d}\");\n", .{ nameless_prefix, ordinal }) catch @panic("OOM");
+
+            self.module.addImport(owner.fmt("{s}{d}", .{ nameless_prefix, ordinal }), module);
+        }
+    }
+
+    fn finalise(self: MixinHooksProvider) void {
+        const owner = self.module.owner;
+        self.module.root_source_file = owner.addWriteFiles().add("hooks_providers.zig", self.providers_content.items);
+    }
+};
 
 pub fn build(b: *Build) !void {
     const target = b.standardTargetOptions(.{});
@@ -196,7 +219,7 @@ pub fn build(b: *Build) !void {
             "packets",
         },
     });
-    _ = core_mod;
+    _=core_mod;
     const serial_mod = proj.createModule(b, .{
         .name = "serial",
         .root_source_file = b.path("src/serial/serial.zig"),
@@ -211,6 +234,12 @@ pub fn build(b: *Build) !void {
     //     .local_imports = &.{"utils"},
     // });
     // _ = tui_mod;
+    const mixin_mod = proj.createModule(b, .{
+        .name = "mixin",
+        .root_source_file = b.path("src/mixin.zig"),
+    });
+
+    var mixin = MixinHooksProvider.init(mixin_mod);
 
     const client_mod = proj.createModule(b, .{
         .name = "client",
@@ -248,6 +277,7 @@ pub fn build(b: *Build) !void {
             "serial",
             "math",
             "net",
+            "mixin",
             // "tui",
         },
     });
@@ -277,6 +307,9 @@ pub fn build(b: *Build) !void {
             .{ .name = "config", .module = config_mod },
         },
     });
+
+    // TODO: Find a way to pass plugin modules to this build script (idk how i can't even lie LMAO)
+    mixin.finalise();
 
     const main_exe = b.addExecutable(.{
         .name = "bare_blocks",
