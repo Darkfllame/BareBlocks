@@ -1,6 +1,5 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const coro = @import("coro");
 const utils = @import("utils");
 
 const Io = std.Io;
@@ -11,8 +10,6 @@ const math = std.math;
 const TextComponent = utils.TextComponent;
 
 const assert = std.debug.assert;
-
-const static_io = coro.AnyCoroutine.static_io;
 
 pub const logger = std.log.scoped(.net);
 

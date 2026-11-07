@@ -547,8 +547,8 @@ comptime {
     const types2test: []const type = &.{ u32, void, struct { []const u8, u32 } };
 
     for (types2test) |T| {
-        std.debug.assert(@sizeOf(TypeErasedRegistry), @sizeOf(Registry(T)));
-        std.debug.assert(@sizeOf(TypeErasedRegistry.Dynamic), @sizeOf(DynamicRegistry(T)));
+        std.debug.assert(@sizeOf(TypeErasedRegistry) == @sizeOf(Registry(T)));
+        std.debug.assert(@sizeOf(TypeErasedRegistry.Dynamic) == @sizeOf(DynamicRegistry(T)));
     }
 }
 

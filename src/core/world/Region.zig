@@ -5,7 +5,7 @@ const core = @import("../core.zig");
 const world = @import("world.zig");
 const DimensionProperties = @import("DimensionProperties.zig");
 
-const Block = core.Block;
+const Block = core.block.Block;
 const Allocator = std.mem.Allocator;
 
 const assert = std.debug.assert;
