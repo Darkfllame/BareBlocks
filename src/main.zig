@@ -91,7 +91,8 @@ pub fn main(init: std.process.Init.Minimal) !@typeInfo(@typeInfo(@TypeOf(asyncMa
 fn asyncMain(init: std.process.Init, rt: *zio.Runtime) !void {
     errdefer if (@errorReturnTrace()) |ert| std.debug.dumpErrorReturnTrace(ert);
 
-    var root_reg = try core.registry.RootRegistry.init(init.gpa);
+    var root_reg: core.registry.RootRegistry = undefined;
+    try root_reg.init(init.gpa);
     defer root_reg.deinit(init.gpa);
 
     var server: core.Server = undefined;

@@ -219,7 +219,7 @@ pub fn build(b: *Build) !void {
             "packets",
         },
     });
-    _=core_mod;
+    _ = core_mod;
     const serial_mod = proj.createModule(b, .{
         .name = "serial",
         .root_source_file = b.path("src/serial/serial.zig"),

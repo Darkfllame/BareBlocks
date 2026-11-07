@@ -341,11 +341,13 @@ pub const RootRegistry = struct {
             const id = Identifier.validate(key) catch unreachable;
             const id_s = std.fmt.comptimePrint("{f}", .{id.alt(.omit_minecraft)});
             _max_id_len = @max(_max_id_len, std.fmt.count("{f}", .{id.alt(.full)}));
-            if (std.meta.stringToEnum(BuiltinRegistry, id_s)) |val| {
+            if (std.meta.stringToEnum(BuiltinRegistry, id_s)) |val| builtin_reg: {
+                if (std.mem.eql(u8, "minecraft:root", key)) break :builtin_reg;
+
                 fixed_arr.appendAssumeCapacity(@fromBackingInt(@backingInt(val)));
-            } else {
-                dynamic_count += 1;
+                continue;
             }
+            dynamic_count += 1;
         }
         const c_nids = fixed_arr.items.* ++ @as([dynamic_count]?RegistryEntryId, @splat(null));
         break :blk .{ &c_nids, _max_id_len };
@@ -370,8 +372,8 @@ pub const RootRegistry = struct {
     static_arena: ArenaState = .init,
     type_erased: TypeErasedRegistry = .{},
 
-    pub fn init(gpa: Allocator) TypeErasedRegistry.RegisterError!RootRegistry {
-        var self = RootRegistry{ .allocator = gpa };
+    pub fn init(self: *RootRegistry, gpa: Allocator) TypeErasedRegistry.RegisterError!void {
+        self.* = RootRegistry{ .allocator = gpa };
 
         var aa = self.static_arena.promote(gpa);
         // defer self.static_arena = aa.state; // So this causes a memory leak work somehow ????
@@ -384,6 +386,8 @@ pub const RootRegistry = struct {
 
         for (nids, props.keys(), props.values()) |nid, key, value| {
             const ptr = blk: {
+                if (std.mem.eql(u8, "minecraft:root", key)) continue;
+
                 if (value.dynamic) {
                     const dreg = try arena.create(TypeErasedRegistry.Dynamic);
                     dreg.* = .new();
@@ -406,8 +410,6 @@ pub const RootRegistry = struct {
 
         self.type_erased.freeze();
         self.static_arena = aa.state;
-
-        return self;
     }
 
     pub fn deinit(self: *RootRegistry, gpa: Allocator) void {
@@ -424,6 +426,7 @@ pub const RootRegistry = struct {
     }
 
     pub fn get(self: *RootRegistry, comptime T: type, typ: RegistryType) ?*Registry(T) {
+        assert(typ != .root);
         const id = Identifier.validate(typ.getIdentifier()) catch unreachable;
         const _props = typ.getProperties();
         if (_props.dynamic) {
@@ -434,6 +437,7 @@ pub const RootRegistry = struct {
     }
 
     pub fn getDynamic(self: *RootRegistry, comptime T: type, typ: RegistryType) ?*DynamicRegistry(T) {
+        assert(typ != .root);
         const id = Identifier.validate(typ.getIdentifier()) catch unreachable;
 
         const _props = typ.getProperties();
