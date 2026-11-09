@@ -607,6 +607,16 @@ pub const MapReader = struct {
         return self.vtable.skip(self, terminal_stack_height);
     }
 
+    /// Generic `VTable.skip` implementation, works for any reader updating `nesting` inside of `next`.
+    ///
+    /// Consumes at least one token, then keeps going until the stack height gets back to `target_nesting`.
+    pub fn skipTokens(self: *MapReader, target_nesting: usize) ReadError!void {
+        while (true) {
+            _ = try self.next();
+            if (self.stackHeight() <= target_nesting) return;
+        }
+    }
+
     pub inline fn stackHeight(self: *MapReader) usize {
         return self.nesting.bit_len;
     }
