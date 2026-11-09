@@ -64,6 +64,7 @@ pub fn build(b: *Build) !void {
     const use_llvm = b.option(bool, "use_llvm", "Force the use of LLVM");
     const mc_version = b.option([]const u8, "mcver", "Version of minecraft (default: 26.2)") orelse "26.2";
     const force_mc_cache_reload = b.option(bool, "mccache_reload", "Force reloading minecraft cache (default: false)") orelse false;
+    const java_path = b.option([]const u8, "java_path", "Java path (absolute or in PATH) to use to run minecraft data generators (default: java") orelse "java";
 
     const old_datagen_cmd = blk: {
         if (std.mem.startsWith(u8, mc_version, "latest")) break :blk false;
@@ -151,7 +152,7 @@ pub fn build(b: *Build) !void {
         run_cmd.addArg(mc_version);
         break :blk out_dir;
     };
-    const mc_generated = mcDatagenDir(b, mc26_2_jar, mc_version);
+    const mc_generated = mcDatagenDir(b, java_path, mc26_2_jar, mc_version);
     const mc_registries = blk: {
         const run_exe = b.addRunArtifact(mc_gendata);
         run_exe.addDirectoryArg(mc_generated);
@@ -407,9 +408,9 @@ fn genDataMCExec(b: *Build) *Step.Compile {
     return gendata_exe;
 }
 
-fn mcDatagenDir(b: *Build, jar_path: LazyPath, _version: []const u8) LazyPath {
+fn mcDatagenDir(b: *Build, java_path: []const u8, jar_path: LazyPath, _version: []const u8) LazyPath {
     const data_gen_dir = mkdir(b, b.fmt("run_datagen_{s}", .{_version}));
-    const run_mc = b.addSystemCommand(&.{ "java", "-DbundlerMainClass=net.minecraft.data.Main", "-jar" });
+    const run_mc = b.addSystemCommand(&.{ java_path, "-DbundlerMainClass=net.minecraft.data.Main", "-jar" });
     run_mc.setCwd(data_gen_dir);
     run_mc.addFileArg(jar_path);
     _ = run_mc.captureStdOut(.{});
