@@ -14,6 +14,7 @@ const update_shape_order: []const core.Direction = &.{ .west, .east, .north, .so
 properties: Properties,
 block_id: Id,
 vtable: *const VTable,
+default_state: *const State,
 
 pub const State = state.State;
 
