@@ -1042,9 +1042,7 @@ pub const SerialReader = struct {
     }
 
     fn skipImpl(mapr: *MapReader, until_height: usize) MapReader.ReadError!void {
-        _ = mapr;
-        _ = until_height;
-        @panic("TODO: Unimplemented skip");
+        return mapr.skipTokens(until_height);
     }
 
     inline fn getAllocator(self: *SerialReader) Allocator {
@@ -1644,4 +1642,52 @@ test {
     std.testing.refAllDecls(Value);
     std.testing.refAllDecls(SerialWriter);
     std.testing.refAllDecls(SerialReader);
+}
+
+// named root compound: {a: {l: [1, 2], c: [{z: 7b}], s: "hi"}, b: 5b}
+const skip_test_data = [_]u8{
+    0x0a, 0x00, 0x00, // root compound, empty name
+    0x0a, 0x00, 0x01, 'a', // compound "a"
+    0x09, 0x00, 0x01, 'l', 0x03, 0x00, 0x00, 0x00, 0x02, // list "l" of 2 ints
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02,
+    0x09, 0x00, 0x01, 'c', 0x0a, 0x00, 0x00, 0x00, 0x01, // list "c" of 1 compound
+    0x01, 0x00, 0x01, 'z', 0x07, 0x00, // {z: 7b}
+    0x08, 0x00, 0x01, 's', 0x00, 0x02, 'h', 'i', // string "s"
+    0x00, // end "a"
+    0x01, 0x00, 0x01, 'b', 0x05, // byte "b"
+    0x00, // end root
+};
+
+test "SerialReader.skipValue" {
+    var input: IoReader = .fixed(&skip_test_data);
+    var sr: SerialReader = undefined;
+    sr.init(std.testing.allocator, &input, true);
+    defer sr.deinit();
+    const mapr = &sr.mapr;
+
+    try std.testing.expectEqual(.aggregate_start, try mapr.next());
+    try std.testing.expectEqualStrings("a", try mapr.nextExpect(.string));
+    try mapr.skipValue();
+    try std.testing.expectEqual(1, mapr.stackHeight());
+    try std.testing.expectEqualStrings("b", try mapr.nextExpect(.string));
+    try mapr.skipValue();
+    try std.testing.expectEqual(.aggregate_end, try mapr.next());
+    try std.testing.expectEqual(0, mapr.stackHeight());
+}
+
+test "SerialReader.skipUntilStackHeight" {
+    var input: IoReader = .fixed(&skip_test_data);
+    var sr: SerialReader = undefined;
+    sr.init(std.testing.allocator, &input, true);
+    defer sr.deinit();
+    const mapr = &sr.mapr;
+
+    try std.testing.expectEqual(.aggregate_start, try mapr.next());
+    try std.testing.expectEqualStrings("a", try mapr.nextExpect(.string));
+    try std.testing.expectEqual(.aggregate_start, try mapr.next());
+    try std.testing.expectEqualStrings("l", try mapr.nextExpect(.string));
+    try mapr.skipUntilStackHeight(1);
+    try std.testing.expectEqualStrings("b", try mapr.nextExpect(.string));
+    try std.testing.expectEqual(5, try mapr.nextExpect(.byte));
+    try std.testing.expectEqual(.aggregate_end, try mapr.next());
 }

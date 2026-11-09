@@ -223,9 +223,7 @@ pub const SerialReader = struct {
     }
 
     fn skipImpl(mapr: *MapReader, until_height: usize) MapReader.ReadError!void {
-        _ = mapr;
-        _ = until_height;
-        @panic("TODO: Unimplemented skip");
+        return mapr.skipTokens(until_height);
     }
 
     inline fn getAllocator(self: *SerialReader) Allocator {
@@ -509,4 +507,42 @@ test {
     std.testing.refAllDecls(@This());
     std.testing.refAllDecls(SerialWriter);
     std.testing.refAllDecls(SerialReader);
+}
+
+test "SerialReader.skipValue" {
+    var input: IoReader = .fixed(
+        \\{"a": {"x": [1, 2, {"y": "z"}], "w": "v"}, "b": 5}
+    );
+    var sr: SerialReader = undefined;
+    sr.init(std.testing.allocator, &input);
+    defer sr.deinit();
+    const mapr = &sr.mapr;
+
+    try std.testing.expectEqual(.aggregate_start, try mapr.next());
+    try std.testing.expectEqualStrings("a", try mapr.nextExpect(.string));
+    try mapr.skipValue();
+    try std.testing.expectEqual(1, mapr.stackHeight());
+    try std.testing.expectEqualStrings("b", try mapr.nextExpect(.string));
+    try mapr.skipValue();
+    try std.testing.expectEqual(.aggregate_end, try mapr.next());
+    try std.testing.expectEqual(0, mapr.stackHeight());
+}
+
+test "SerialReader.skipUntilStackHeight" {
+    var input: IoReader = .fixed(
+        \\{"a": {"x": [1, 2, {"y": "z"}], "w": "v"}, "b": 5}
+    );
+    var sr: SerialReader = undefined;
+    sr.init(std.testing.allocator, &input);
+    defer sr.deinit();
+    const mapr = &sr.mapr;
+
+    try std.testing.expectEqual(.aggregate_start, try mapr.next());
+    try std.testing.expectEqualStrings("a", try mapr.nextExpect(.string));
+    try std.testing.expectEqual(.aggregate_start, try mapr.next());
+    try std.testing.expectEqualStrings("x", try mapr.nextExpect(.string));
+    try mapr.skipUntilStackHeight(1);
+    try std.testing.expectEqualStrings("b", try mapr.nextExpect(.string));
+    try std.testing.expectEqual(5, try mapr.nextAsInt());
+    try std.testing.expectEqual(.aggregate_end, try mapr.next());
 }
