@@ -99,6 +99,7 @@ pub const TokenType = enum {
     float,
     double,
     string,
+    null,
     array_start,
     array_end,
     aggregate_start,
@@ -280,6 +281,7 @@ pub const Value = union(BaseType) {
             .double,
             => |v, tag| return @unionInit(Value, @tagName(tag), v),
             .string => |v| return .{ .string = try arena.dupe(u8, v) },
+            .null => return error.UnexpectedToken,
             .aggregate_start => {
                 var multi = std.MultiArrayList(Aggregate.RawEntry).empty;
                 defer multi.deinit(gpa);
@@ -290,6 +292,11 @@ pub const Value = union(BaseType) {
                         .aggregate_end => break,
                         else => return error.UnexpectedToken,
                     };
+                    // null fields are just absent
+                    if (try mapr.peek() == .null) {
+                        _ = try mapr.next();
+                        continue;
+                    }
                     const value = try deserialize(mapr);
                     try multi.append(gpa, .{
                         .name = name,
@@ -337,6 +344,8 @@ pub const Token = union(TokenType) {
     float: f32,
     double: f64,
     string: []const u8,
+    /// Only emitted by text formats (json). Fields with a `null` value are considered absent.
+    null,
     /// The length field allows readers to pre-allocate memory based upon the given type.
     ///
     /// If length or type is null, further reading and book-keeping is required to make sure proper
@@ -658,6 +667,8 @@ pub const MapReader = struct {
                     mapw.fieldName(v)
                 else
                     mapw.writeString(v),
+                // MapWriter has no way to write nulls
+                .null => return error.UnexpectedToken,
                 .array_start => |a| {
                     if (depth >= max_depth) return error.TooDeep;
                     std.BitStack.pushWithStateAssumeCapacity(&bstack, &depth, 1);
@@ -901,6 +912,11 @@ pub fn FieldGatherer(comptime fields: []const FieldProperty) type {
             };
             inline for (fields) |fp| {
                 if (std.mem.eql(u8, fp.name, name)) {
+                    // null fields are just absent
+                    if (try mapr.peek() == .null) {
+                        _ = try mapr.next();
+                        return @fromBackingInt(@intCast(fields.len)); // always out of range
+                    }
                     const field_enum = comptime @field(FieldEnum, fp.name);
                     const value_ptr = &@field(self.values, fp.name);
                     const mask_ptr = &@field(self.mask, fp.name);

@@ -245,6 +245,14 @@ pub const SerialReader = struct {
         }
     }
 
+    /// Same as `peekByte` but returns `null` on end of stream, for top-level values.
+    fn peekByteOrEnd(self: *SerialReader) Error!?u8 {
+        return self.mapr.reader.peekByte() catch |e| switch (e) {
+            error.EndOfStream => null,
+            else => |err| err,
+        };
+    }
+
     fn readContinuationByte(self: *SerialReader) Error!u21 {
         return switch (try self.mapr.reader.takeByte()) {
             0b10000000...0b10111111 => |c| c & 0b00111111,
@@ -258,12 +266,11 @@ pub const SerialReader = struct {
         var codepoint_full: u21 = undefined;
         switch (first) {
             '\\' => {
-                reader.toss(1);
                 return switch (try reader.takeByte()) {
                     '\\' => '\\',
                     '"' => '"',
                     '/' => '/',
-                    'b' => 0x1b,
+                    'b' => 0x08,
                     'f' => 0x0c,
                     'n' => '\n',
                     'r' => '\r',
@@ -271,7 +278,7 @@ pub const SerialReader = struct {
                     'u' => {
                         var hex: [4]u8 = undefined;
                         try reader.readSliceAll(&hex);
-                        return std.fmt.parseInt(u16, "0x" ++ hex, 16) catch error.InvalidString;
+                        return std.fmt.parseInt(u16, &hex, 16) catch error.InvalidString;
                     },
                     else => error.InvalidString,
                 };
@@ -389,13 +396,17 @@ pub const SerialReader = struct {
                 switch (c) {
                     ',' => continue :sw .end_value,
                     '{' => {
-                        self.state = .field_name;
                         try self.mapr.pushNesting(.aggregate);
+                        try self.skipWhitespace();
+                        // empty aggregate, let end_value consume the '}'
+                        self.state = if ((try reader.peekByte()) == '}') .end_value else .field_name;
                         return .aggregate_start;
                     },
                     '[' => {
-                        self.state = .value;
                         try self.mapr.pushNesting(.list);
+                        try self.skipWhitespace();
+                        // empty array, same thing
+                        self.state = if ((try reader.peekByte()) == ']') .end_value else .value;
                         return .{ .array_start = .{
                             .length = null,
                             .type = null,
@@ -426,10 +437,9 @@ pub const SerialReader = struct {
                         try self.string_buffer.ensureTotalCapacity(self.getAllocator(), max_len);
                         self.string_buffer.appendAssumeCapacity(c);
 
-                        while (true) {
-                            const byte = try reader.peekByte();
+                        while (try self.peekByteOrEnd()) |byte| {
                             switch (byte) {
-                                ',', ' ', '\n', '\r', '\t', 0xc => break,
+                                ',', ' ', '\n', '\r', '\t', 0xc, ']', '}' => break,
                                 'r', 'u', 'e', 'a', 'l', 's' => {},
                                 else => return error.UnexpectedToken,
                             }
@@ -445,15 +455,25 @@ pub const SerialReader = struct {
                         else
                             return error.UnexpectedToken };
                     },
-                    '0'...'9' => {
+                    'n' => {
+                        var rest: [3]u8 = undefined;
+                        try reader.readSliceAll(&rest);
+                        if (!std.mem.eql(u8, &rest, "ull")) return error.UnexpectedToken;
+                        if (try self.peekByteOrEnd()) |byte| switch (byte) {
+                            ',', ' ', '\n', '\r', '\t', 0xc, ']', '}' => {},
+                            else => return error.UnexpectedToken,
+                        };
+                        self.state = .end_value;
+                        return .null;
+                    },
+                    '-', '0'...'9' => {
                         self.string_buffer.clearRetainingCapacity();
                         try self.string_buffer.append(self.getAllocator(), c);
 
-                        while (true) {
-                            const byte = try reader.peekByte();
+                        while (try self.peekByteOrEnd()) |byte| {
                             switch (byte) {
                                 ',', ' ', '\n', '\r', '\t', 0xc, ']', '}' => break,
-                                '0'...'9', 'e', 'E', '-', '.' => {},
+                                '0'...'9', 'e', 'E', '-', '+', '.' => {},
                                 else => return error.UnexpectedToken,
                             }
                             reader.toss(1);
@@ -545,4 +565,99 @@ test "SerialReader.skipUntilStackHeight" {
     try std.testing.expectEqualStrings("b", try mapr.nextExpect(.string));
     try std.testing.expectEqual(5, try mapr.nextAsInt());
     try std.testing.expectEqual(.aggregate_end, try mapr.next());
+}
+
+fn expectTokens(src: []const u8, expected: []const serial.Token) !void {
+    var input: IoReader = .fixed(src);
+    var sr: SerialReader = undefined;
+    sr.init(std.testing.allocator, &input);
+    defer sr.deinit();
+
+    for (expected) |tok| {
+        try std.testing.expectEqualDeep(tok, try sr.mapr.next());
+    }
+    try std.testing.expectEqual(0, sr.mapr.stackHeight());
+}
+
+const no_info_array: serial.Token = .{ .array_start = .{ .length = null, .type = null } };
+
+test "SerialReader.next" {
+    // empty containers
+    try expectTokens("[]", &.{ no_info_array, .array_end });
+    try expectTokens("{ }", &.{ .aggregate_start, .aggregate_end });
+    try expectTokens(
+        \\{"a": [], "b": {}}
+    , &.{
+        .aggregate_start,
+        .{ .string = "a" },
+        no_info_array,
+        .array_end,
+        .{ .string = "b" },
+        .aggregate_start,
+        .aggregate_end,
+        .aggregate_end,
+    });
+
+    // booleans right before a closing bracket
+    try expectTokens("[true]", &.{ no_info_array, .{ .boolean = true }, .array_end });
+    try expectTokens(
+        \\{"a": false}
+    , &.{ .aggregate_start, .{ .string = "a" }, .{ .boolean = false }, .aggregate_end });
+
+    // numbers
+    try expectTokens("[-1, -2.5, 1e+5]", &.{
+        no_info_array,
+        .{ .long = -1 },
+        .{ .double = -2.5 },
+        .{ .double = 1e5 },
+        .array_end,
+    });
+
+    // top-level scalars
+    try expectTokens("5", &.{.{ .long = 5 }});
+    try expectTokens("true", &.{.{ .boolean = true }});
+}
+
+test "SerialReader.next escapes" {
+    try expectTokens(
+        \\["a\nb", "\"q\"", "\\", "\u0041", "\ud83d\ude00", "\b\t"]
+    , &.{
+        no_info_array,
+        .{ .string = "a\nb" },
+        .{ .string = "\"q\"" },
+        .{ .string = "\\" },
+        .{ .string = "A" },
+        .{ .string = "\u{1f600}" },
+        .{ .string = "\x08\t" },
+        .array_end,
+    });
+}
+
+test "SerialReader.next null" {
+    try expectTokens("null", &.{.null});
+    try expectTokens("[null, 1]", &.{ no_info_array, .null, .{ .long = 1 }, .array_end });
+    try expectTokens(
+        \\{"a": null}
+    , &.{ .aggregate_start, .{ .string = "a" }, .null, .aggregate_end });
+
+    var input: IoReader = .fixed("[nul]");
+    var sr: SerialReader = undefined;
+    sr.init(std.testing.allocator, &input);
+    defer sr.deinit();
+    _ = try sr.mapr.next();
+    try std.testing.expectError(error.UnexpectedToken, sr.mapr.next());
+}
+
+test "Value.deserialize null fields" {
+    var input: IoReader = .fixed(
+        \\{"a": null, "b": 1}
+    );
+    var sr: SerialReader = undefined;
+    sr.init(std.testing.allocator, &input);
+    defer sr.deinit();
+
+    const value = try serial.Value.deserialize(&sr.mapr);
+    try std.testing.expectEqual(1, value.aggregate.count);
+    try std.testing.expect(value.aggregate.get("a") == null);
+    try std.testing.expectEqual(1, value.aggregate.get("b").?.asInt());
 }
