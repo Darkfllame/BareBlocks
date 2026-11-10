@@ -497,7 +497,7 @@ pub fn deinit(self: *MemoryManager) void {
                 const chunk_size = chunk_end_offset - chunk.offset;
 
                 logger.err("GPU memory leaked at VkDeviceMemory@{x:0>16}[{d}..{d}] ({Bi})", .{
-                    @intFromEnum(block.devm), chunk.offset, chunk_end_offset - 1, chunk_size,
+                    @backingInt(block.devm), chunk.offset, chunk_end_offset - 1, chunk_size,
                 });
             }
 
@@ -563,7 +563,7 @@ pub fn allocBuffer(self: *MemoryManager, kind: Buffer.Kind, size: vk.DeviceSize,
         fit,
         .fromByteUnits(@intCast(req.alignment)),
     );
-    rval.chunk.type = @enumFromInt(@intFromEnum(kind));
+    rval.chunk.type = @fromBackingInt(@intCast(@backingInt(kind)));
 
     self.vk_device.bindBufferMemory(rval.handle, rval.chunk.block.devm, rval.chunk.offset) catch |e| switch (e) {
         error.OutOfHostMemory => return error.OutOfMemory,

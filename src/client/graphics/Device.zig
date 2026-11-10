@@ -50,7 +50,7 @@ const QueueFamilyIndices = struct {
         &@splat(.{}),
     );
     const TagInt = std.math.Log2Int(@Int(.unsigned, info.field_names.len));
-    const FieldsEnum =  @Enum(
+    const FieldsEnum = @Enum(
         TagInt,
         .nonexhaustive,
         info.field_names,

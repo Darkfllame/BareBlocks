@@ -152,7 +152,7 @@ pub fn BigUInt(comptime Element: type) type {
         }
 
         // fn divLimb(self: *Self, a:void) void {
-            
+
         // }
 
         /// `.len` is the capacity of this number.

@@ -93,7 +93,7 @@ fn getScope(self: *tui, name: [:0]const u8) !*LogScope {
         for (self.scopes) |*scope| {
             try scope.rwl.lockShared(self.io);
             defer scope.rwl.unlockShared(self.io);
-            
+
             if (scope.name.ptr == name.ptr) {
                 scope.last_activity.nanoseconds = std.math.maxInt(i96);
                 return scope;
@@ -108,8 +108,6 @@ fn getScope(self: *tui, name: [:0]const u8) !*LogScope {
         defer old.rwl.unlock(self.io);
 
         if (scope.name.ptr != name.ptr) continue;
-
-
     }
 }
 

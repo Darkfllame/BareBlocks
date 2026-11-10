@@ -165,7 +165,7 @@ pub const Hook = struct {
 };
 
 // TODO: Maybe add userdata pointer ?
-pub const HookContext= struct {
+pub const HookContext = struct {
     current_priority: Priority = .highest,
 };
 

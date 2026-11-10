@@ -18,7 +18,7 @@ fn fcntl(
     arg: usize,
 ) error{Unexpected}!usize {
     while (true) {
-        return switch (posix.errno(posix.system.fcntl(fd, @intFromEnum(cmd), arg))) {
+        return switch (posix.errno(posix.system.fcntl(fd, @backingInt(cmd), arg))) {
             .SUCCESS => {},
             .INTR => continue,
             .INVAL => |err| posix.unexpectedErrno(err),
@@ -123,7 +123,7 @@ pub fn socket(bind_addr: ?*const Io.net.IpAddress, multicast: bool, broadcast: b
     };
     errdefer closeFd(fd);
 
-    var z_addr = Io.net.IpAddress{.ip4 = .unspecified(0)};
+    var z_addr = Io.net.IpAddress{ .ip4 = .unspecified(0) };
 
     if (multicast) {
         try setSocketOption(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, 1);

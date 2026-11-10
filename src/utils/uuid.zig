@@ -117,7 +117,7 @@ pub const UUID = extern union {
     };
 
     pub fn fromBytes(bytes: *const [16]u8, endianness: std.lang.Endian) UUID {
-        var res = UUID{.bytes = bytes.*};
+        var res = UUID{ .bytes = bytes.* };
         if (endianness != std.lang.Endian.native) res.value = @byteSwap(res.value);
         return res;
     }

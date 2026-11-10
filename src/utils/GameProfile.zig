@@ -11,7 +11,7 @@ username_ptr: [*]const u8,
 properties_ptr: [*]const Property,
 
 pub const @"null" = GameProfile{
-    .uuid = .@"null",
+    .uuid = .null,
     .lengths = .{
         .username = 0,
         .properties = 0,

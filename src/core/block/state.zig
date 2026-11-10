@@ -24,15 +24,15 @@ pub const PropertyValue = union(enum) {
         const V = @TypeOf(value);
         const info = @typeInfo(V);
         return sw: switch (info) {
-            .bool => .{.boolean=value},
-            .comptime_int, .int => .{.int=@intCast(value)},
+            .bool => .{ .boolean = value },
+            .comptime_int, .int => .{ .int = @intCast(value) },
             .@"enum" => |enu| {
                 if (enu.mode == .nonexhaustive) @compileError("Non-exhaustive enum");
                 if (@bitSizeOf(enu.tag_type) > 32) @compileError("Bad enum type");
                 const UTag = @Int(.unsigned, @bitSizeOf(enu.tag_type));
                 break :sw .{ .@"enum" = @as(UTag, @bitCast(@backingInt(value))) };
             },
-            inline else => |_,tag| @compileError("Unknown type: " ++ @typeName(V) ++ " (" ++ @tagName(tag) ++ ")"),
+            inline else => |_, tag| @compileError("Unknown type: " ++ @typeName(V) ++ " (" ++ @tagName(tag) ++ ")"),
         };
     }
 };
@@ -95,7 +95,6 @@ pub const Property = struct {
         /// Unsigned but the backing integer used might be.
         @"enum": u32,
     };
-
 
     pub fn valueFrom(comptime self: Property, value: anytype) PropertyValue {
         const V = @TypeOf(value);

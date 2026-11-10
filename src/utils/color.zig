@@ -61,7 +61,7 @@ pub const Color = enum(u24) {
     };
 
     pub fn hex(x: u24) Color {
-        return @enumFromInt(x);
+        return @fromBackingInt(@intCast(x));
     }
 
     pub fn values(r: u8, g: u8, b: u8) Color {

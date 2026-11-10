@@ -26,7 +26,7 @@ timelines: void = {},
 
 pub const height_range = utils.Range(HeightInt).init(world.min_world_height, world.max_world_height);
 pub const y_range = utils.Range(HeightInt).init(world.min_world_y, world.max_world_y);
-pub const way_y_range =utils.Range(std.math.IntFittingRange(world.way_below_min_y, world.way_above_max_y)).init(world.way_below_min_y, world.way_below_min_y);
+pub const way_y_range = utils.Range(std.math.IntFittingRange(world.way_below_min_y, world.way_above_max_y)).init(world.way_below_min_y, world.way_below_min_y);
 
 pub const overworld = DimensionProperties{
     .flags = .{

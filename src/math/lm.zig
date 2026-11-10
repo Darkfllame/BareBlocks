@@ -441,15 +441,15 @@ pub fn Vec(comptime T: type, comptime DIM: comptime_int) type {
         /// **Note**:
         /// - Uses `from` to convert `b` to `Self`.
         pub fn add(self: Self, b: Self) Self {
-            return .{.vec=self.vec + b.vec};
+            return .{ .vec = self.vec + b.vec };
         }
         /// **Note**:
         /// - Uses `from` to convert `b` to `Self`.
         pub fn sub(self: Self, b: Self) Self {
-            return .{.vec=self.vec - b.vec};
+            return .{ .vec = self.vec - b.vec };
         }
         pub fn neg(self: Self) Self {
-            return .{.vec=-self.vec};
+            return .{ .vec = -self.vec };
         }
         /// **Note**:
         /// - Uses `from` to convert `b` to `Self`.
@@ -459,19 +459,19 @@ pub fn Vec(comptime T: type, comptime DIM: comptime_int) type {
         /// **Note**:
         /// - Uses `from` to convert `b` to `Self`.
         pub fn div(self: Self, b: Self) Self {
-            return .{.vec=self.vec / b.vec};
+            return .{ .vec = self.vec / b.vec };
         }
         pub fn mod(self: Self, b: Self) Self {
-            return .{.vec=@mod(self.vec, b.vec)};
+            return .{ .vec = @mod(self.vec, b.vec) };
         }
         pub fn rem(self: Self, b: Self) Self {
-            return .{.vec=@rem(self.vec, b.vec)};
+            return .{ .vec = @rem(self.vec, b.vec) };
         }
         pub fn min(self: Self, b: Self) Self {
-            return .{.vec=@min(self.vec, b.vec)};
+            return .{ .vec = @min(self.vec, b.vec) };
         }
         pub fn max(self: Self, b: Self) Self {
-            return .{.vec=@max(self.vec, b.vec)};
+            return .{ .vec = @max(self.vec, b.vec) };
         }
         pub fn componentMin(self: Self) T {
             return @reduce(.Min, self.vec);
@@ -480,16 +480,16 @@ pub fn Vec(comptime T: type, comptime DIM: comptime_int) type {
             return @reduce(.Max, self.vec);
         }
         pub fn abs(self: Self) Self {
-            return .{.vec=@abs(self.vec)};
+            return .{ .vec = @abs(self.vec) };
         }
         pub fn round(self: Self) Self {
-            return .{.vec=@round(self.vec)};
+            return .{ .vec = @round(self.vec) };
         }
         pub fn floor(self: Self) Self {
-            return .{.vec=@floor(self.vec)};
+            return .{ .vec = @floor(self.vec) };
         }
         pub fn ceil(self: Self) Self {
-            return .{.vec=@ceil(self.vec)};
+            return .{ .vec = @ceil(self.vec) };
         }
 
         /// Checks raw equality (no threshold for floats).

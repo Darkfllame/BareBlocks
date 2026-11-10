@@ -98,7 +98,7 @@ pub fn validate(id: []const u8) ValidationError!Identifier {
         },
         '0'...'9', 'a'...'z', '-', '.', '_' => continue,
         else => if (colon_idx == null or c != '/') {
-            utils.err(logger, "Invalid character in id: {s}\x1b[31m{s}\x1b[39m{s}",  .{
+            utils.err(logger, "Invalid character in id: {s}\x1b[31m{s}\x1b[39m{s}", .{
                 id[0 .. i - 1], id[i .. i + 1], id[i + 1 ..],
             });
             return error.InvalidCharacter;

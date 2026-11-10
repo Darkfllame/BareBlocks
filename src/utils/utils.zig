@@ -200,17 +200,17 @@ pub fn EmbeddedArray(comptime attribs: std.lang.Type.Pointer.Attributes, comptim
             assert(src_end >= src_start);
 
             const min_len = @min(dst_end - dst_start, src_end - src_start);
-            
+
             const source = blk: {
-                const elems: []align(aligned_attribs.@"align".?) T = @ptrCast(@constCast(@addrSpaceCast(@volatileCast(self.slice()))));
+                const elems: []align(aligned_attribs.@"align".?) T = @ptrCast(@addrSpaceCast(@constCast(@volatileCast(self.slice()))));
                 break :blk elems[src_start..min_len];
             };
 
             const new_bytes = try allocator.alignedAlloc(u8, .of(Self), start_offset + dst_end * @sizeOf(T));
             const new: VarPtr = @ptrCast(new_bytes.ptr);
-            new.* = .{.length=dst_end,.refc=1};
+            new.* = .{ .length = dst_end, .refc = 1 };
 
-            const elems: []align(aligned_attribs.@"align".?) T = @ptrCast(@constCast(@addrSpaceCast(@volatileCast(new.slice()))));
+            const elems: []align(aligned_attribs.@"align".?) T = @ptrCast(@addrSpaceCast(@constCast(@volatileCast(new.slice()))));
 
             @memcpy(elems[dst_start..min_len], source);
             return @ptrCast(@alignCast(new));
@@ -218,14 +218,14 @@ pub fn EmbeddedArray(comptime attribs: std.lang.Type.Pointer.Attributes, comptim
 
         pub fn acquire(self: SelfPtr) SelfPtr {
             const selfv: VarPtr = @ptrCast(@alignCast(@constCast(self)));
-            _=@atomicRmw(usize, &selfv.refc, .Add, 1, .monotonic);
+            _ = @atomicRmw(usize, &selfv.refc, .Add, 1, .monotonic);
             return self;
         }
 
         pub fn release(self: SelfPtr, allocator: Allocator) void {
             const selfv: VarPtr = @ptrCast(@alignCast(@constCast(self)));
             if (@atomicRmw(usize, &selfv.refc, .Sub, 1, .release) == 1) {
-                const bytes: [*]align(@alignOf(Self)) u8 = @ptrCast(@constCast(@addrSpaceCast(@volatileCast(self))));
+                const bytes: [*]align(@alignOf(Self)) u8 = @ptrCast(@addrSpaceCast(@constCast(@volatileCast(self))));
                 const len = start_offset + self.length * @sizeOf(T);
                 allocator.free(bytes[0..len]);
             }
