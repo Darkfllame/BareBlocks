@@ -199,10 +199,11 @@ pub const SerialWriter = struct {
         self.string_buffer.deinit(self.allocator);
     }
 };
+
 pub const SerialReader = struct {
     const vtable = MapReader.VTable{
         .next = nextImpl,
-        .skip = skipImpl,
+        // TODO: Implement a more efficient skipping method
     };
 
     const State = enum { field_name, value, end_value };
@@ -220,10 +221,6 @@ pub const SerialReader = struct {
                 return error.ReadFailed;
             },
         };
-    }
-
-    fn skipImpl(mapr: *MapReader, until_height: usize) MapReader.ReadError!void {
-        return mapr.skipTokens(until_height);
     }
 
     inline fn getAllocator(self: *SerialReader) Allocator {

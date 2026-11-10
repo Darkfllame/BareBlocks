@@ -563,7 +563,7 @@ pub const MapReader = struct {
 
     pub const VTable = struct {
         next: *const fn (self: *MapReader, max_value_len: usize) ReadError!Token,
-        skip: *const fn (self: *MapReader, target_nesting: usize) ReadError!void,
+        skip: *const fn (self: *MapReader, target_nesting: usize) ReadError!void = skipTokens,
     };
 
     pub inline fn getAlloctor(self: *MapReader) Allocator {

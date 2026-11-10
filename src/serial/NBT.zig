@@ -177,7 +177,7 @@ const DynamicList = struct {
         switch (self.common_subtype) {
             .void => return writer.writeAll(&.{ 0, 0, 0, 0, 0 }),
             .byte, .int, .long => {}, // no subtype, just length
-            else => try writer.writeByte(@intFromEnum(self.common_subtype)),
+            else => try writer.writeByte(@backingInt(self.common_subtype)),
         }
 
         try writer.writeInt(i32, @intCast(slice.len), .big);
@@ -191,10 +191,10 @@ const DynamicList = struct {
                         // Already properly serialized
                         .list, .compound => |bytes| try writer.writeAll(bytes),
                         inline else => |sub, tag| {
-                            try writer.writeByte(@intFromEnum(tag));
+                            try writer.writeByte(@backingInt(tag));
                             try writeJavaString(writer, "");
                             try writeValueRaw(writer, @unionInit(Value, @tagName(tag), sub));
-                            try writer.writeByte(@intFromEnum(ValueTag.void));
+                            try writer.writeByte(@backingInt(ValueTag.void));
                         },
                     }
                 }
@@ -327,7 +327,7 @@ pub const Value = union(ValueTag) {
     }
 
     pub fn writeTo(self: Value, writer: *IoWriter) WriteError!void {
-        try writer.writeByte(@intFromEnum(self));
+        try writer.writeByte(@backingInt(self));
         try writeValueRaw(writer, self);
     }
 };
@@ -588,7 +588,7 @@ pub const SerialWriter = struct {
 
         /// Consumes `self.name`. Returns whether the name of the current state was empty.
         fn writePrologue(self: *State, allocator: Allocator, w: *IoWriter, tag: ValueTag) WriteError!void {
-            try w.writeByte(@intFromEnum(tag));
+            try w.writeByte(@backingInt(tag));
             if (self.name) |nm| {
                 if (nm.len == 0 and self.data == .compound and !self.streaming) {
                     self.data.compound.wrapper = switch (self.data.compound.wrapper) {
@@ -984,12 +984,12 @@ pub const SerialWriter = struct {
                     errdefer self.allocator.free(slice);
                     var w = IoWriter.fixed(slice);
                     if (needs_wrapping) {
-                        w.writeAll(&.{ @intFromEnum(ValueTag.compound), 0, 0 }) catch unreachable;
+                        w.writeAll(&.{ @backingInt(ValueTag.compound), 0, 0 }) catch unreachable;
                     }
                     w.writeAll(compound.bufferItems()) catch unreachable;
-                    w.writeByte(@intFromEnum(ValueTag.void)) catch unreachable;
+                    w.writeByte(@backingInt(ValueTag.void)) catch unreachable;
                     if (needs_wrapping) {
-                        w.writeByte(@intFromEnum(ValueTag.void)) catch unreachable;
+                        w.writeByte(@backingInt(ValueTag.void)) catch unreachable;
                     }
 
                     try l.append(self.allocator, .{ .compound = slice });
@@ -1002,7 +1002,7 @@ pub const SerialWriter = struct {
             if (!state_node.state.streaming) {
                 try writer.writeAll(compound.bufferItems());
             }
-            try writer.writeByte(@intFromEnum(ValueTag.void));
+            try writer.writeByte(@backingInt(ValueTag.void));
         }
         if (!state_node.state.streaming) {
             compound.maybeDeinit(self.allocator);
@@ -1014,7 +1014,7 @@ pub const SerialWriter = struct {
 pub const SerialReader = struct {
     const vtable = MapReader.VTable{
         .next = nextImpl,
-        .skip = skipImpl,
+        // TODO: Implement a more efficient skipping method
     };
 
     const State = union(enum) {
@@ -1041,10 +1041,6 @@ pub const SerialReader = struct {
         };
     }
 
-    fn skipImpl(mapr: *MapReader, until_height: usize) MapReader.ReadError!void {
-        return mapr.skipTokens(until_height);
-    }
-
     inline fn getAllocator(self: *SerialReader) Allocator {
         return self.mapr.getAlloctor();
     }
@@ -1066,7 +1062,7 @@ pub const SerialReader = struct {
                 const type_tag: ValueTag, const bpe: ?usize = type_sw: switch (tag) {
                     .list => {
                         const t = try reader.takeEnum(ValueTag, .big);
-                        try writer.writeByte(@intFromEnum(t));
+                        try writer.writeByte(@backingInt(t));
                         const bpe: ?usize = switch (t) {
                             .void => null,
                             .byte => 1,
@@ -1105,7 +1101,7 @@ pub const SerialReader = struct {
             .compound => {
                 while (true) {
                     const t = try reader.takeEnum(ValueTag, .big);
-                    try writer.writeByte(@intFromEnum(t));
+                    try writer.writeByte(@backingInt(t));
                     if (t == .void) break;
                     try reader.streamExact(writer, 2 + @as(usize, try reader.peekInt(u16, .big)));
                     try streamValue(t, reader, writer);
@@ -1602,7 +1598,7 @@ fn writeValueRaw(writer: *IoWriter, value: Value) WriteError!void {
         .string => |str| try writeJavaString(writer, str),
         .list => |list| {
             if (list.type == .void and list.len != 0) return error.InvalidEnumTag;
-            try writer.writeByte(@intFromEnum(list.type));
+            try writer.writeByte(@backingInt(list.type));
             try writer.writeInt(i32, list.len, .big);
             switch (list.type) {
                 .void => {},
@@ -1625,7 +1621,7 @@ fn writeValueRaw(writer: *IoWriter, value: Value) WriteError!void {
             while (it.next()) |entry| {
                 const val = entry.value_ptr.*;
                 if (val == .void) return error.InvalidEnumTag;
-                try writer.writeByte(@intFromEnum(val));
+                try writer.writeByte(@backingInt(val));
                 try writeJavaString(writer, entry.key_ptr.*);
                 try writeValueRaw(writer, val);
             }
@@ -1644,11 +1640,12 @@ test {
     std.testing.refAllDecls(SerialReader);
 }
 
+// zig fmt off
 // named root compound: {a: {l: [1, 2], c: [{z: 7b}], s: "hi"}, b: 5b}
 const skip_test_data = [_]u8{
     0x0a, 0x00, 0x00, // root compound, empty name
     0x0a, 0x00, 0x01, 'a', // compound "a"
-    0x09, 0x00, 0x01, 'l', 0x03, 0x00, 0x00, 0x00, 0x02, // list "l" of 2 ints
+    0x09, 0x00, 0x01, 'l',  0x03, 0x00, 0x00, 0x00, 0x02, // list "l" of 2 ints
     0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02,
     0x09, 0x00, 0x01, 'c', 0x0a, 0x00, 0x00, 0x00, 0x01, // list "c" of 1 compound
     0x01, 0x00, 0x01, 'z', 0x07, 0x00, // {z: 7b}
@@ -1657,6 +1654,7 @@ const skip_test_data = [_]u8{
     0x01, 0x00, 0x01, 'b', 0x05, // byte "b"
     0x00, // end root
 };
+// zig fmt on
 
 test "SerialReader.skipValue" {
     var input: IoReader = .fixed(&skip_test_data);
