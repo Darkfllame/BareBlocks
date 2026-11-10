@@ -1,5 +1,4 @@
-// TODO: JSON Reader
-// TODO: Comptime generic interface, for metadata-based serializing
+// TODO: Codec-like API
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -345,6 +344,8 @@ pub const Token = union(TokenType) {
     double: f64,
     string: []const u8,
     /// Only emitted by text formats (json). Fields with a `null` value are considered absent.
+    /// 
+    /// TODO: Tweak existing deserialize function to handle this when not using FieldGatherer
     null,
     /// The length field allows readers to pre-allocate memory based upon the given type.
     ///
@@ -903,6 +904,7 @@ pub fn FieldGatherer(comptime fields: []const FieldProperty) type {
             }
         }
 
+        // TODO: Remove 'gpa' and 'arena' parameters, as those can be passed in 'mapr'
         pub fn next(self: *Self, gpa: Allocator, arena: Allocator, mapr: *MapReader) MapReader.ReadError!?FieldEnum {
             const token = try mapr.next();
             const name = switch (token) {
