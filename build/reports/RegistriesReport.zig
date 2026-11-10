@@ -20,15 +20,7 @@ pub fn deserialize(mapr: *serial.MapReader) !RegistriesReport {
     try self.entries.ensureTotalCapacity(arena, 128);
 
     while (true) {
-        switch (try mapr.peek()) {
-            .string => {},
-            .aggregate_end => {
-                _ = mapr.next() catch unreachable;
-                break;
-            },
-            else => return error.UnexpectedToken,
-        }
-        const registry_id = try utils.Identifier.deserialize(mapr);
+        const registry_id = (try utils.Identifier.deserializeFieldName(mapr)) orelse break;
 
         var fg = serial.FieldGatherer(&.{
             .{ .name = "entries", .type = .{ .external = IdentifierList(void) } },
@@ -46,15 +38,7 @@ pub fn deserialize(mapr: *serial.MapReader) !RegistriesReport {
 
                     try mapr.nextExpect(.aggregate_start);
                     while (true) {
-                        switch (try mapr.peek()) {
-                            .string => {},
-                            .aggregate_end => {
-                                _ = mapr.next() catch unreachable;
-                                break;
-                            },
-                            else => return error.UnexpectedToken,
-                        }
-                        const entry_id = try utils.Identifier.deserialize(mapr);
+                        const entry_id = (try utils.Identifier.deserializeFieldName(mapr)) orelse break;
 
                         var entry_fg = serial.FieldGatherer(&.{
                             .{ .name = "protocol_id", .type = .int },

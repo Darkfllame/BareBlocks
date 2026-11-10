@@ -39,15 +39,7 @@ fn parseSide(list: *IdentifierList(void), mapr: *serial.MapReader) !void {
 
     try mapr.nextExpect(.aggregate_start);
     while (true) {
-        switch (try mapr.peek()) {
-            .string => {},
-            .aggregate_end => {
-                _ = mapr.next() catch unreachable;
-                break;
-            },
-            else => return error.UnexpectedToken,
-        }
-        const id = try utils.Identifier.deserialize(mapr);
+        const id = (try utils.Identifier.deserializeFieldName(mapr)) orelse break;
         // std.log.debug("- {f}", .{id.alt(.full)});
 
         var fg = serial.FieldGatherer(&.{

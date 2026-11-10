@@ -14,48 +14,23 @@ const assert = std.debug.assert;
 // NOTE: pre-loaded states. So "setting" a property just results in taking a different state from these.
 // NOTE: They are addressed as neighbours[propertyIndex][valueIndex].
 
-pub const PropertyValue = union(enum) {
-    boolean: bool,
-    integer: i32,
-    /// Unsigned but the backing integer used might be.
-    @"enum": u32,
-
-    pub fn from(value: anytype) PropertyValue {
-        const V = @TypeOf(value);
-        const info = @typeInfo(V);
-        return sw: switch (info) {
-            .bool => .{ .boolean = value },
-            .comptime_int, .int => .{ .int = @intCast(value) },
-            .@"enum" => |enu| {
-                if (enu.mode == .nonexhaustive) @compileError("Non-exhaustive enum");
-                if (@bitSizeOf(enu.tag_type) > 32) @compileError("Bad enum type");
-                const UTag = @Int(.unsigned, @bitSizeOf(enu.tag_type));
-                break :sw .{ .@"enum" = @as(UTag, @bitCast(@backingInt(value))) };
-            },
-            inline else => |_, tag| @compileError("Unknown type: " ++ @typeName(V) ++ " (" ++ @tagName(tag) ++ ")"),
-        };
-    }
+pub const PropertyType = enum {
+    
 };
 
-pub const StateHolder = struct {
-    owner: union {
-        block: *Block.State,
-        /// TODO: Implement fluids.
-        fluid: *anyopaque,
-    },
-    /// Available properties
-    property_keys: []const Property,
-    vtable: *const VTable,
+pub const PropertiesValues = opaque {};
 
-    pub const VTable = struct {
-        setProperty: *const fn (self: *StateHolder, property_index: usize, value: PropertyValue) *anyopaque,
-    };
+pub const StateHolder = struct {
+    properties: []const Property.Compiled,
+    data: *const PropertiesValues,
+    siblings: [*]const *anyopaque,
 };
 
 pub const State = struct {
     /// A unique ID between all possible block states.
     state_id: Id,
     owner: *Block,
+    holder: StateHolder,
 
     pub const Id = enum(u32) { _ };
 
@@ -84,10 +59,42 @@ pub const Property = struct {
     name: []const u8,
     data: union(enum) {
         boolean,
-        integer,
-        /// Value cannot be accessed at runtime, only the tag can i think
-        @"enum": type,
+        integer: struct {
+            min: i32,
+            max: i32,
+            /// Ranged between 1 and 8.
+            bits: u3,
+        },
+        @"enum": struct {
+            fields: []const EnumField,
+            /// Ranged between 1 and 8.
+            bits: u3,
+            /// This field cannot be accessed at runtime, but others can.
+            type: type,
+        },
     },
+
+    pub const EnumField = struct { name: []const u8, value: i32 };
+
+    pub const Compiled = struct {
+        base: Property,
+        /// Properties can only be 8 bits at most.
+        ///
+        /// Ranged between 1 and 8.
+        bit_size: u3,
+        /// u8's gives a 32 bytes addressing capability.
+        bit_offset: u8,
+        byte_mask: u8,
+
+
+        pub fn valueFrom(comptime self: Compiled, value: anytype) Property.Value {
+            return self.base.valueFrom(value);
+        }
+
+        pub fn get(self: Compiled, bytes: [*]const u8) u8 {
+
+        }
+    };
 
     pub const Value = union(enum) {
         boolean: bool,
@@ -96,15 +103,79 @@ pub const Property = struct {
         @"enum": u32,
     };
 
-    pub fn valueFrom(comptime self: Property, value: anytype) PropertyValue {
+    pub fn boolean(name: []const u8) Property {
+        return .{ .name = name, .data = .boolean };
+    }
+
+    /// `bits` is asserted to be ranged from 1 to 8
+    pub fn integer(name: []const u8, min: i32, max: i32, bits: u4) Property {
+        assert(bits >= 1 and bits <= 8);
+        return .{
+            .name = name,
+            .data = .{ .integer = .{
+                .min = min,
+                .max = max,
+                .bits = @truncate(bits -% 1),
+            } },
+        };
+    }
+
+    pub fn @"enum"(comptime E: type, name: []const u8) Property {
+        const info = @typeInfo(E).@"enum";
+        return .{
+            .name = name,
+            .data = .{ .@"enum" = .{
+                .fields = comptime blk: {
+                    var fields: [info.field_names.len]EnumField = undefined;
+                    for (&fields, info.field_names, info.field_values) |*out, fname, value| {
+                        out.* = .{ .name = fname, .value = value };
+                    }
+                    const c_fields = fields;
+                    break :blk &c_fields;
+                },
+                .bits = @bitSizeOf(info.tag_type) - 1,
+                .type = E,
+            } },
+        };
+    }
+
+    pub fn valueFrom(comptime self: Property, value: anytype) error{BadValue}!Property.Value {
         const V = @TypeOf(value);
         const info = @typeInfo(V);
         switch (self.data) {
             .boolean => {
-                if (info != .bool) @compileError("No boolean");
+                if (info != .bool) @compileError("Expected bool, found: " ++ @typeName(V));
                 return .{ .boolean = value };
             },
-            // TODO, ts pissing me of
+            .integer => |int| switch (info) {
+                .comptime_int => {
+                    if (value < int.min and value > int.max) @compileError(std.fmt.comptimePrint("IntegerProperty({q}) must be between {d} and {d}, got: {d}", .{
+                        self.name, int.min, int.max, value,
+                    }));
+                    return .{ .integer = @intCast(value) };
+                },
+                .int => return .{ .integer = @intCast(value) },
+                else => @compileError("Expected integer, found: " ++ @typeName(V)),
+            },
+            .@"enum" => |_enum| {
+                const E = _enum.type;
+                const val: E = if (info == .enum_literal)
+                    value
+                else if (V != E)
+                    @compileError("Mismatch types: " ++ @typeName(V) ++ ", expected: " ++ @typeName(E))
+                else
+                    value;
+
+                const enu = @typeInfo(E);
+                if (enu.mode == .nonexhaustive) @compileError("Non-exhaustive enum");
+                if (@bitSizeOf(enu.tag_type) > 32) @compileError("Bad enum type");
+                const UTag = @Int(.unsigned, @bitSizeOf(enu.tag_type));
+                return .{ .@"enum" = @as(UTag, @bitCast(@backingInt(val))) };
+            },
         }
     }
 };
+
+test {
+    std.testing.refAllDecls(@This());
+}

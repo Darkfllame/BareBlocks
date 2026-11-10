@@ -4,6 +4,7 @@ const utils = @import("utils");
 const net = @import("net");
 const serial = @import("serial");
 
+const BlocksReport = @import("reports/BlocksReport.zig");
 const RegistriesReport = @import("reports/RegistriesReport.zig");
 const PacketsReport = @import("reports/PacketsReport.zig");
 const DatapackReport = @import("reports/DatapackReport.zig");

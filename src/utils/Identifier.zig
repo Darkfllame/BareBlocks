@@ -157,6 +157,13 @@ pub fn deserialize(mapr: *MapReader) MapReader.ReadError!Identifier {
     return validate(tok_cpy) catch error.UnexpectedToken;
 }
 
+pub fn deserializeFieldName(mapr: *MapReader) MapReader.ReadError!?Identifier {
+    const tok_cpy = (try mapr.nextExpectFieldName()) orelse return null;
+    errdefer mapr.getArena().free(tok_cpy);
+
+    return validate(tok_cpy) catch error.UnexpectedToken;
+}
+
 pub fn serialize(self: Identifier, mapw: *MapWriter) MapWriter.WriteError!void {
     const w = try mapw.stringWriter(self.namespace_len + self.path_len + 1, &.{});
     try w.print("{s}:{s}", .{ self.namespace(), self.path() });

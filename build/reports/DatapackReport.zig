@@ -53,16 +53,7 @@ fn parseRegistries(self: *DatapackReport, mapr: *serial.MapReader) !void {
 
     try mapr.nextExpect(.aggregate_start);
     while (true) {
-        const tok = try mapr.peek();
-        switch (tok) {
-            .string => {},
-            .aggregate_end => {
-                _ = mapr.next() catch unreachable;
-                break;
-            },
-            else => return error.UnexpectedToken,
-        }
-        const name = try utils.Identifier.deserialize(mapr);
+        const name = (try utils.Identifier.deserializeFieldName(mapr)) orelse break;
 
         var fg = serial.FieldGatherer(&.{
             .{ .name = "elements", .type = .boolean },

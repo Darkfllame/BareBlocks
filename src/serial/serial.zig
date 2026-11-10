@@ -721,6 +721,23 @@ pub const MapReader = struct {
         if (tok != ttype) return error.UnexpectedToken;
         return @field(tok, @tagName(ttype));
     }
+
+    pub fn nextExpectOrNull(self: *MapReader, comptime ttype: TokenType) ReadError!?@FieldType(Token, @tagName(ttype)) {
+        const tok = try self.next();
+        return switch (tok) {
+            .null => null,
+            ttype => @field(tok, @tagName(ttype)),
+            else => error.UnexpectedToken,
+        };
+    }
+
+    pub fn nextExpectFieldName(self: *MapReader) ReadError!?[]const u8 {
+        return switch (try self.next()) {
+            .string => |s| try self.getArena().dupe(u8, s),
+            .aggregate_end => null,
+            else => error.UnexpectedToken,
+        };
+    }
 };
 
 pub const NextOptions = struct {
