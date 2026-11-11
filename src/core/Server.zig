@@ -303,9 +303,7 @@ pub const OwnedConnection = struct {
 
         switch (owned.data) {
             .none => {},
-            .login => |loginging| allocator.destroy(loginging),
-            .config => |configing| allocator.destroy(configing),
-            .play => |playing| allocator.destroy(playing),
+            inline else => |data| allocator.destroy(data),
         }
         allocator.destroy(owned);
     }
@@ -1150,7 +1148,7 @@ fn joinWorld(conn: *Connection, apair: net.PacketType.AllocPair) net.Connection.
     // Same as vanilla's `PlayerList.placeNewPlayer`: everyone gets the new player, the new player
     // gets everyone. The client also needs its own entry, it's where it gets its game mode from.
     const player_info = net.packets.player_info_initialize_s2c;
-    const PlayerEntry = @typeInfo(@FieldType(player_info.getZigType(), "players")).pointer.child;
+    const PlayerEntry = net.packets.PlayerInfoEntry.getZigType();
     const all_actions: std.EnumSet(net.packets.PlayerInfoAction) = .full;
 
     var new_entry = [_]PlayerEntry{playerInfoEntry(playing)};
@@ -1178,11 +1176,9 @@ fn joinWorld(conn: *Connection, apair: net.PacketType.AllocPair) net.Connection.
     owner.broadcastSystemChatLocked(apair, message);
 }
 
-fn playerInfoEntry(playing: *const PlayConnection) @typeInfo(@FieldType(net.packets.player_info_initialize_s2c.getZigType(), "players")).pointer.child {
+fn playerInfoEntry(playing: *const PlayConnection) net.packets.PlayerInfoEntry.getZigType() {
     return .{
-        .uuid = playing.profile.uuid,
-        .name = playing.profile.username(),
-        .properties = &.{},
+        .profile = playing.profile,
         .chat_session = null,
         .game_mode = limbo.game_mode,
         .listed = true,

@@ -523,54 +523,44 @@ pub const PlayerInfoAction = enum {
     update_list_order,
     update_hat,
 };
-/// Only the form vanilla sends when players join (`createPlayerInitializing`): every action, so
-/// each player has all the fields in the actions' order.
+pub const ChatSession = StructuredPacket.getType(.{
+    .name = "ChatSession",
+    .fields = &.{
+        .{ .name = "session_id", .type = .uuid },
+        .{ .name = "expires_at", .type = .long },
+        .{ .name = "public_key", .type = .byte_array },
+        .{ .name = "key_signature", .type = .byte_array },
+    },
+});
+/// A player in `player_info_initialize_s2c`, with every action's data in the actions' order.
+pub const PlayerInfoEntry = StructuredPacket.getType(.{
+    .name = "PlayerInfoEntry",
+    .fields = &.{
+        // The uuid, then add_player's name and properties, same bytes as a game profile
+        .{ .name = "profile", .type = .game_profile },
+        // initialize_chat
+        .{ .name = "chat_session", .type = .prefixedOptional(ChatSession) },
+        // update_game_mode
+        .{ .name = "game_mode", .type = .{ .@"enum" = .of(GameMode, .var_int) } },
+        // update_listed
+        .{ .name = "listed", .type = .bool },
+        // update_latency
+        .{ .name = "latency", .type = .var_int },
+        // update_display_name
+        .{ .name = "display_name", .type = .prefixedOptional(.nbt_text_component) },
+        // update_list_order
+        .{ .name = "list_order", .type = .var_int },
+        // update_hat
+        .{ .name = "show_hat", .type = .bool },
+    },
+});
+/// Only the form vanilla sends when players join (`createPlayerInitializing`): every action.
 pub const player_info_initialize_s2c = StructuredPacket.getType(.{
     .name = "PlayerInfoInitializeS2C",
     .fields = &.{
         // A fixed `java.util.BitSet` of 8 bits, all set
         .{ .name = "actions", .type = .{ .enum_set = .of(PlayerInfoAction, .u8) } },
-        .{
-            .name = "players",
-            .type = .prefixedArray(StructuredPacket.getType(.{
-                .name = "PlayerInfoInitializeS2C::Player",
-                .fields = &.{
-                    .{ .name = "uuid", .type = .uuid },
-                    // add_player
-                    .{ .name = "name", .type = .limitedString(16) },
-                    .{ .name = "properties", .type = .prefixedArray(StructuredPacket.getType(.{
-                        .name = "PlayerInfoInitializeS2C::Property",
-                        .fields = &.{
-                            .{ .name = "name", .type = .limitedString(64) },
-                            .{ .name = "value", .type = .max_string },
-                            .{ .name = "signature", .type = .prefixedOptional(.limitedString(1024)) },
-                        },
-                    })) },
-                    // initialize_chat
-                    .{ .name = "chat_session", .type = .prefixedOptional(StructuredPacket.getType(.{
-                        .name = "PlayerInfoInitializeS2C::ChatSession",
-                        .fields = &.{
-                            .{ .name = "session_id", .type = .uuid },
-                            .{ .name = "expires_at", .type = .long },
-                            .{ .name = "public_key", .type = .byte_array },
-                            .{ .name = "key_signature", .type = .byte_array },
-                        },
-                    })) },
-                    // update_game_mode
-                    .{ .name = "game_mode", .type = .{ .@"enum" = .of(GameMode, .var_int) } },
-                    // update_listed
-                    .{ .name = "listed", .type = .bool },
-                    // update_latency
-                    .{ .name = "latency", .type = .var_int },
-                    // update_display_name
-                    .{ .name = "display_name", .type = .prefixedOptional(.nbt_text_component) },
-                    // update_list_order
-                    .{ .name = "list_order", .type = .var_int },
-                    // update_hat
-                    .{ .name = "show_hat", .type = .bool },
-                },
-            })),
-        },
+        .{ .name = "players", .type = .prefixedArray(PlayerInfoEntry) },
     },
 });
 pub const player_info_remove_s2c = PacketType.prefixedArray(.uuid);
@@ -639,10 +629,8 @@ test "player_info_initialize_s2c size" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var players = [_]@typeInfo(@FieldType(player_info_initialize_s2c.getZigType(), "players")).pointer.child{.{
-        .uuid = .{ .value = 0 },
-        .name = "sioworker",
-        .properties = &.{},
+    var players = [_]PlayerInfoEntry.getZigType(){.{
+        .profile = try .validate("sioworker", .{ .value = 0 }),
         .chat_session = null,
         .game_mode = .spectator,
         .listed = true,
