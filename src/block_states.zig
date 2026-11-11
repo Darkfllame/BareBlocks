@@ -7,6 +7,8 @@ const assert = std.debug.assert;
 
 /// Global block state id, same as the protocol's.
 pub const StateId = u32;
+/// Mojang's names for the properties (BlockStateProperties' fields), e.g. `.horizontal_facing`, `.age_7`.
+pub const PropertyId = bsd.PropertyId;
 
 pub const properties: []const Property = &data.properties;
 /// Sorted by `first_state`.
@@ -25,6 +27,10 @@ pub const Property = struct {
     pub const Kind = enum { boolean, integer, enumeration };
 };
 
+pub fn property(id: PropertyId) *const Property {
+    return &properties[@backingInt(id)];
+}
+
 pub const Block = struct {
     name: []const u8,
     first_state: StateId,
@@ -34,8 +40,16 @@ pub const Block = struct {
     properties: []const Layout,
 
     pub fn find(self: *const Block, name: []const u8) ?*const Layout {
-        for (self.properties) |*layout| {
-            if (std.mem.eql(u8, properties[layout.property].name, name)) return layout;
+        for (self.properties) |*l| {
+            if (std.mem.eql(u8, property(l.property).name, name)) return l;
+        }
+        return null;
+    }
+
+    /// `null` if this block doesn't have the property.
+    pub fn layout(self: *const Block, id: PropertyId) ?*const Layout {
+        for (self.properties) |*l| {
+            if (l.property == id) return l;
         }
         return null;
     }
@@ -43,8 +57,7 @@ pub const Block = struct {
 
 /// Where a property sits in a block's states.
 pub const Layout = struct {
-    /// Index into `properties`.
-    property: u8,
+    property: PropertyId,
     /// Position of the value index inside of `state_bits`.
     bit_offset: u4,
     bit_size: u3,
@@ -59,7 +72,7 @@ pub const Layout = struct {
 
     /// Returns the state with this property set to `value_index`, other properties are kept.
     pub fn with(self: Layout, id: StateId, value_index: u8) StateId {
-        assert(value_index < properties[self.property].values.len);
+        assert(value_index < property(self.property).values.len);
         const old: i64 = self.get(id);
         return @intCast(@as(i64, id) + (@as(i64, value_index) - old) * self.stride);
     }
@@ -80,7 +93,7 @@ test "every property of every state" {
             try std.testing.expectEqual(block_index, state_blocks[id]);
 
             for (block.properties) |layout| {
-                for (0..properties[layout.property].values.len) |value_index| {
+                for (0..property(layout.property).values.len) |value_index| {
                     const new = layout.with(id, @intCast(value_index));
                     try std.testing.expect(new >= block.first_state and new < block.first_state + block.state_count);
                     try std.testing.expectEqual(value_index, layout.get(new));
@@ -93,4 +106,21 @@ test "every property of every state" {
             }
         }
     }
+}
+
+test PropertyId {
+    const stairs = for (blocks) |*block| {
+        if (std.mem.eql(u8, block.name, "minecraft:oak_stairs")) break block;
+    } else return error.TestUnexpectedResult;
+
+    // Same name, different properties
+    try std.testing.expect(stairs.layout(.horizontal_facing) != null);
+    try std.testing.expect(stairs.layout(.facing) == null);
+    try std.testing.expectEqual(stairs.find("facing"), stairs.layout(.horizontal_facing));
+
+    try std.testing.expectEqualStrings("facing", property(.horizontal_facing).name);
+    try std.testing.expectEqual(4, property(.horizontal_facing).values.len);
+    try std.testing.expectEqual(6, property(.facing).values.len);
+    try std.testing.expectEqual(8, property(.age_7).values.len);
+    try std.testing.expectEqualStrings("single", property(.chest_type).values[0]);
 }
