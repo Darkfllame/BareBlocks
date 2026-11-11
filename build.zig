@@ -166,7 +166,14 @@ pub fn build(b: *Build) !void {
         run_exe.addArg("packets");
         break :blk run_exe.addOutputFileArg("packets.zig");
     };
+    const mc_block_states = blk: {
+        const run_exe = b.addRunArtifact(mc_gendata);
+        run_exe.addDirectoryArg(mc_generated);
+        run_exe.addArg("blocks");
+        break :blk run_exe.addOutputFileArg("block_states.zig");
+    };
     const registries_mod = b.createModule(.{ .root_source_file = mc_registries });
+    const block_states_mod = b.createModule(.{ .root_source_file = mc_block_states });
     const packets_mod = b.createModule(.{ .root_source_file = mc_packets });
 
     var proj = Project{
@@ -299,6 +306,7 @@ pub fn build(b: *Build) !void {
 
     proj.addModule(.{ .name = "registries", .module = registries_mod });
     proj.addModule(.{ .name = "packets", .module = packets_mod });
+    proj.addModule(.{ .name = "block_states", .module = block_states_mod });
 
     mc_gendata.root_module.addImport("serial", serial_mod);
     mc_gendata.root_module.addImport("utils", utils_mod);

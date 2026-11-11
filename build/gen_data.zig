@@ -26,6 +26,7 @@ const gen_file_header =
 const ReportKind = enum {
     registries,
     packets,
+    blocks,
 
     pub fn filename(self: ReportKind) []const u8 {
         return switch (self) {
@@ -374,6 +375,289 @@ fn printPacketsFile(pack_file: *const PacketsReport, out: *Io.Writer) !void {
     );
 }
 
+const block_states_api =
+    \\const std = @import("std");
+    \\const assert = std.debug.assert;
+    \\
+    \\/// Global block state id, same as the protocol's.
+    \\pub const StateId = u16;
+    \\
+    \\pub const Property = struct {
+    \\    name: []const u8,
+    \\    kind: Kind,
+    \\    /// In vanilla order. A state's value for this property is stored as an index into this.
+    \\    values: []const []const u8,
+    \\
+    \\    pub const Kind = enum { boolean, integer, enumeration };
+    \\};
+    \\
+    \\pub const Block = struct {
+    \\    name: []const u8,
+    \\    first_state: StateId,
+    \\    state_count: u16,
+    \\    default_state: StateId,
+    \\    /// Sorted by name, which is also the order state ids are computed in (last one changes the fastest).
+    \\    properties: []const Layout,
+    \\
+    \\    pub fn find(self: *const Block, name: []const u8) ?*const Layout {
+    \\        for (self.properties) |*layout| {
+    \\            if (std.mem.eql(u8, properties[layout.property].name, name)) return layout;
+    \\        }
+    \\        return null;
+    \\    }
+    \\};
+    \\
+    \\/// Where a property sits in a block's states.
+    \\pub const Layout = struct {
+    \\    /// Index into `properties`.
+    \\    property: u8,
+    \\    /// Position of the value index inside of `state_bits`.
+    \\    bit_offset: u4,
+    \\    bit_size: u3,
+    \\    /// How much the state id moves when the value index goes up by 1.
+    \\    stride: u16,
+    \\
+    \\    /// Returns the value index of this property for `id`.
+    \\    pub fn get(self: Layout, id: StateId) u8 {
+    \\        const mask = (@as(u16, 1) << self.bit_size) - 1;
+    \\        return @intCast((state_bits[id] >> self.bit_offset) & mask);
+    \\    }
+    \\
+    \\    /// Returns the state with this property set to `value_index`, other properties are kept.
+    \\    pub fn with(self: Layout, id: StateId, value_index: u8) StateId {
+    \\        assert(value_index < properties[self.property].values.len);
+    \\        const old: i32 = self.get(id);
+    \\        return @intCast(@as(i32, id) + (@as(i32, value_index) - old) * self.stride);
+    \\    }
+    \\};
+    \\
+    \\pub fn blockOf(id: StateId) *const Block {
+    \\    return &blocks[state_blocks[id]];
+    \\}
+    \\
+    \\test "every property of every state" {
+    \\    for (&blocks, 0..) |*block, block_index| {
+    \\        try std.testing.expect(block.default_state >= block.first_state);
+    \\        try std.testing.expect(block.default_state < block.first_state + block.state_count);
+    \\
+    \\        for (block.first_state..block.first_state + block.state_count) |i| {
+    \\            const id: StateId = @intCast(i);
+    \\            try std.testing.expectEqual(block, blockOf(id));
+    \\            try std.testing.expectEqual(block_index, state_blocks[id]);
+    \\
+    \\            for (block.properties) |layout| {
+    \\                for (0..properties[layout.property].values.len) |value_index| {
+    \\                    const new = layout.with(id, @intCast(value_index));
+    \\                    try std.testing.expect(new >= block.first_state and new < block.first_state + block.state_count);
+    \\                    try std.testing.expectEqual(value_index, layout.get(new));
+    \\                    // Others are kept
+    \\                    for (block.properties) |other| {
+    \\                        if (other.property == layout.property) continue;
+    \\                        try std.testing.expectEqual(other.get(id), other.get(new));
+    \\                    }
+    \\                }
+    \\            }
+    \\        }
+    \\    }
+    \\}
+    \\
+    \\
+;
+
+/// Value index of a state's property, in vanilla order.
+fn stateValueIndex(prop: *const BlocksReport.Property, state: *const BlocksReport.State, name: []const u8) !usize {
+    const value = state.properties.get(name) orelse return error.MissingField;
+    return switch (prop.data) {
+        // Vanilla's order is always "true", "false"
+        .bool => @intFromBool(!value.bool),
+        .integer => |ints| @intCast(value.integer - ints[0]),
+        .enumeration => |names| names.getIndex(value.enumeration).?,
+    };
+}
+
+fn valueCount(prop: *const BlocksReport.Property) usize {
+    return switch (prop.data) {
+        .bool => 2,
+        .integer => |ints| ints.len,
+        .enumeration => |names| names.count(),
+    };
+}
+
+fn propertyLessThan(_: void, a: *const BlocksReport.Property, b: *const BlocksReport.Property) bool {
+    switch (std.mem.order(u8, a.name, b.name)) {
+        .lt => return true,
+        .gt => return false,
+        .eq => {},
+    }
+    const a_count = valueCount(a);
+    const b_count = valueCount(b);
+    if (a_count != b_count) return a_count < b_count;
+    return switch (a.data) {
+        .bool => false,
+        .integer => |ints| ints[0] < b.data.integer[0],
+        .enumeration => |names| for (names.keys(), b.data.enumeration.keys()) |ak, bk| {
+            switch (std.mem.order(u8, ak, bk)) {
+                .lt => break true,
+                .gt => break false,
+                .eq => {},
+            }
+        } else false,
+    };
+}
+
+fn stringLessThan(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.lessThan(u8, a, b);
+}
+
+fn printBlockStatesFile(report: *const BlocksReport, arena: Allocator, out: *Io.Writer) !void {
+    const SortedEntry = struct {
+        id: utils.Identifier,
+        entry: *const BlocksReport.Entry,
+        first_state: u32,
+
+        fn lessThan(_: void, a: @This(), b: @This()) bool {
+            return a.first_state < b.first_state;
+        }
+    };
+    const Layout = struct { property: usize, bit_offset: usize, bit_size: usize, stride: usize };
+
+    if (report.states_data.len > std.math.maxInt(u16) + 1) return error.Overflow;
+
+    // Properties, sorted so the output doesn't depend on the hash map order
+    const props = try arena.alloc(*const BlocksReport.Property, report.all_properties.count());
+    {
+        var it = report.all_properties.keyIterator();
+        var i: usize = 0;
+        while (it.next()) |key| : (i += 1) props[i] = key.*;
+    }
+    std.mem.sort(*const BlocksReport.Property, props, {}, propertyLessThan);
+    if (props.len > std.math.maxInt(u8) + 1) return error.Overflow;
+
+    var prop_indices = std.AutoHashMapUnmanaged(*const BlocksReport.Property, usize).empty;
+    for (props, 0..) |prop, i| try prop_indices.put(arena, prop, i);
+
+    // Blocks, sorted by their first state
+    const entries = try arena.alloc(SortedEntry, report.entries.count());
+    {
+        var it = report.entries.iterator();
+        var i: usize = 0;
+        while (it.next()) |kv| : (i += 1) {
+            var first: u32 = std.math.maxInt(u32);
+            var last: u32 = 0;
+            for (kv.value_ptr.states) |state| {
+                first = @min(first, state.id);
+                last = @max(last, state.id);
+            }
+            // A block's states are contiguous
+            if (last - first + 1 != kv.value_ptr.states.len) return error.LengthMismatch;
+            entries[i] = .{ .id = kv.key_ptr.*, .entry = kv.value_ptr, .first_state = first };
+        }
+    }
+    std.mem.sort(SortedEntry, entries, {}, SortedEntry.lessThan);
+
+    const state_bits = try arena.alloc(u16, report.states_data.len);
+    const state_blocks = try arena.alloc(u16, report.states_data.len);
+
+    try out.writeAll(gen_file_header ++ block_states_api);
+
+    try out.writeAll("pub const properties = [_]Property{\n");
+    for (props) |prop| {
+        try out.print("    .{{ .name = \"{s}\", .kind = .{s}, .values = &.{{ ", .{ prop.name, switch (prop.data) {
+            .bool => "boolean",
+            .integer => "integer",
+            .enumeration => "enumeration",
+        } });
+        switch (prop.data) {
+            .bool => try out.writeAll("\"true\", \"false\""),
+            .integer => |ints| for (ints, 0..) |v, i| try out.print("{s}\"{d}\"", .{ if (i == 0) "" else ", ", v }),
+            .enumeration => |names| for (names.keys(), 0..) |v, i| try out.print("{s}\"{s}\"", .{ if (i == 0) "" else ", ", v }),
+        }
+        try out.writeAll(" } },\n");
+    }
+    try out.writeAll("};\n\n");
+
+    try out.writeAll("pub const blocks = [_]Block{\n");
+    for (entries, 0..) |se, block_index| {
+        const entry = se.entry;
+
+        // Same order as the state ids
+        const names = try arena.alloc([]const u8, entry.properties.count());
+        {
+            var it = entry.properties.keyIterator();
+            var i: usize = 0;
+            while (it.next()) |key| : (i += 1) names[i] = key.*;
+        }
+        std.mem.sort([]const u8, names, {}, stringLessThan);
+
+        const layouts = try arena.alloc(Layout, names.len);
+        var bit_offset: usize = 0;
+        for (names, layouts) |name, *layout| {
+            const prop = entry.properties.get(name).?;
+            const bit_size = std.math.log2_int_ceil(usize, @max(valueCount(prop), 2));
+            layout.* = .{
+                .property = prop_indices.get(prop).?,
+                .bit_offset = bit_offset,
+                .bit_size = bit_size,
+                .stride = undefined,
+            };
+            bit_offset += bit_size;
+        }
+        if (bit_offset > 16) return error.Overflow;
+        {
+            var stride: usize = 1;
+            var i = names.len;
+            while (i > 0) {
+                i -= 1;
+                layouts[i].stride = stride;
+                stride *= valueCount(entry.properties.get(names[i]).?);
+            }
+            if (stride != entry.states.len) return error.LengthMismatch;
+        }
+
+        var default_state: ?u32 = null;
+        for (entry.states) |state| {
+            var bits: u16 = 0;
+            var id: usize = se.first_state;
+            for (names, layouts) |name, layout| {
+                const value_index = try stateValueIndex(entry.properties.get(name).?, state, name);
+                bits |= @intCast(value_index << @intCast(layout.bit_offset));
+                id += value_index * layout.stride;
+            }
+            // The whole point, the math must give back vanilla's ids
+            if (id != state.id) return error.UnexpectedToken;
+            state_bits[state.id] = bits;
+            state_blocks[state.id] = @intCast(block_index);
+            if (state.default) {
+                if (default_state != null) return error.DuplicateField;
+                default_state = state.id;
+            }
+        }
+
+        try out.print("    .{{ .name = \"{s}:{s}\", .first_state = {d}, .state_count = {d}, .default_state = {d}, .properties = &.{{", .{
+            se.id.namespace(),
+            se.id.path(),
+            se.first_state,
+            entry.states.len,
+            default_state orelse return error.MissingField,
+        });
+        for (layouts, 0..) |layout, i| {
+            try out.print("{s}.{{ .property = {d}, .bit_offset = {d}, .bit_size = {d}, .stride = {d} }}", .{
+                if (i == 0) " " else ", ", layout.property, layout.bit_offset, layout.bit_size, layout.stride,
+            });
+        }
+        try out.writeAll(if (layouts.len == 0) "} },\n" else " } },\n");
+    }
+    try out.writeAll("};\n\n");
+
+    try out.writeAll("/// Packed value indices of each state, see `Layout`.\npub const state_bits = [_]u16{");
+    for (state_bits, 0..) |bits, i| try out.print("{s}{d},", .{ if (i % 32 == 0) "\n    " else "", bits });
+    try out.writeAll("\n};\n\n");
+
+    try out.writeAll("/// Index into `blocks` of each state.\npub const state_blocks = [_]u16{");
+    for (state_blocks, 0..) |index, i| try out.print("{s}{d},", .{ if (i % 32 == 0) "\n    " else "", index });
+    try out.writeAll("\n};\n");
+}
+
 pub fn IdentifierList(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -524,6 +808,14 @@ pub fn main(init: std.process.Init) !void {
                     // else => |err| err,
                 };
             },
+            .blocks => {
+                const blocks_file = try json_r.mapr.deserialize(BlocksReport);
+
+                printBlockStatesFile(&blocks_file, arena, &aw.writer) catch |e| return switch (e) {
+                    error.WriteFailed => error.OutOfMemory,
+                    else => |err| err,
+                };
+            },
         }
     }
 
@@ -547,7 +839,10 @@ pub fn main(init: std.process.Init) !void {
         return error.AstError;
     }
 
-    ast.render(init.gpa, &fw.interface, .{}) catch |e| return switch (e) {
+    // Rendering puts every element of the state tables on its own line, keep it as is
+    if (which == .blocks) {
+        try fw.interface.writeAll(written[0 .. written.len - 1]);
+    } else ast.render(init.gpa, &fw.interface, .{}) catch |e| return switch (e) {
         error.WriteFailed => fw.err.?,
         else => |err| err,
     };
