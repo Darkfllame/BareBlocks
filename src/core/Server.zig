@@ -14,6 +14,7 @@ const Connection = net.Connection;
 const Allocator = std.mem.Allocator;
 
 const logger = std.log.scoped(.@"core/server");
+const chat_logger = std.log.scoped(.@"chat");
 
 const current_version = net.packets.StatusResponse.Version.@"26.3";
 
@@ -955,8 +956,13 @@ pub fn @"serverbound/login/login_acknowledged"(conn: *Connection, reader: *Io.Re
 //=====================configuration===================//
 
 /// Same order as vanilla's `ServerConfigurationPacketListenerImpl.startConfiguration`, without
-/// the optional brand and server links.
+/// the optional server links.
 fn startConfiguration(conn: *Connection, apair: net.PacketType.AllocPair) net.Connection.WritePacketError!void {
+    var brand_buffer: [32]u8 = undefined;
+    var brand_w = Io.Writer.fixed(&brand_buffer);
+
+    net.StructuredPacket.Type.max_string.write(.no_alloc, &brand_w, "Gecko") catch unreachable;
+
     var features = [_]utils.Identifier{.vanilla("vanilla")};
     try conn.sendPacket(apair, "update_enabled_features", net.packets.feature_flags_s2c, &features);
 
@@ -964,6 +970,10 @@ fn startConfiguration(conn: *Connection, apair: net.PacketType.AllocPair) net.Co
     var known_packs = [_]@typeInfo(net.packets.known_packs.getZigType()).pointer.child{
         .{ .namespace = pack.namespace, .id = pack.id, .version = pack.version },
     };
+    try conn.sendPacket(apair, "custom_payload", net.packets.plugin_message, .{
+        .channel = .vanilla("brand"),
+        .data = brand_w.buffered(),
+    });
     try conn.sendPacket(apair, "select_known_packs", net.packets.known_packs, &known_packs);
 }
 
@@ -1219,7 +1229,7 @@ pub fn @"serverbound/play/chat"(conn: *Connection, reader: *Io.Reader, params: n
     const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
     const owner = owned.owner;
     const name = owned.data.play.profile.username();
-    logger.info("<{s}> {s}", .{ name, pack.message });
+    chat_logger.info("<{s}> {s}", .{ name, pack.message });
 
     // Unsigned, so sent as a system message (the server doesn't enforce secure chat)
     const message: utils.TextComponent = .translate("chat.type.text", .{

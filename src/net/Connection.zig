@@ -1288,7 +1288,7 @@ pub fn tick(self: *Connection) TickError!void {
     self.lockUncancelable();
     defer self.unlock();
 
-    logger.debug("[{f}] Ticking", .{self});
+    // logger.debug("[{f}] Ticking", .{self});
 
     const delta = self.tick_count;
     self.tick_count = (self.tick_count + 1) % 1;
