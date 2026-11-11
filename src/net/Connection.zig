@@ -790,6 +790,8 @@ pub const Compression = struct {
 
         var it = self.compression.mask.iterator(.{ .kind = .unset });
         if (it.next()) |idx| {
+            // Mark it as used, `redeemCompressionBuffer` only looks at used buffers
+            self.compression.mask.set(idx);
             return self.compression.buffers[idx];
         }
 

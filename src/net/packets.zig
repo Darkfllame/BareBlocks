@@ -88,6 +88,7 @@ pub const StatusResponse = struct {
         name: []const u8,
         protocol: u32,
 
+        pub const @"26.3" = named("Gecko-26.3", 777);
         pub const @"26.2" = named("Gecko-26.2", 776);
         pub const @"26.1.2" = named("Gecko-26.2", 775);
         pub const @"26.1.1" = named("Gecko-26.2", 775);
@@ -451,3 +452,201 @@ pub const ack_finish_configuration_c2s = StructuredPacket.named("AcknownledgeFin
 pub const accept_code_of_conduct_c2s = StructuredPacket.named("AcceptCodeOfConductC2S");
 
 //=====================play===========================//
+
+pub const GameMode = enum { survival, creative, adventure, spectator };
+
+pub const login_s2c = StructuredPacket.getType(.{
+    .name = "LoginS2C",
+    .fields = &.{
+        .{ .name = "entity_id", .type = .int },
+        .{ .name = "hardcore", .type = .bool },
+        .{ .name = "dimensions", .type = .prefixedArray(.identifier) },
+        .{ .name = "max_players", .type = .var_int },
+        .{ .name = "view_distance", .type = .var_int },
+        .{ .name = "simulation_distance", .type = .var_int },
+        .{ .name = "reduced_debug_info", .type = .bool },
+        .{ .name = "show_death_screen", .type = .bool },
+        .{ .name = "limited_crafting", .type = .bool },
+        // CommonPlayerSpawnInfo
+        // Id in the `minecraft:dimension_type` registry, in the order it was sent.
+        .{ .name = "dimension_type", .type = .var_int },
+        .{ .name = "dimension", .type = .identifier },
+        .{ .name = "hashed_seed", .type = .long },
+        .{ .name = "game_mode", .type = .{ .@"enum" = .of(GameMode, .var_int) } },
+        // The game mode's id + 1, 0 when there's none.
+        .{ .name = "previous_game_mode", .type = .var_int },
+        .{ .name = "debug", .type = .bool },
+        .{ .name = "flat", .type = .bool },
+        .{ .name = "death_location", .type = .prefixedOptional(StructuredPacket.getType(.{
+            .name = "LoginS2C::DeathLocation",
+            .fields = &.{
+                .{ .name = "dimension", .type = .identifier },
+                .{ .name = "position", .type = .block_position },
+            },
+        })) },
+        .{ .name = "portal_cooldown", .type = .var_int },
+        .{ .name = "sea_level", .type = .var_int },
+        // end of CommonPlayerSpawnInfo
+        .{ .name = "online_mode", .type = .bool },
+        .{ .name = "enforces_secure_chat", .type = .bool },
+    },
+});
+pub const game_event_s2c = StructuredPacket.getType(.{
+    .name = "GameEventS2C",
+    .fields = &.{
+        .{ .name = "event", .type = .ubyte },
+        .{ .name = "value", .type = .float },
+    },
+});
+pub const player_position_s2c = StructuredPacket.getType(.{
+    .name = "PlayerPositionS2C",
+    .fields = &.{
+        .{ .name = "teleport_id", .type = .var_int },
+        .{ .name = "x", .type = .double },
+        .{ .name = "y", .type = .double },
+        .{ .name = "z", .type = .double },
+        .{ .name = "velocity_x", .type = .double },
+        .{ .name = "velocity_y", .type = .double },
+        .{ .name = "velocity_z", .type = .double },
+        .{ .name = "yaw", .type = .float },
+        .{ .name = "pitch", .type = .float },
+        .{ .name = "flags", .type = .teleport_flags },
+    },
+});
+pub const PlayerInfoAction = enum {
+    add_player,
+    initialize_chat,
+    update_game_mode,
+    update_listed,
+    update_latency,
+    update_display_name,
+    update_list_order,
+    update_hat,
+};
+pub const ChatSession = StructuredPacket.getType(.{
+    .name = "ChatSession",
+    .fields = &.{
+        .{ .name = "session_id", .type = .uuid },
+        .{ .name = "expires_at", .type = .long },
+        .{ .name = "public_key", .type = .byte_array },
+        .{ .name = "key_signature", .type = .byte_array },
+    },
+});
+/// A player in `player_info_initialize_s2c`, with every action's data in the actions' order.
+pub const PlayerInfoEntry = StructuredPacket.getType(.{
+    .name = "PlayerInfoEntry",
+    .fields = &.{
+        // The uuid, then add_player's name and properties, same bytes as a game profile
+        .{ .name = "profile", .type = .game_profile },
+        // initialize_chat
+        .{ .name = "chat_session", .type = .prefixedOptional(ChatSession) },
+        // update_game_mode
+        .{ .name = "game_mode", .type = .{ .@"enum" = .of(GameMode, .var_int) } },
+        // update_listed
+        .{ .name = "listed", .type = .bool },
+        // update_latency
+        .{ .name = "latency", .type = .var_int },
+        // update_display_name
+        .{ .name = "display_name", .type = .prefixedOptional(.nbt_text_component) },
+        // update_list_order
+        .{ .name = "list_order", .type = .var_int },
+        // update_hat
+        .{ .name = "show_hat", .type = .bool },
+    },
+});
+/// Only the form vanilla sends when players join (`createPlayerInitializing`): every action.
+pub const player_info_initialize_s2c = StructuredPacket.getType(.{
+    .name = "PlayerInfoInitializeS2C",
+    .fields = &.{
+        // A fixed `java.util.BitSet` of 8 bits, all set
+        .{ .name = "actions", .type = .{ .enum_set = .of(PlayerInfoAction, .u8) } },
+        .{ .name = "players", .type = .prefixedArray(PlayerInfoEntry) },
+    },
+});
+pub const player_info_remove_s2c = PacketType.prefixedArray(.uuid);
+pub const system_chat_s2c = StructuredPacket.getType(.{
+    .name = "SystemChatS2C",
+    .fields = &.{
+        .{ .name = "content", .type = .nbt_text_component },
+        .{ .name = "overlay", .type = .bool },
+    },
+});
+
+pub const accept_teleportation_c2s = StructuredPacket.getType(.{
+    .name = "AcceptTeleportationC2S",
+    .fields = &.{
+        .{ .name = "teleport_id", .type = .var_int },
+        .{ .name = "x", .type = .double },
+        .{ .name = "y", .type = .double },
+        .{ .name = "z", .type = .double },
+        .{ .name = "yaw", .type = .float },
+        .{ .name = "pitch", .type = .float },
+    },
+});
+pub const chat_c2s = StructuredPacket.getType(.{
+    .name = "ChatC2S",
+    .fields = &.{
+        .{ .name = "message", .type = .limitedString(256) },
+        // Milliseconds since the epoch.
+        .{ .name = "timestamp", .type = .long },
+        .{ .name = "salt", .type = .long },
+        .{ .name = "signature", .type = .prefixedOptional(.fixedArray(.ubyte, 256)) },
+        .{ .name = "message_count", .type = .var_int },
+        // A 20 bits `java.util.BitSet`, little endian.
+        .{ .name = "acknowledged", .type = .fixedArray(.ubyte, 3) },
+        .{ .name = "checksum", .type = .ibyte },
+    },
+});
+pub const chat_command_c2s = PacketType.max_string;
+pub const player_loaded_c2s = StructuredPacket.named("PlayerLoadedC2S");
+
+test "player_position_s2c size" {
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer aw.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    try player_position_s2c.write(.newWithArena(std.testing.allocator, &arena), &aw.writer, .{
+        .teleport_id = 1,
+        .x = 0,
+        .y = 0,
+        .z = 0,
+        .velocity_x = 0,
+        .velocity_y = 0,
+        .velocity_z = 0,
+        .yaw = 0,
+        .pitch = 0,
+        .flags = .initMany(&.{.rel_x}),
+    });
+    // var int + 6 doubles + 2 floats + the flags as an int, like vanilla's `Relative.SET_STREAM_CODEC`
+    try std.testing.expectEqual(1 + 6 * 8 + 2 * 4 + 4, aw.written().len);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 1 }, aw.written()[aw.written().len - 4 ..]);
+}
+
+test "player_info_initialize_s2c size" {
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer aw.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var players = [_]PlayerInfoEntry.getZigType(){.{
+        .profile = try .validate("sioworker", .{ .value = 0 }),
+        .chat_session = null,
+        .game_mode = .spectator,
+        .listed = true,
+        .latency = 0,
+        .display_name = null,
+        .list_order = 0,
+        .show_hat = true,
+    }};
+    try player_info_initialize_s2c.write(.newWithArena(std.testing.allocator, &arena), &aw.writer, .{
+        .actions = .full,
+        .players = &players,
+    });
+    const written = aw.written();
+    // actions, player count, uuid, name, properties, then 1 byte for each other action
+    try std.testing.expectEqual(1 + 1 + 16 + (1 + "sioworker".len) + 1 + 7, written.len);
+    try std.testing.expectEqual(0xFF, written[0]);
+    // update_game_mode comes right after the empty properties and the absent chat session
+    try std.testing.expectEqual(3, written[1 + 1 + 16 + 10 + 1 + 1]);
+}

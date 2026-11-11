@@ -658,3 +658,20 @@ test "Value.deserialize null fields" {
     try std.testing.expect(value.aggregate.get("a") == null);
     try std.testing.expectEqual(1, value.aggregate.get("b").?.asInt());
 }
+
+test "Value.deserialize arrays in aggregates" {
+    var input: IoReader = .fixed(
+        \\{"a": [], "b": ["x", "y"], "c": 1}
+    );
+    var sr: SerialReader = undefined;
+    sr.init(std.testing.allocator, &input);
+    defer sr.deinit();
+
+    const value = try serial.Value.deserialize(&sr.mapr);
+    try std.testing.expectEqual(3, value.aggregate.count);
+    try std.testing.expectEqual(0, value.aggregate.get("a").?.array.len);
+    try std.testing.expectEqual(2, value.aggregate.get("b").?.array.len);
+    try std.testing.expectEqualStrings("y", value.aggregate.get("b").?.array.get(1).string);
+    try std.testing.expectEqual(1, value.aggregate.get("c").?.asInt());
+    try std.testing.expectEqual(0, sr.mapr.stackHeight());
+}

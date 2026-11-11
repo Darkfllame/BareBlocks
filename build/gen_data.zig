@@ -180,7 +180,16 @@ fn pascalize(str: []const u8, alloc: Allocator) Allocator.Error![]u8 {
     return alloc.realloc(res, w.end);
 }
 
-fn printRegistriesFile(reg_file: *const RegistriesReport, dpr: *const DatapackReport, out: *Io.Writer) !void {
+/// `synced` is the second output of build/DumpVanilla.java
+fn printRegistriesFile(
+    reg_file: *const RegistriesReport,
+    dpr: *const DatapackReport,
+    synced: []const u8,
+    io: Io,
+    data_dir: Io.Dir,
+    arena: Allocator,
+    out: *Io.Writer,
+) !void {
     try out.writeAll(gen_file_header ++
         \\const root = @This();
         \\const std = @import("std");
@@ -316,7 +325,213 @@ fn printRegistriesFile(reg_file: *const RegistriesReport, dpr: *const DatapackRe
             },
         });
     }
+
+    try out.writeAll(
+        \\pub const SynchronizedRegistry = struct { id: []const u8, entries: []const []const u8 };
+        \\
+        \\
+    );
+    // Parse the dump first, the synchronized registries' entries are also needed for the tags
+    const Synced = struct { id: []const u8, entries: []const []const u8 };
+    var synced_list = std.ArrayList(Synced).empty;
+    var known_pack: ?[3][]const u8 = null;
+    {
+        var lines = std.mem.tokenizeScalar(u8, synced, '\n');
+        while (lines.next()) |raw_line| {
+            const line = std.mem.trimEnd(u8, raw_line, "\r");
+            var words = std.mem.splitScalar(u8, line, ' ');
+            const kind = words.next().?;
+            if (std.mem.eql(u8, kind, "known_pack")) {
+                known_pack = .{
+                    words.next() orelse return error.UnexpectedToken,
+                    words.next() orelse return error.UnexpectedToken,
+                    words.next() orelse return error.UnexpectedToken,
+                };
+            } else if (std.mem.eql(u8, kind, "registry")) {
+                const id = words.next() orelse return error.UnexpectedToken;
+                var entries = std.ArrayList([]const u8).empty;
+                var it = std.mem.tokenizeScalar(u8, words.rest(), ',');
+                while (it.next()) |entry| try entries.append(arena, entry);
+                try synced_list.append(arena, .{ .id = id, .entries = entries.items });
+            } else return error.UnexpectedToken;
+        }
+    }
+    const pack = known_pack orelse return error.MissingField;
+    if (synced_list.items.len == 0) return error.MissingField;
+
+    try out.print(
+        \\/// Registry entries from this pack are sent without their data, the vanilla client already has it.
+        \\pub const known_pack = .{{ .namespace = "{s}", .id = "{s}", .version = "{s}" }};
+        \\
+        \\/// Registries sent during configuration, both them and their entries in the same order as vanilla.
+        \\pub const synchronized = [_]SynchronizedRegistry{{
+        \\
+    , .{ pack[0], pack[1], pack[2] });
+    for (synced_list.items) |registry| {
+        try out.print("    .{{ .id = \"{s}\", .entries = &.{{", .{registry.id});
+        for (registry.entries, 0..) |entry, i| try out.print("{s}\"{s}\"", .{ if (i == 0) " " else ", ", entry });
+        try out.writeAll(" } },\n");
+    }
+    try out.writeAll("};\n\n");
+
+    // Tags are sent for the static (built-in) and synchronized registries, see vanilla's
+    // `TagNetworkSerialization.serializeTagsToNetwork`. Static registries use their protocol ids,
+    // synchronized ones the order they're sent in.
+    const TagRegistry = struct { id: []const u8, ids: std.StringHashMapUnmanaged(u32) };
+    var tag_registries = std.ArrayList(TagRegistry).empty;
+    {
+        var reg_it = reg_file.entries.iterator();
+        while (reg_it.next()) |entry| {
+            const reg_id, _, const reg = entry;
+            var ids = std.StringHashMapUnmanaged(u32).empty;
+            var entry_it = reg.entries.iterator();
+            while (entry_it.next()) |e| {
+                const e_id, const num, _ = e;
+                try ids.put(arena, try std.fmt.allocPrint(arena, "{f}", .{e_id.alt(.full)}), num);
+            }
+            try tag_registries.append(arena, .{ .id = try std.fmt.allocPrint(arena, "{f}", .{reg_id.alt(.full)}), .ids = ids });
+        }
+        for (synced_list.items) |registry| {
+            var ids = std.StringHashMapUnmanaged(u32).empty;
+            for (registry.entries, 0..) |e, i| try ids.put(arena, e, @intCast(i));
+            try tag_registries.append(arena, .{ .id = registry.id, .ids = ids });
+        }
+    }
+    std.mem.sortUnstable(TagRegistry, tag_registries.items, {}, struct {
+        fn lessThan(_: void, a: TagRegistry, b: TagRegistry) bool {
+            return std.mem.lessThan(u8, a.id, b.id);
+        }
+    }.lessThan);
+
+    try out.writeAll(
+        \\pub const Tag = struct { name: []const u8, entries: []const u32 };
+        \\pub const RegistryTags = struct { registry: []const u8, tags: []const Tag };
+        \\
+        \\/// Every tag of the static and synchronized registries, resolved to numeric ids like vanilla's `update_tags`.
+        \\pub const tags = [_]RegistryTags{
+        \\
+    );
+    for (tag_registries.items) |registry| {
+        const colon = std.mem.indexOfScalar(u8, registry.id, ':').?;
+        const tags_path = try std.fmt.allocPrint(arena, "data/{s}/tags/{s}", .{ registry.id[0..colon], registry.id[colon + 1 ..] });
+        var resolver: TagResolver = .{ .arena = arena, .ids = &registry.ids };
+        if (!try resolver.loadDir(io, data_dir, tags_path, registry.id[0..colon])) continue;
+
+        const names = try arena.dupe([]const u8, resolver.sources.keys());
+        std.mem.sortUnstable([]const u8, names, {}, stringLessThan);
+
+        try out.print("    .{{ .registry = \"{s}\", .tags = &.{{\n", .{registry.id});
+        for (names) |name| {
+            // Like vanilla, tags with missing required entries are skipped
+            const entries = try resolver.resolve(name) orelse continue;
+            try out.print("        .{{ .name = \"{s}\", .entries = &.{{", .{name});
+            // No trailing comma so rendering keeps them on one line
+            for (entries, 0..) |e, i| try out.print("{s}{d}", .{ if (i == 0) " " else ", ", e });
+            try out.writeAll(if (entries.len == 0) "} },\n" else " } },\n");
+        }
+        try out.writeAll("    } },\n");
+    }
+    try out.writeAll("};\n");
 }
+
+/// Same rules as vanilla's `TagLoader`: entries keep their first-seen order without duplicates (`LinkedHashSet`),
+/// `#tag` entries add the referenced tag's entries, missing optional entries are skipped and a missing required
+/// one makes the whole tag missing.
+const TagResolver = struct {
+    const Value = struct { id: []const u8, tag: bool, required: bool };
+
+    arena: Allocator,
+    ids: *const std.StringHashMapUnmanaged(u32),
+    sources: std.StringArrayHashMapUnmanaged([]const Value) = .empty,
+    /// `null` when missing.
+    resolved: std.StringHashMapUnmanaged(?[]const u32) = .empty,
+    visiting: std.StringHashMapUnmanaged(void) = .empty,
+
+    /// Returns whether the registry has any tag.
+    fn loadDir(self: *TagResolver, io: Io, data_dir: Io.Dir, path: []const u8, namespace: []const u8) !bool {
+        var dir = data_dir.openDir(io, path, .{ .iterate = true }) catch |e| switch (e) {
+            error.FileNotFound => return false,
+            else => |err| return err,
+        };
+        defer dir.close(io);
+
+        var walker = try dir.walk(self.arena);
+        defer walker.deinit();
+        while (try walker.next(io)) |entry| {
+            if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".json")) continue;
+            const name = try std.fmt.allocPrint(self.arena, "{s}:{s}", .{ namespace, entry.path[0 .. entry.path.len - ".json".len] });
+            const content = try dir.readFileAlloc(io, entry.path, self.arena, .unlimited);
+            try self.sources.put(self.arena, name, try self.parse(content));
+        }
+        return self.sources.count() != 0;
+    }
+
+    fn parse(self: *TagResolver, content: []const u8) ![]const Value {
+        var input: Io.Reader = .fixed(content);
+        var json_r: serial.JsonReader = undefined;
+        json_r.init(self.arena, &input);
+        defer json_r.deinit();
+
+        const root = try serial.Value.deserialize(&json_r.mapr);
+        if (root != .aggregate) return error.UnexpectedToken;
+        const values = root.aggregate.get("values") orelse return &.{};
+        if (values != .array) return error.UnexpectedToken;
+
+        const out = try self.arena.alloc(Value, values.array.len);
+        for (out, 0..) |*v, i| {
+            const raw, const required = switch (values.array.get(i)) {
+                .string => |str| .{ str, true },
+                .aggregate => |agg| .{
+                    switch (agg.get("id") orelse return error.MissingField) {
+                        .string => |str| str,
+                        else => return error.UnexpectedToken,
+                    },
+                    if (agg.get("required")) |r| (r.asBool() orelse return error.UnexpectedToken) else true,
+                },
+                else => return error.UnexpectedToken,
+            };
+            const tag = std.mem.startsWith(u8, raw, "#");
+            const id = if (tag) raw[1..] else raw;
+            v.* = .{
+                .id = if (std.mem.indexOfScalar(u8, id, ':') == null)
+                    try std.fmt.allocPrint(self.arena, "minecraft:{s}", .{id})
+                else
+                    try self.arena.dupe(u8, id),
+                .tag = tag,
+                .required = required,
+            };
+        }
+        return out;
+    }
+
+    fn resolve(self: *TagResolver, name: []const u8) !?[]const u32 {
+        if (self.resolved.get(name)) |r| return r;
+        const values = self.sources.get(name) orelse return null;
+        if (self.visiting.contains(name)) {
+            std.debug.print("tag cycle through {s}\n", .{name});
+            return error.TagCycle;
+        }
+        try self.visiting.put(self.arena, name, {});
+        defer _ = self.visiting.remove(name);
+
+        var set = std.AutoArrayHashMapUnmanaged(u32, void).empty;
+        var missing = false;
+        for (values) |v| {
+            if (v.tag) {
+                if (try self.resolve(v.id)) |sub| {
+                    for (sub) |e| try set.put(self.arena, e, {});
+                } else if (v.required) missing = true;
+            } else if (self.ids.get(v.id)) |num| {
+                try set.put(self.arena, num, {});
+            } else if (v.required) missing = true;
+        }
+
+        const result: ?[]const u32 = if (missing) null else set.keys();
+        if (missing) std.debug.print("tag {s} has missing required entries, skipped like vanilla does\n", .{name});
+        try self.resolved.put(self.arena, name, result);
+        return result;
+    }
+};
 
 fn printPacketsFile(pack_file: *const PacketsReport, out: *Io.Writer) !void {
     const pack_file_mut = @constCast(pack_file);
@@ -751,9 +966,12 @@ pub fn main(init: std.process.Init) !void {
                     break :blk try json_r2.mapr.deserialize(DatapackReport);
                 };
 
-                printRegistriesFile(&reg_file, &dpr, &aw.writer) catch |e| return switch (e) {
+                const synced_path = args_it.next() orelse return error.BadArgument;
+                const synced = try Io.Dir.cwd().readFileAlloc(init.io, synced_path, arena, .unlimited);
+
+                printRegistriesFile(&reg_file, &dpr, synced, init.io, dir, arena, &aw.writer) catch |e| return switch (e) {
                     error.WriteFailed => error.OutOfMemory,
-                    // else => |err| err,
+                    else => |err| err,
                 };
             },
             .packets => {

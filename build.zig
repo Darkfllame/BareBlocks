@@ -134,11 +134,26 @@ pub fn build(b: *Build) !void {
         break :blk out_dir;
     };
     const mc_generated = mcDatagenDir(b, java_path, mc26_2_jar, mc_version);
+    const mc_block_properties, const mc_synced_registries = blk: {
+        const run_java = b.addSystemCommand(&.{java_path});
+        // Minecraft writes its logs/ in the working directory
+        run_java.setCwd(mkdir(b, b.fmt("run_datagen_{s}", .{mc_version})));
+        run_java.addFileArg(b.path("build/DumpVanilla.java"));
+        run_java.addFileArg(mc26_2_jar);
+        _ = run_java.captureStdOut(.{});
+        _ = run_java.captureStdErr(.{});
+        break :blk .{
+            run_java.addOutputFileArg("block_properties.txt"),
+            run_java.addOutputFileArg("synced_registries.txt"),
+        };
+    };
     const mc_registries = blk: {
         const run_exe = b.addRunArtifact(mc_gendata);
         run_exe.addDirectoryArg(mc_generated);
         run_exe.addArg("registries");
-        break :blk run_exe.addOutputFileArg("registries.zig");
+        const out = run_exe.addOutputFileArg("registries.zig");
+        run_exe.addFileArg(mc_synced_registries);
+        break :blk out;
     };
     const mc_packets = blk: {
         const run_exe = b.addRunArtifact(mc_gendata);
@@ -146,16 +161,6 @@ pub fn build(b: *Build) !void {
         run_exe.addDirectoryArg(mc_generated);
         run_exe.addArg("packets");
         break :blk run_exe.addOutputFileArg("packets.zig");
-    };
-    const mc_block_properties = blk: {
-        const run_java = b.addSystemCommand(&.{java_path});
-        // Minecraft writes its logs/ in the working directory
-        run_java.setCwd(mkdir(b, b.fmt("run_datagen_{s}", .{mc_version})));
-        run_java.addFileArg(b.path("build/DumpProperties.java"));
-        run_java.addFileArg(mc26_2_jar);
-        _ = run_java.captureStdOut(.{});
-        _ = run_java.captureStdErr(.{});
-        break :blk run_java.addOutputFileArg("block_properties.txt");
     };
     const mc_block_states = blk: {
         const run_exe = b.addRunArtifact(mc_gendata);
