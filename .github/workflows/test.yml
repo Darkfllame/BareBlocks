@@ -21,22 +21,6 @@ jobs:
           distribution: temurin
           java-version: 25
 
-      # slangc compiles the client's shaders
-      - name: Cache Slang
-        id: slang-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/slang
-          key: slang-2026.22-linux-x86_64
-
-      - name: Install Slang
-        if: steps.slang-cache.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p ~/slang
-          curl -sSfL https://github.com/shader-slang/slang/releases/download/v2026.22/slang-2026.22-linux-x86_64.tar.gz | tar xz -C ~/slang
-
-      - run: echo "$HOME/slang/bin" >> "$GITHUB_PATH"
-
       # Mojang's jar and assets, so they're not downloaded on every run
       - name: Cache Minecraft data
         uses: actions/cache@v4

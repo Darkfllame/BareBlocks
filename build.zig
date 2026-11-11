@@ -82,30 +82,10 @@ pub fn build(b: *Build) !void {
     };
     if (old_datagen_cmd) @panic("Minecraft version too old (must be at least 1.18)");
 
-    const vk_headers = b.dependency("vulkan_headers", .{});
-    const sdl_dep = b.dependency("sdl", .{
-        .target = target,
-        .optimize = optimize,
-        .preferred_linkage = .dynamic,
-    });
     const zio_mod = b.dependency("zio", .{
         .target = target,
         .optimize = optimize,
     }).module("zio");
-
-    const vulkan_mod = b.dependency("vulkan", .{
-        .registry = vk_headers.path("registry/vk.xml"),
-        .video = vk_headers.path("registry/video.xml"),
-    }).module("vulkan-zig");
-
-    const sdl_c = b.addTranslateC(.{
-        .root_source_file = b.path("src/sdl_decls.h"),
-        .target = target,
-        .optimize = optimize,
-    });
-    sdl_c.addIncludePath(sdl_dep.path("include/"));
-    const sdl_mod = sdl_c.createModule();
-    sdl_mod.linkLibrary(sdl_dep.artifact("SDL3"));
 
     const ossl_dep = b.dependency("openssl", .{ .target = target, .optimize = optimize });
     const crypto_mod = blk: {
@@ -258,24 +238,6 @@ pub fn build(b: *Build) !void {
 
     var mixin = MixinHooksProvider.init(mixin_mod);
 
-    const client_mod = proj.createModule(b, .{
-        .name = "client",
-        .root_source_file = b.path("src/client/client.zig"),
-        .imports = &.{
-            .{ .name = "config", .module = config_mod },
-            .{ .name = "vulkan", .module = vulkan_mod },
-            .{ .name = "sdl", .module = sdl_mod },
-            .{ .name = "default_shader_code", .module = b.createModule(.{
-                .root_source_file = compileShader(b, b.path("assets/shaders/default.slang")),
-            }) },
-        },
-        .local_imports = &.{
-            "utils",
-            "math",
-        },
-    });
-    _ = client_mod;
-
     const main_mod = proj.createModule(b, .{
         .name = "main",
         .root_source_file = b.path("src/main.zig"),
@@ -297,20 +259,6 @@ pub fn build(b: *Build) !void {
             "mixin",
             // "tui",
         },
-    });
-
-    const main_client_mod = proj.createModule(b, .{
-        .name = "main-client",
-        .root_source_file = b.path("src/main_client.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = false,
-        .error_tracing = true,
-        .imports = &.{
-            .{ .name = "vulkan", .module = vulkan_mod },
-            .{ .name = "sdl", .module = sdl_mod },
-        },
-        .local_imports = &.{"client"},
     });
 
     proj.addModule(.{ .name = "registries", .module = registries_mod });
@@ -335,15 +283,7 @@ pub fn build(b: *Build) !void {
         .use_lld = use_llvm,
     });
 
-    const main_client_exe = b.addExecutable(.{
-        .name = "bare_blocks_client",
-        .root_module = main_client_mod,
-        .use_llvm = use_llvm,
-        .use_lld = use_llvm,
-    });
-
     b.installArtifact(main_exe);
-    b.installArtifact(main_client_exe);
 
     const run_step = b.step("run", "Run the executable");
     {
@@ -353,16 +293,6 @@ pub fn build(b: *Build) !void {
         run_exe.setCwd(b.path("."));
 
         run_step.dependOn(&run_exe.step);
-    }
-
-    const run_cl_step = b.step("run-client", "Run the executable");
-    {
-        const run_exe = b.addRunArtifact(main_client_exe);
-        run_exe.step.dependOn(b.getInstallStep());
-        run_exe.addPassthruArgs();
-        run_exe.setCwd(b.path("."));
-
-        run_cl_step.dependOn(&run_exe.step);
     }
 
     const assets_step = b.step("assets", "Download assets from mojang's servers");
@@ -385,18 +315,6 @@ pub fn build(b: *Build) !void {
     proj.makeTests(b, test_step, check_step, use_llvm);
 
     proj.resolveLocalImports();
-}
-
-fn compileShader(b: *Build, path: LazyPath) LazyPath {
-    const run_slangc = b.addSystemCommand(&.{
-        "slangc", "-g",           "-target", "spirv",
-        "-entry", "vertexMain",   "-stage",  "vertex",
-        "-entry", "fragmentMain", "-stage",  "fragment",
-    });
-    run_slangc.addArg("-o");
-    const out = run_slangc.addOutputFileArg("shader.spv");
-    run_slangc.addFileArg(path);
-    return out;
 }
 
 fn downloadMCExec(b: *Build) *Step.Compile {
