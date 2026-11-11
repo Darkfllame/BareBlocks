@@ -88,6 +88,7 @@ pub const StatusResponse = struct {
         name: []const u8,
         protocol: u32,
 
+        pub const @"26.3" = named("Gecko-26.3", 777);
         pub const @"26.2" = named("Gecko-26.2", 776);
         pub const @"26.1.2" = named("Gecko-26.2", 775);
         pub const @"26.1.1" = named("Gecko-26.2", 775);

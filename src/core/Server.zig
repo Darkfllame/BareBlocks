@@ -5,6 +5,7 @@ const zio = @import("zio");
 const net = @import("net");
 const utils = @import("utils");
 const packets = @import("packets");
+const registries = @import("registries");
 const crypto = @import("crypto");
 const core = @import("core.zig");
 
@@ -14,7 +15,7 @@ const Allocator = std.mem.Allocator;
 
 const logger = std.log.scoped(.@"core/server");
 
-const current_version = net.packets.StatusResponse.Version.@"26.2";
+const current_version = net.packets.StatusResponse.Version.@"26.3";
 
 const assert = std.debug.assert;
 
@@ -404,27 +405,30 @@ pub const ConfigPlayCommon = struct {
         return @truncate(getKeepAliveValue());
     }
 
+    /// Value of the keep alive waiting for an answer.
     keep_alive: ?u64,
+    /// When the last keep alive was sent.
+    keep_alive_time: u64 = 0,
     ping: ?u32,
     latency: u64,
 
+    /// Same as vanilla: every 15s, send a keep alive, or disconnect if the last one wasn't answered.
     fn keepAlive(self: *ConfigPlayCommon, conn: *Connection) net.Connection.WritePacketError!void {
         const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
 
         const now = getKeepAliveValue();
-        if (self.keep_alive) |ka| {
-            if (now - ka >= keepalive_timeout_ms) {
-                try conn.disconnect(&.timeout);
-            }
-        } else {
-            self.keep_alive = now;
+        if (now - self.keep_alive_time < keepalive_timeout_ms) return;
 
-            var arena: std.heap.ArenaAllocator = undefined;
-            const apair = net.PacketType.AllocPair.newFromGpa(owned.owner.allocator, &arena);
-            defer arena.deinit();
-
-            try conn.sendPacket(apair, "keep_alive", net.packets.keep_alive, now);
+        if (self.keep_alive != null) {
+            conn.disconnect(.{ .static = &.timeout });
+            return;
         }
+        self.keep_alive = now;
+        self.keep_alive_time = now;
+
+        var arena: std.heap.ArenaAllocator = .init(owned.owner.allocator);
+        defer arena.deinit();
+        try conn.sendPacket(.newWithArena(owned.owner.allocator, &arena), "keep_alive", net.packets.keep_alive, @bitCast(now));
     }
 
     fn handleCommonPing(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
@@ -447,7 +451,10 @@ pub const ConfigPlayCommon = struct {
         };
 
         if (common.keep_alive) |ka| {
-            if (pack != ka) return conn.disconnect(&.timeout);
+            if (@as(u64, @bitCast(pack)) != ka) {
+                conn.disconnect(.{ .static = &.timeout });
+                return error.CallbackHandlerFailed;
+            }
             const diff = getKeepAliveValue() - ka;
             common.latency = (common.latency * 3 + diff) / 4;
             common.keep_alive = null;
@@ -459,7 +466,14 @@ pub const ConfigConnection = struct {
     const vtable = Connection.VTable{
         .deinit = LoginConnection.deinitImpl,
         .disconnect = disconnectImpl,
+        .tick = tickImpl,
     };
+
+    fn tickImpl(conn: *Connection, delta: u8) Connection.TickError!void {
+        _ = delta;
+        const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
+        try owned.data.config.common.keepAlive(conn);
+    }
 
     fn disconnectImpl(conn: *Connection, reason: *const utils.TextComponent) Connection.WritePacketError!void {
         const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
@@ -838,26 +852,133 @@ pub fn @"serverbound/login/login_acknowledged"(conn: *Connection, reader: *Io.Re
         return error.CallbackHandlerFailed;
     }
 
-    const configing = try owner.allocator.create(ConfigConnection);
-    errdefer comptime unreachable;
+    {
+        const configing = try owner.allocator.create(ConfigConnection);
+        errdefer comptime unreachable;
 
-    configing.* = .{
-        .owned = owned,
-        .common = .{
-            .keep_alive = null,
-            .ping = null,
-            .latency = 0,
-        },
-        .encryption = loginging.encryption.?,
-        .compression = loginging.compression.?,
-    };
-    owned.data = .{ .config = configing };
-    owner.allocator.destroy(loginging);
-    conn.reconfigure(.{
-        .in_phase = .configuration,
-        .vtable = &ConfigConnection.vtable,
-    });
+        configing.* = .{
+            .owned = owned,
+            .common = .{
+                .keep_alive = null,
+                // Same as vanilla, the first one is sent after 15s
+                .keep_alive_time = ConfigPlayCommon.getKeepAliveValue(),
+                .ping = null,
+                .latency = 0,
+            },
+            .encryption = loginging.encryption.?,
+            .compression = loginging.compression.?,
+        };
+        owned.data = .{ .config = configing };
+        owner.allocator.destroy(loginging);
+        conn.reconfigure(.{
+            .in_phase = .configuration,
+            .out_phase = .configuration,
+            .vtable = &ConfigConnection.vtable,
+        });
+    }
+
+    try startConfiguration(conn, params.toAllocPair());
 }
+
+//=====================configuration===================//
+
+/// Same order as vanilla's `ServerConfigurationPacketListenerImpl.startConfiguration`, without
+/// the optional brand and server links.
+fn startConfiguration(conn: *Connection, apair: net.PacketType.AllocPair) net.Connection.WritePacketError!void {
+    var features = [_]utils.Identifier{.vanilla("vanilla")};
+    try conn.sendPacket(apair, "update_enabled_features", net.packets.feature_flags_s2c, &features);
+
+    const pack = registries.known_pack;
+    var known_packs = [_]@typeInfo(net.packets.known_packs.getZigType()).pointer.child{
+        .{ .namespace = pack.namespace, .id = pack.id, .version = pack.version },
+    };
+    try conn.sendPacket(apair, "select_known_packs", net.packets.known_packs, &known_packs);
+}
+
+pub fn @"serverbound/configuration/select_known_packs"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
+    const known_packs = net.packets.known_packs;
+    const pack = try known_packs.readRoot(params, reader);
+    logger.debug("[{f}] Known Packs: {f}", .{ conn, known_packs.formatted(pack, params.toAllocPair()) });
+
+    // Registry entries are only sent by name, the client must have vanilla's data for them
+    const vanilla = registries.known_pack;
+    const has_vanilla = for (pack) |p| {
+        if (std.mem.eql(u8, p.namespace, vanilla.namespace) and
+            std.mem.eql(u8, p.id, vanilla.id) and
+            std.mem.eql(u8, p.version, vanilla.version)) break true;
+    } else false;
+    if (!has_vanilla) {
+        conn.disconnect(.{ .static = &comptime .text(std.fmt.comptimePrint(
+            "This server needs the vanilla data pack ({s}:{s} {s}) on the client",
+            .{ vanilla.namespace, vanilla.id, vanilla.version },
+        ), .{}) });
+        return error.CallbackHandlerFailed;
+    }
+
+    const registry_data = net.packets.registry_data_s2c;
+    const Entry = @typeInfo(@FieldType(registry_data.getZigType(), "entries")).pointer.child;
+    const apair = params.toAllocPair();
+    for (registries.synchronized) |registry| {
+        const entries = try apair.arena.alloc(Entry, registry.entries.len);
+        for (entries, registry.entries) |*entry, id| {
+            entry.* = .{ .entry_id = utils.Identifier.validate(id) catch unreachable, .data = null };
+        }
+        try conn.sendPacket(apair, "registry_data", registry_data, .{
+            .registry_id = utils.Identifier.validate(registry.id) catch unreachable,
+            .entries = entries,
+        });
+    }
+
+    // Same as vanilla's SynchronizeRegistriesTask, tags right after the registries
+    const update_tags = net.packets.update_tags_s2c;
+    const RegistryTags = @typeInfo(update_tags.getZigType()).pointer.child;
+    const Tag = @typeInfo(@FieldType(RegistryTags, "tags")).pointer.child;
+    const registry_tags = try apair.arena.alloc(RegistryTags, registries.tags.len);
+    for (registry_tags, registries.tags) |*out, registry| {
+        const tags = try apair.arena.alloc(Tag, registry.tags.len);
+        for (tags, registry.tags) |*tag, src| {
+            const entries = try apair.arena.alloc(i32, src.entries.len);
+            for (entries, src.entries) |*e, id| e.* = @intCast(id);
+            tag.* = .{ .name = utils.Identifier.validate(src.name) catch unreachable, .entries = entries };
+        }
+        out.* = .{ .registry = utils.Identifier.validate(registry.registry) catch unreachable, .tags = tags };
+    }
+    try conn.sendPacket(apair, "update_tags", update_tags, registry_tags);
+
+    try conn.sendPacket(apair, "finish_configuration", net.packets.finish_configuration_s2c, .{});
+}
+
+pub fn @"serverbound/configuration/client_information"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
+    const info = net.packets.client_information_c2s;
+    const pack = try info.readRoot(params, reader);
+    logger.debug("[{f}] Client Information: {f}", .{ conn, info.formatted(pack, params.toAllocPair()) });
+}
+
+pub fn @"serverbound/configuration/custom_payload"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
+    const message = net.packets.plugin_message;
+    const pack = try message.readRoot(params, reader);
+    logger.debug("[{f}] Plugin Message: {f} ({d} bytes)", .{ conn, pack.channel, pack.data.len });
+}
+
+pub const @"serverbound/configuration/keep_alive" = ConfigPlayCommon.handleCommonKeepAlive;
+
+pub fn @"serverbound/configuration/finish_configuration"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
+    const ack = net.packets.ack_finish_configuration_c2s;
+    const pack = try ack.readRoot(params, reader);
+    logger.debug("[{f}] Finish Configuration Ack: {f}", .{ conn, ack.formatted(pack, params.toAllocPair()) });
+    logger.info("[{f}] Configuration done", .{conn});
+
+    // Same as vanilla's `handleConfigurationFinished`, the client is in play from now on
+    conn.reconfigure(.{
+        .in_phase = .play,
+        .out_phase = .play,
+    });
+    // TODO: Play
+}
+
+//=====================play===========================//
+
+pub const @"serverbound/play/keep_alive" = ConfigPlayCommon.handleCommonKeepAlive;
 
 test {
     std.testing.refAllDecls(@This());

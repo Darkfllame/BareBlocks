@@ -320,7 +320,10 @@ pub const Value = union(BaseType) {
 
                 while (true) {
                     switch (try mapr.peek()) {
-                        .array_end => break,
+                        .array_end => {
+                            _ = try mapr.next();
+                            break;
+                        },
                         .aggregate_end => return error.UnexpectedToken,
                         else => {},
                     }
