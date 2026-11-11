@@ -115,6 +115,7 @@ pub fn build(b: *Build) !void {
             .root_source_file = b.path("src/crypto_decls.h"),
         });
         tc.addIncludePath(ossl_dep.path("include/"));
+        tc.addIncludePath(ossl_dep.path("include_gen/"));
         const mod = tc.createModule();
         mod.linkSystemLibrary("libcrypto", .{ .needed = true });
         break :blk mod;
