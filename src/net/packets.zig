@@ -452,3 +452,122 @@ pub const ack_finish_configuration_c2s = StructuredPacket.named("AcknownledgeFin
 pub const accept_code_of_conduct_c2s = StructuredPacket.named("AcceptCodeOfConductC2S");
 
 //=====================play===========================//
+
+pub const GameMode = enum { survival, creative, adventure, spectator };
+
+pub const login_s2c = StructuredPacket.getType(.{
+    .name = "LoginS2C",
+    .fields = &.{
+        .{ .name = "entity_id", .type = .int },
+        .{ .name = "hardcore", .type = .bool },
+        .{ .name = "dimensions", .type = .prefixedArray(.identifier) },
+        .{ .name = "max_players", .type = .var_int },
+        .{ .name = "view_distance", .type = .var_int },
+        .{ .name = "simulation_distance", .type = .var_int },
+        .{ .name = "reduced_debug_info", .type = .bool },
+        .{ .name = "show_death_screen", .type = .bool },
+        .{ .name = "limited_crafting", .type = .bool },
+        // CommonPlayerSpawnInfo
+        // Id in the `minecraft:dimension_type` registry, in the order it was sent.
+        .{ .name = "dimension_type", .type = .var_int },
+        .{ .name = "dimension", .type = .identifier },
+        .{ .name = "hashed_seed", .type = .long },
+        .{ .name = "game_mode", .type = .{ .@"enum" = .of(GameMode, .var_int) } },
+        // The game mode's id + 1, 0 when there's none.
+        .{ .name = "previous_game_mode", .type = .var_int },
+        .{ .name = "debug", .type = .bool },
+        .{ .name = "flat", .type = .bool },
+        .{ .name = "death_location", .type = .prefixedOptional(StructuredPacket.getType(.{
+            .name = "LoginS2C::DeathLocation",
+            .fields = &.{
+                .{ .name = "dimension", .type = .identifier },
+                .{ .name = "position", .type = .block_position },
+            },
+        })) },
+        .{ .name = "portal_cooldown", .type = .var_int },
+        .{ .name = "sea_level", .type = .var_int },
+        // end of CommonPlayerSpawnInfo
+        .{ .name = "online_mode", .type = .bool },
+        .{ .name = "enforces_secure_chat", .type = .bool },
+    },
+});
+pub const game_event_s2c = StructuredPacket.getType(.{
+    .name = "GameEventS2C",
+    .fields = &.{
+        .{ .name = "event", .type = .ubyte },
+        .{ .name = "value", .type = .float },
+    },
+});
+pub const player_position_s2c = StructuredPacket.getType(.{
+    .name = "PlayerPositionS2C",
+    .fields = &.{
+        .{ .name = "teleport_id", .type = .var_int },
+        .{ .name = "x", .type = .double },
+        .{ .name = "y", .type = .double },
+        .{ .name = "z", .type = .double },
+        .{ .name = "velocity_x", .type = .double },
+        .{ .name = "velocity_y", .type = .double },
+        .{ .name = "velocity_z", .type = .double },
+        .{ .name = "yaw", .type = .float },
+        .{ .name = "pitch", .type = .float },
+        .{ .name = "flags", .type = .teleport_flags },
+    },
+});
+pub const system_chat_s2c = StructuredPacket.getType(.{
+    .name = "SystemChatS2C",
+    .fields = &.{
+        .{ .name = "content", .type = .nbt_text_component },
+        .{ .name = "overlay", .type = .bool },
+    },
+});
+
+pub const accept_teleportation_c2s = StructuredPacket.getType(.{
+    .name = "AcceptTeleportationC2S",
+    .fields = &.{
+        .{ .name = "teleport_id", .type = .var_int },
+        .{ .name = "x", .type = .double },
+        .{ .name = "y", .type = .double },
+        .{ .name = "z", .type = .double },
+        .{ .name = "yaw", .type = .float },
+        .{ .name = "pitch", .type = .float },
+    },
+});
+pub const chat_c2s = StructuredPacket.getType(.{
+    .name = "ChatC2S",
+    .fields = &.{
+        .{ .name = "message", .type = .limitedString(256) },
+        // Milliseconds since the epoch.
+        .{ .name = "timestamp", .type = .long },
+        .{ .name = "salt", .type = .long },
+        .{ .name = "signature", .type = .prefixedOptional(.fixedArray(.ubyte, 256)) },
+        .{ .name = "message_count", .type = .var_int },
+        // A 20 bits `java.util.BitSet`, little endian.
+        .{ .name = "acknowledged", .type = .fixedArray(.ubyte, 3) },
+        .{ .name = "checksum", .type = .ibyte },
+    },
+});
+pub const chat_command_c2s = PacketType.max_string;
+pub const player_loaded_c2s = StructuredPacket.named("PlayerLoadedC2S");
+
+test "player_position_s2c size" {
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer aw.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    try player_position_s2c.write(.newWithArena(std.testing.allocator, &arena), &aw.writer, .{
+        .teleport_id = 1,
+        .x = 0,
+        .y = 0,
+        .z = 0,
+        .velocity_x = 0,
+        .velocity_y = 0,
+        .velocity_z = 0,
+        .yaw = 0,
+        .pitch = 0,
+        .flags = .initMany(&.{.rel_x}),
+    });
+    // var int + 6 doubles + 2 floats + the flags as an int, like vanilla's `Relative.SET_STREAM_CODEC`
+    try std.testing.expectEqual(1 + 6 * 8 + 2 * 4 + 4, aw.written().len);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 1 }, aw.written()[aw.written().len - 4 ..]);
+}

@@ -240,6 +240,10 @@ broadcast: struct {
 
 connections_mutex: zio.Mutex,
 connections: std.HashMapUnmanaged(*Connection, void, Connection.HashContext, std.hash_map.default_max_load_percentage),
+/// Connections in the play phase.
+players_mutex: zio.Mutex,
+players: std.ArrayList(*Connection),
+next_entity_id: std.atomic.Value(i32),
 accept_coro: Io.Future(CoroAccpetError!void),
 acceptv6_coro: Io.Future(CoroAccpetError!void),
 
@@ -291,6 +295,7 @@ pub const OwnedConnection = struct {
         none,
         login: *LoginConnection,
         config: *ConfigConnection,
+        play: *PlayConnection,
     },
 
     fn deinitImpl(conn: *Connection, allocator: Allocator) void {
@@ -300,6 +305,7 @@ pub const OwnedConnection = struct {
             .none => {},
             .login => |loginging| allocator.destroy(loginging),
             .config => |configing| allocator.destroy(configing),
+            .play => |playing| allocator.destroy(playing),
         }
         allocator.destroy(owned);
     }
@@ -448,6 +454,7 @@ pub const ConfigPlayCommon = struct {
         const common = switch (owned.data) {
             .none, .login => unreachable,
             .config => |c| &c.common,
+            .play => |p| &p.common,
         };
 
         if (common.keep_alive) |ka| {
@@ -487,6 +494,62 @@ pub const ConfigConnection = struct {
 
     owned: *OwnedConnection,
     common: ConfigPlayCommon,
+    profile: utils.GameProfile,
+    encryption: *Connection.Encryption,
+    compression: *Connection.Compression,
+};
+
+pub const PlayConnection = struct {
+    const vtable = Connection.VTable{
+        .deinit = deinitImpl,
+        .disconnect = disconnectImpl,
+        .tick = tickImpl,
+    };
+
+    fn deinitImpl(conn: *Connection, allocator: Allocator) void {
+        const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
+        const owner = owned.owner;
+        {
+            owner.players_mutex.lockUncancelable();
+            defer owner.players_mutex.unlock();
+
+            for (owner.players.items, 0..) |player, i| {
+                if (player == conn) {
+                    _ = owner.players.swapRemove(i);
+                    break;
+                }
+            }
+            var arena: std.heap.ArenaAllocator = .init(allocator);
+            defer arena.deinit();
+            const message: utils.TextComponent = .translate("multiplayer.player.left", .{
+                .args = &.{.text(owned.data.play.profile.username(), .{})},
+                .common = .{ .color = .yellow },
+            });
+            owner.broadcastSystemChatLocked(.newWithArena(allocator, &arena), message);
+        }
+        LoginConnection.deinitImpl(conn, allocator);
+    }
+
+    fn disconnectImpl(conn: *Connection, reason: *const utils.TextComponent) Connection.WritePacketError!void {
+        const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
+        assert(owned.data == .play);
+
+        const gpa = owned.owner.allocator;
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        try conn.sendPacket(.newWithArena(gpa, &arena), "disconnect", net.packets.disconnect_s2c, reason.*);
+    }
+
+    fn tickImpl(conn: *Connection, delta: u8) Connection.TickError!void {
+        _ = delta;
+        const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
+        try owned.data.play.common.keepAlive(conn);
+    }
+
+    owned: *OwnedConnection,
+    common: ConfigPlayCommon,
+    profile: utils.GameProfile,
+    entity_id: i32,
     encryption: *Connection.Encryption,
     compression: *Connection.Compression,
 };
@@ -551,6 +614,9 @@ pub fn init(self: *Server, options: InitOptions) InitError!void {
 
         .connections_mutex = .init,
         .connections = .empty,
+        .players_mutex = .init,
+        .players = .empty,
+        .next_entity_id = .init(1),
         .accept_coro = .{ .any_future = null, .result = {} },
         .acceptv6_coro = .{ .any_future = null, .result = {} },
 
@@ -624,6 +690,7 @@ pub fn deinit(self: *Server) void {
         conn.release(self.allocator);
     }
     self.connections.deinit(self.allocator);
+    self.players.deinit(self.allocator);
 
     crypto.EVP_PKEY_free(self.rsa_key);
     self.allocator.free(self.public_key_bytes);
@@ -785,7 +852,7 @@ pub fn @"serverbound/login/key"(conn: *Connection, reader: *Io.Reader, params: n
     const owner = owned.owner;
     const io = owner.runtime.io();
     const logingin = switch (owned.data) {
-        .config => unreachable,
+        .config, .play => unreachable,
         .none => {
             conn.disconnect(.{ .static = &.text("Client didn't initialize login", .{ .color = .red }) });
             return;
@@ -865,6 +932,7 @@ pub fn @"serverbound/login/login_acknowledged"(conn: *Connection, reader: *Io.Re
                 .ping = null,
                 .latency = 0,
             },
+            .profile = loginging.profile,
             .encryption = loginging.encryption.?,
             .compression = loginging.compression.?,
         };
@@ -968,17 +1036,209 @@ pub fn @"serverbound/configuration/finish_configuration"(conn: *Connection, read
     logger.debug("[{f}] Finish Configuration Ack: {f}", .{ conn, ack.formatted(pack, params.toAllocPair()) });
     logger.info("[{f}] Configuration done", .{conn});
 
-    // Same as vanilla's `handleConfigurationFinished`, the client is in play from now on
-    conn.reconfigure(.{
-        .in_phase = .play,
-        .out_phase = .play,
-    });
-    // TODO: Play
+    const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
+    const owner = owned.owner;
+    const configing = owned.data.config;
+    {
+        const playing = try owner.allocator.create(PlayConnection);
+        errdefer comptime unreachable;
+
+        playing.* = .{
+            .owned = owned,
+            .common = configing.common,
+            .profile = configing.profile,
+            .entity_id = owner.next_entity_id.fetchAdd(1, .monotonic),
+            .encryption = configing.encryption,
+            .compression = configing.compression,
+        };
+        owned.data = .{ .play = playing };
+        owner.allocator.destroy(configing);
+        // Same as vanilla's `handleConfigurationFinished`, the client is in play from now on
+        conn.reconfigure(.{
+            .in_phase = .play,
+            .out_phase = .play,
+            .vtable = &PlayConnection.vtable,
+        });
+    }
+
+    try joinWorld(conn, params.toAllocPair());
 }
 
 //=====================play===========================//
 
+/// An empty world, no chunks are ever sent.
+const limbo = struct {
+    const dimension = "minecraft:overworld";
+    const dimension_type = syncedEntryIndex("minecraft:dimension_type", "minecraft:overworld");
+    /// Spectators don't wait for the chunk they're in to leave the loading screen, see
+    /// the client's `LevelLoadTracker`.
+    const game_mode: net.packets.GameMode = .spectator;
+    const x = 0.5;
+    const y = 100.0;
+    const z = 0.5;
+    // LEVEL_CHUNKS_LOAD_START in vanilla's `ClientboundGameEventPacket`
+    const level_chunks_load_start = 13;
+};
+
+/// Numeric id of a synchronized registry entry, the order they're sent in.
+fn syncedEntryIndex(comptime registry: []const u8, comptime entry: []const u8) i32 {
+    comptime for (registries.synchronized) |r| {
+        if (!std.mem.eql(u8, r.id, registry)) continue;
+        for (r.entries, 0..) |e, i| {
+            if (std.mem.eql(u8, e, entry)) return i;
+        }
+    };
+    @compileError("No " ++ entry ++ " in " ++ registry);
+}
+
+fn joinWorld(conn: *Connection, apair: net.PacketType.AllocPair) net.Connection.ReadCallbackError!void {
+    const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
+    const owner = owned.owner;
+    const playing = owned.data.play;
+
+    var dimensions = [_]utils.Identifier{.literal(limbo.dimension)};
+    try conn.sendPacket(apair, "login", net.packets.login_s2c, .{
+        .entity_id = playing.entity_id,
+        .hardcore = false,
+        .dimensions = &dimensions,
+        .max_players = 20,
+        .view_distance = 2,
+        .simulation_distance = 2,
+        .reduced_debug_info = false,
+        .show_death_screen = true,
+        .limited_crafting = false,
+        .dimension_type = limbo.dimension_type,
+        .dimension = .literal(limbo.dimension),
+        .hashed_seed = 0,
+        .game_mode = limbo.game_mode,
+        .previous_game_mode = 0,
+        .debug = false,
+        .flat = true,
+        .death_location = null,
+        .portal_cooldown = 0,
+        .sea_level = 63,
+        .online_mode = false,
+        .enforces_secure_chat = false,
+    });
+    try conn.sendPacket(apair, "player_position", net.packets.player_position_s2c, .{
+        .teleport_id = 1,
+        .x = limbo.x,
+        .y = limbo.y,
+        .z = limbo.z,
+        .velocity_x = 0,
+        .velocity_y = 0,
+        .velocity_z = 0,
+        .yaw = 0,
+        .pitch = 0,
+        .flags = .empty,
+    });
+    try conn.sendPacket(apair, "game_event", net.packets.game_event_s2c, .{
+        .event = limbo.level_chunks_load_start,
+        .value = 0,
+    });
+
+    owner.players_mutex.lockUncancelable();
+    defer owner.players_mutex.unlock();
+    try owner.players.append(owner.allocator, conn);
+
+    logger.info("{s} joined the game", .{playing.profile.username()});
+    const message: utils.TextComponent = .translate("multiplayer.player.joined", .{
+        .args = &.{.text(playing.profile.username(), .{})},
+        .common = .{ .color = .yellow },
+    });
+    owner.broadcastSystemChatLocked(apair, message);
+}
+
+/// `players_mutex` must be locked.
+fn broadcastSystemChatLocked(self: *Server, apair: net.PacketType.AllocPair, message: utils.TextComponent) void {
+    for (self.players.items) |player| {
+        player.sendPacket(apair, "system_chat", net.packets.system_chat_s2c, .{
+            .content = message,
+            .overlay = false,
+        }) catch |e| logger.warn("[{f}] Couldn't send chat message: {t}", .{ player, e });
+    }
+}
+
 pub const @"serverbound/play/keep_alive" = ConfigPlayCommon.handleCommonKeepAlive;
+
+pub fn @"serverbound/play/accept_teleportation"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
+    const accept = net.packets.accept_teleportation_c2s;
+    const pack = try accept.readRoot(params, reader);
+    logger.debug("[{f}] Accept Teleportation: {f}", .{ conn, accept.formatted(pack, params.toAllocPair()) });
+}
+
+pub fn @"serverbound/play/player_loaded"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
+    _ = try net.packets.player_loaded_c2s.readRoot(params, reader);
+    logger.debug("[{f}] Player loaded", .{conn});
+}
+
+pub fn @"serverbound/play/chat"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
+    const chat = net.packets.chat_c2s;
+    const pack = try chat.readRoot(params, reader);
+
+    const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
+    const owner = owned.owner;
+    const name = owned.data.play.profile.username();
+    logger.info("<{s}> {s}", .{ name, pack.message });
+
+    // Unsigned, so sent as a system message (the server doesn't enforce secure chat)
+    const message: utils.TextComponent = .translate("chat.type.text", .{
+        .args = &.{ .text(name, .{}), .text(pack.message, .{}) },
+    });
+    owner.players_mutex.lockUncancelable();
+    defer owner.players_mutex.unlock();
+    owner.broadcastSystemChatLocked(params.toAllocPair(), message);
+}
+
+pub fn @"serverbound/play/chat_command"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
+    const command = net.packets.chat_command_c2s;
+    const pack = try command.readRoot(params, reader);
+    logger.info("[{f}] Command: /{s}", .{ conn, pack });
+
+    try conn.sendPacket(params.toAllocPair(), "system_chat", net.packets.system_chat_s2c, .{
+        .content = .text("Commands aren't implemented yet", .{}),
+        .overlay = false,
+    });
+}
+
+/// For packets a client keeps sending while idling, they don't do anything yet.
+fn ignorePacket(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
+    _ = conn;
+    _ = params;
+    _ = try reader.discardRemaining();
+}
+
+pub const @"serverbound/play/attack" = ignorePacket;
+pub const @"serverbound/play/chat_ack" = ignorePacket;
+pub const @"serverbound/play/chunk_batch_received" = ignorePacket;
+pub const @"serverbound/play/client_command" = ignorePacket;
+pub const @"serverbound/play/client_information" = ignorePacket;
+pub const @"serverbound/play/client_tick_end" = ignorePacket;
+pub const @"serverbound/play/command_suggestion" = ignorePacket;
+pub const @"serverbound/play/container_close" = ignorePacket;
+pub const @"serverbound/play/custom_payload" = ignorePacket;
+pub const @"serverbound/play/debug_subscription_request" = ignorePacket;
+pub const @"serverbound/play/interact" = ignorePacket;
+pub const @"serverbound/play/move_player_pos" = ignorePacket;
+pub const @"serverbound/play/move_player_pos_rot" = ignorePacket;
+pub const @"serverbound/play/move_player_rot" = ignorePacket;
+pub const @"serverbound/play/move_player_status_only" = ignorePacket;
+pub const @"serverbound/play/pick_item_from_block" = ignorePacket;
+pub const @"serverbound/play/pick_item_from_entity" = ignorePacket;
+pub const @"serverbound/play/ping_request" = ignorePacket;
+pub const @"serverbound/play/player_abilities" = ignorePacket;
+pub const @"serverbound/play/player_action" = ignorePacket;
+pub const @"serverbound/play/player_command" = ignorePacket;
+pub const @"serverbound/play/player_input" = ignorePacket;
+pub const @"serverbound/play/pong" = ignorePacket;
+pub const @"serverbound/play/punch" = ignorePacket;
+pub const @"serverbound/play/recipe_book_change_settings" = ignorePacket;
+pub const @"serverbound/play/seen_advancements" = ignorePacket;
+pub const @"serverbound/play/set_carried_item" = ignorePacket;
+pub const @"serverbound/play/spectator_action" = ignorePacket;
+pub const @"serverbound/play/teleport_to_entity" = ignorePacket;
+pub const @"serverbound/play/use_item" = ignorePacket;
+pub const @"serverbound/play/use_item_on" = ignorePacket;
 
 test {
     std.testing.refAllDecls(@This());

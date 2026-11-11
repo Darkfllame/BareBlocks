@@ -593,6 +593,17 @@ pub const Type = union(enum) {
         return .{ .value = value, .apair = apair };
     }
 
+    /// Unsigned integer an enum set is sent as, the size of its declared backing integer.
+    fn enumSetProtoInt(comptime ib: IntBacked, comptime MaskInt: type) type {
+        switch (ib.backing) {
+            .var_int, .var_long => @compileError("enum_set can't be backed by a var int"),
+            else => {},
+        }
+        const bits = @bitSizeOf(ib.backing.getProtoType());
+        if (@bitSizeOf(MaskInt) > bits) @compileError("enum_set doesn't fit in its backing integer");
+        return @Int(.unsigned, bits);
+    }
+
     pub fn limitedString(comptime max_size: u15) Type {
         return .{ .string = max_size };
     }
@@ -936,7 +947,9 @@ pub const Type = union(enum) {
                     const num_bytes = @divFloor(ES.len - 1, 8) + 1;
                     try reader.readSliceAll(@as([*]u8, @ptrCast(&ret.bits.masks))[0..num_bytes]);
                 } else {
-                    ret.bits.mask = @truncate(try reader.takeInt(std.math.ByteAlignedInt(BitSet.MaskInt), .big));
+                    // Sent as the declared backing integer, e.g. teleport flags are an int
+                    const UProtoInt = enumSetProtoInt(ib, BitSet.MaskInt);
+                    ret.bits.mask = @truncate(try reader.takeInt(UProtoInt, .big));
                 }
                 break :sw ret.*;
             },
@@ -1173,7 +1186,9 @@ pub const Type = union(enum) {
                     const num_bytes = @divFloor(ES.len - 1, 8) + 1;
                     try writer.writeAll(@as([*]const u8, @ptrCast(&val.bits.masks))[0..num_bytes]);
                 } else {
-                    try writer.writeInt(std.math.ByteAlignedInt(BitSet.MaskInt), val.bits.mask, .big);
+                    // Sent as the declared backing integer, e.g. teleport flags are an int
+                    const UProtoInt = enumSetProtoInt(ib, BitSet.MaskInt);
+                    try writer.writeInt(UProtoInt, val.bits.mask, .big);
                 }
             },
             .packed_struct => |ib| {
