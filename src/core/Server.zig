@@ -521,6 +521,12 @@ pub const PlayConnection = struct {
             }
             var arena: std.heap.ArenaAllocator = .init(allocator);
             defer arena.deinit();
+
+            var uuids = [_]utils.UUID{owned.data.play.profile.uuid};
+            for (owner.players.items) |player| {
+                player.sendPacket(.newWithArena(allocator, &arena), "player_info_remove", net.packets.player_info_remove_s2c, &uuids) catch |e|
+                    logger.warn("[{f}] Couldn't send player info: {t}", .{ player, e });
+            }
             const message: utils.TextComponent = .translate("multiplayer.player.left", .{
                 .args = &.{.text(owned.data.play.profile.username(), .{})},
                 .common = .{ .color = .yellow },
@@ -1141,12 +1147,50 @@ fn joinWorld(conn: *Connection, apair: net.PacketType.AllocPair) net.Connection.
     defer owner.players_mutex.unlock();
     try owner.players.append(owner.allocator, conn);
 
+    // Same as vanilla's `PlayerList.placeNewPlayer`: everyone gets the new player, the new player
+    // gets everyone. The client also needs its own entry, it's where it gets its game mode from.
+    const player_info = net.packets.player_info_initialize_s2c;
+    const PlayerEntry = @typeInfo(@FieldType(player_info.getZigType(), "players")).pointer.child;
+    const all_actions: std.EnumSet(net.packets.PlayerInfoAction) = .full;
+
+    var new_entry = [_]PlayerEntry{playerInfoEntry(playing)};
+    for (owner.players.items) |player| {
+        player.sendPacket(apair, "player_info_update", player_info, .{ .actions = all_actions, .players = &new_entry }) catch |e|
+            logger.warn("[{f}] Couldn't send player info: {t}", .{ player, e });
+    }
+    const others = try apair.arena.alloc(PlayerEntry, owner.players.items.len - 1);
+    var i: usize = 0;
+    for (owner.players.items) |player| {
+        if (player == conn) continue;
+        const other: *OwnedConnection = @fieldParentPtr("connection", player);
+        others[i] = playerInfoEntry(other.data.play);
+        i += 1;
+    }
+    if (others.len != 0) {
+        try conn.sendPacket(apair, "player_info_update", player_info, .{ .actions = all_actions, .players = others });
+    }
+
     logger.info("{s} joined the game", .{playing.profile.username()});
     const message: utils.TextComponent = .translate("multiplayer.player.joined", .{
         .args = &.{.text(playing.profile.username(), .{})},
         .common = .{ .color = .yellow },
     });
     owner.broadcastSystemChatLocked(apair, message);
+}
+
+fn playerInfoEntry(playing: *const PlayConnection) @typeInfo(@FieldType(net.packets.player_info_initialize_s2c.getZigType(), "players")).pointer.child {
+    return .{
+        .uuid = playing.profile.uuid,
+        .name = playing.profile.username(),
+        .properties = &.{},
+        .chat_session = null,
+        .game_mode = limbo.game_mode,
+        .listed = true,
+        .latency = @intCast(@min(playing.common.latency, std.math.maxInt(i32))),
+        .display_name = null,
+        .list_order = 0,
+        .show_hat = true,
+    };
 }
 
 /// `players_mutex` must be locked.

@@ -513,6 +513,67 @@ pub const player_position_s2c = StructuredPacket.getType(.{
         .{ .name = "flags", .type = .teleport_flags },
     },
 });
+pub const PlayerInfoAction = enum {
+    add_player,
+    initialize_chat,
+    update_game_mode,
+    update_listed,
+    update_latency,
+    update_display_name,
+    update_list_order,
+    update_hat,
+};
+/// Only the form vanilla sends when players join (`createPlayerInitializing`): every action, so
+/// each player has all the fields in the actions' order.
+pub const player_info_initialize_s2c = StructuredPacket.getType(.{
+    .name = "PlayerInfoInitializeS2C",
+    .fields = &.{
+        // A fixed `java.util.BitSet` of 8 bits, all set
+        .{ .name = "actions", .type = .{ .enum_set = .of(PlayerInfoAction, .u8) } },
+        .{
+            .name = "players",
+            .type = .prefixedArray(StructuredPacket.getType(.{
+                .name = "PlayerInfoInitializeS2C::Player",
+                .fields = &.{
+                    .{ .name = "uuid", .type = .uuid },
+                    // add_player
+                    .{ .name = "name", .type = .limitedString(16) },
+                    .{ .name = "properties", .type = .prefixedArray(StructuredPacket.getType(.{
+                        .name = "PlayerInfoInitializeS2C::Property",
+                        .fields = &.{
+                            .{ .name = "name", .type = .limitedString(64) },
+                            .{ .name = "value", .type = .max_string },
+                            .{ .name = "signature", .type = .prefixedOptional(.limitedString(1024)) },
+                        },
+                    })) },
+                    // initialize_chat
+                    .{ .name = "chat_session", .type = .prefixedOptional(StructuredPacket.getType(.{
+                        .name = "PlayerInfoInitializeS2C::ChatSession",
+                        .fields = &.{
+                            .{ .name = "session_id", .type = .uuid },
+                            .{ .name = "expires_at", .type = .long },
+                            .{ .name = "public_key", .type = .byte_array },
+                            .{ .name = "key_signature", .type = .byte_array },
+                        },
+                    })) },
+                    // update_game_mode
+                    .{ .name = "game_mode", .type = .{ .@"enum" = .of(GameMode, .var_int) } },
+                    // update_listed
+                    .{ .name = "listed", .type = .bool },
+                    // update_latency
+                    .{ .name = "latency", .type = .var_int },
+                    // update_display_name
+                    .{ .name = "display_name", .type = .prefixedOptional(.nbt_text_component) },
+                    // update_list_order
+                    .{ .name = "list_order", .type = .var_int },
+                    // update_hat
+                    .{ .name = "show_hat", .type = .bool },
+                },
+            })),
+        },
+    },
+});
+pub const player_info_remove_s2c = PacketType.prefixedArray(.uuid);
 pub const system_chat_s2c = StructuredPacket.getType(.{
     .name = "SystemChatS2C",
     .fields = &.{
@@ -570,4 +631,34 @@ test "player_position_s2c size" {
     // var int + 6 doubles + 2 floats + the flags as an int, like vanilla's `Relative.SET_STREAM_CODEC`
     try std.testing.expectEqual(1 + 6 * 8 + 2 * 4 + 4, aw.written().len);
     try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 1 }, aw.written()[aw.written().len - 4 ..]);
+}
+
+test "player_info_initialize_s2c size" {
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer aw.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var players = [_]@typeInfo(@FieldType(player_info_initialize_s2c.getZigType(), "players")).pointer.child{.{
+        .uuid = .{ .value = 0 },
+        .name = "sioworker",
+        .properties = &.{},
+        .chat_session = null,
+        .game_mode = .spectator,
+        .listed = true,
+        .latency = 0,
+        .display_name = null,
+        .list_order = 0,
+        .show_hat = true,
+    }};
+    try player_info_initialize_s2c.write(.newWithArena(std.testing.allocator, &arena), &aw.writer, .{
+        .actions = .full,
+        .players = &players,
+    });
+    const written = aw.written();
+    // actions, player count, uuid, name, properties, then 1 byte for each other action
+    try std.testing.expectEqual(1 + 1 + 16 + (1 + "sioworker".len) + 1 + 7, written.len);
+    try std.testing.expectEqual(0xFF, written[0]);
+    // update_game_mode comes right after the empty properties and the absent chat session
+    try std.testing.expectEqual(3, written[1 + 1 + 16 + 10 + 1 + 1]);
 }
