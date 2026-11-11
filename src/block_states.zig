@@ -1,6 +1,7 @@
 //! Every block and block state, the data itself is generated from blocks.json by build/gen_data.zig.
 const std = @import("std");
-const data = @import("block_states_data").Data(Property, Block);
+const bsd = @import("block_states_data");
+const data = bsd.Data(Property, Block);
 
 const assert = std.debug.assert;
 
@@ -11,9 +12,9 @@ pub const properties: []const Property = &data.properties;
 /// Sorted by `first_state`.
 pub const blocks: []const Block = &data.blocks;
 /// Packed value indices of each state, see `Layout`.
-pub const state_bits: []const u16 = &@import("block_states_data").state_bits;
+pub const state_bits: []const u16 = &bsd.state_bits;
 /// Index into `blocks` of each state.
-pub const state_blocks: []const u16 = &@import("block_states_data").state_blocks;
+pub const state_blocks: []const u16 = &bsd.state_blocks;
 
 pub const Property = struct {
     name: []const u8,

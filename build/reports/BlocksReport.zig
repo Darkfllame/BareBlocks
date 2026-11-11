@@ -7,72 +7,6 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const Identifier = utils.Identifier;
 
-/// Properties are identified by their name *and* their values, names alone aren't unique.
-/// e.g. `facing` is 3 different properties (horizontal, all 6 directions and the hopper one).
-pub const Property = struct {
-    pub const Data = union(enum) {
-        bool,
-        /// Always linear and ascending.
-        integer: []const i32,
-        enumeration: std.StringArrayHashMapUnmanaged(void),
-    };
-
-    pub const Kind = @typeInfo(Data).@"union".tag_type.?;
-
-    const HashCtx = struct {
-        pub fn hash(_: HashCtx, a: *const Property) u64 {
-            var wh = std.hash.Wyhash.init(0);
-            wh.update(a.name);
-            wh.update(@tagName(a.data));
-            switch (a.data) {
-                .bool => {},
-                .integer => |ints| wh.update(std.mem.sliceAsBytes(ints)),
-                .enumeration => |values| for (values.keys()) |value| {
-                    wh.update(value);
-                    wh.update(&.{0}); // so ["ab", "c"] and ["a", "bc"] don't hash the same
-                },
-            }
-            return wh.final();
-        }
-
-        pub fn eql(_: HashCtx, a: *const Property, b: *const Property) bool {
-            if (a == b) return true;
-            if (!std.mem.eql(u8, a.name, b.name) or @as(Kind, a.data) != @as(Kind, b.data)) return false;
-            return switch (a.data) {
-                .bool => true,
-                .integer => |ints| std.mem.eql(i32, ints, b.data.integer),
-                .enumeration => |values| {
-                    const a_keys = values.keys();
-                    const b_keys = b.data.enumeration.keys();
-                    if (a_keys.len != b_keys.len) return false;
-                    for (a_keys, b_keys) |ak, bk| {
-                        if (!std.mem.eql(u8, ak, bk)) return false;
-                    }
-                    return true;
-                },
-            };
-        }
-    };
-
-    name: []const u8,
-    data: Data,
-};
-
-pub const State = struct {
-    owner_id: utils.Identifier,
-    id: u32,
-    default: bool,
-    /// Which field is active depends on the kind of the owner's property with the same name.
-    properties: std.StringHashMapUnmanaged(union { bool: bool, integer: i32, enumeration: []const u8 }),
-};
-
-pub const Entry = struct {
-    /// NOTE: State ids are ordered by the property names sorted alphabetically, the last one
-    /// NOTE: changing the fastest. Not by the order in blocks.json (chests and pistons list `type` first).
-    properties: std.StringHashMapUnmanaged(*const Property),
-    states: []const *const State,
-};
-
 fn statesGrow(self: *BlocksReport, arena: Allocator, new_len: usize) !void {
     if (self.states_data.len < new_len) {
         const old_len = self.states_data.len;
@@ -279,6 +213,72 @@ states_data: []*const State,
 states_count: usize,
 all_properties: std.HashMapUnmanaged(*const Property, void, Property.HashCtx, std.hash_map.default_max_load_percentage),
 entries: std.HashMapUnmanaged(Identifier, Entry, Identifier.HashCtx, std.hash_map.default_max_load_percentage),
+
+/// Properties are identified by their name *and* their values, names alone aren't unique.
+/// e.g. `facing` is 3 different properties (horizontal, all 6 directions and the hopper one).
+pub const Property = struct {
+    pub const Data = union(enum) {
+        bool,
+        /// Always linear and ascending.
+        integer: []const i32,
+        enumeration: std.StringArrayHashMapUnmanaged(void),
+    };
+
+    pub const Kind = @typeInfo(Data).@"union".tag_type.?;
+
+    const HashCtx = struct {
+        pub fn hash(_: HashCtx, a: *const Property) u64 {
+            var wh = std.hash.Wyhash.init(0);
+            wh.update(a.name);
+            wh.update(@tagName(a.data));
+            switch (a.data) {
+                .bool => {},
+                .integer => |ints| wh.update(std.mem.sliceAsBytes(ints)),
+                .enumeration => |values| for (values.keys()) |value| {
+                    wh.update(value);
+                    wh.update(&.{0}); // so ["ab", "c"] and ["a", "bc"] don't hash the same
+                },
+            }
+            return wh.final();
+        }
+
+        pub fn eql(_: HashCtx, a: *const Property, b: *const Property) bool {
+            if (a == b) return true;
+            if (!std.mem.eql(u8, a.name, b.name) or @as(Kind, a.data) != @as(Kind, b.data)) return false;
+            return switch (a.data) {
+                .bool => true,
+                .integer => |ints| std.mem.eql(i32, ints, b.data.integer),
+                .enumeration => |values| {
+                    const a_keys = values.keys();
+                    const b_keys = b.data.enumeration.keys();
+                    if (a_keys.len != b_keys.len) return false;
+                    for (a_keys, b_keys) |ak, bk| {
+                        if (!std.mem.eql(u8, ak, bk)) return false;
+                    }
+                    return true;
+                },
+            };
+        }
+    };
+
+    name: []const u8,
+    data: Data,
+};
+
+pub const State = struct {
+    owner_id: utils.Identifier,
+    id: u32,
+    default: bool,
+    /// Which field is active depends on the kind of the owner's property with the same name.
+    properties: std.StringHashMapUnmanaged(union { bool: bool, integer: i32, enumeration: []const u8 }),
+};
+
+pub const Entry = struct {
+    /// NOTE: State ids are ordered by the property names sorted alphabetically, the last one
+    /// NOTE: changing the fastest. Not by the order in blocks.json (chests and pistons list `type` first).
+    properties: std.StringHashMapUnmanaged(*const Property),
+    states: []const *const State,
+};
 
 pub fn deserialize(mapr: *serial.MapReader) serial.MapReader.ReadError!BlocksReport {
     var self = BlocksReport{

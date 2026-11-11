@@ -20,9 +20,6 @@ const gen_file_header =
     \\
 ;
 
-// NOTE: Need to read `datapack.json` to know which registries are dynamic/synchronized (elements),
-// NOTE: can have tags refering their elements (tags) or are stable
-
 const ReportKind = enum {
     registries,
     packets,
@@ -669,7 +666,7 @@ pub fn main(init: std.process.Init) !void {
 
     var args_it = try init.minimal.args.iterateAllocator(arena);
     defer args_it.deinit();
-    _ = args_it.skip();
+    _ = args_it.skip(); // Skip self path
 
     const dirpath = args_it.next() orelse return error.BadArgument;
     const which_str = args_it.next() orelse return error.BadArgument;
