@@ -849,3 +849,107 @@ pub fn main(init: std.process.Init) !void {
 
     try fw.flush();
 }
+
+fn testBlockStatesFile(src: []const u8, out: *Io.Writer) !void {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+
+    var input: Io.Reader = .fixed(src);
+    var json_r: serial.JsonReader = undefined;
+    json_r.init(std.testing.allocator, &input);
+    defer json_r.deinit();
+
+    const report = try json_r.mapr.deserialize(BlocksReport);
+    try printBlockStatesFile(&report, arena_state.allocator(), out);
+}
+
+test printBlockStatesFile {
+    var aw = Io.Writer.Allocating.init(std.testing.allocator);
+    defer aw.deinit();
+
+    // Like a chest, blocks.json lists `type` first but the ids follow the alphabetical order (facing, type)
+    try testBlockStatesFile(
+        \\{
+        \\  "minecraft:air": { "states": [ { "id": 0, "default": true } ] },
+        \\  "minecraft:chest": {
+        \\    "properties": { "type": ["single", "left", "right"], "facing": ["north", "south"] },
+        \\    "states": [
+        \\      { "id": 1, "properties": { "type": "single", "facing": "north" } },
+        \\      { "id": 2, "default": true, "properties": { "type": "left", "facing": "north" } },
+        \\      { "id": 3, "properties": { "type": "right", "facing": "north" } },
+        \\      { "id": 4, "properties": { "type": "single", "facing": "south" } },
+        \\      { "id": 5, "properties": { "type": "left", "facing": "south" } },
+        \\      { "id": 6, "properties": { "type": "right", "facing": "south" } }
+        \\    ]
+        \\  }
+        \\}
+    , &aw.writer);
+    try aw.writer.writeByte(0);
+    const written = aw.written();
+
+    const expectContains = struct {
+        fn f(haystack: []const u8, needle: []const u8) !void {
+            if (std.mem.indexOf(u8, haystack, needle) == null) {
+                std.debug.print("missing: {s}\n", .{needle});
+                return error.TestExpectedContains;
+            }
+        }
+    }.f;
+
+    try expectContains(written,
+        \\    .{ .name = "facing", .kind = .enumeration, .values = &.{ "north", "south" } },
+        \\    .{ .name = "type", .kind = .enumeration, .values = &.{ "single", "left", "right" } },
+    );
+    try expectContains(written,
+        \\    .{ .name = "minecraft:air", .first_state = 0, .state_count = 1, .default_state = 0, .properties = &.{} },
+        \\    .{ .name = "minecraft:chest", .first_state = 1, .state_count = 6, .default_state = 2, .properties = &.{ .{ .property = 0, .bit_offset = 0, .bit_size = 1, .stride = 3 }, .{ .property = 1, .bit_offset = 1, .bit_size = 2, .stride = 1 } } },
+    );
+    // facing in bit 0, type in bits 1-2
+    try expectContains(written, "pub const state_bits = [_]u16{\n    0,0,2,4,1,3,5,\n};");
+    try expectContains(written, "pub const state_blocks = [_]u16{\n    0,1,1,1,1,1,1,\n};");
+
+    // Must be valid zig
+    var ast = try std.zig.Ast.parse(std.testing.allocator, written[0 .. written.len - 1 :0], .{ .mode = .zig });
+    defer ast.deinit(std.testing.allocator);
+    try std.testing.expectEqual(0, ast.errors.len);
+}
+
+test "printBlockStatesFile errors" {
+    var aw = Io.Writer.Allocating.init(std.testing.allocator);
+    defer aw.deinit();
+
+    // ids in blocks.json's order instead of the alphabetical one
+    try std.testing.expectError(error.UnexpectedToken, testBlockStatesFile(
+        \\{ "minecraft:chest": {
+        \\  "properties": { "type": ["single", "left"], "facing": ["north", "south"] },
+        \\  "states": [
+        \\    { "id": 0, "default": true, "properties": { "type": "single", "facing": "north" } },
+        \\    { "id": 1, "properties": { "type": "single", "facing": "south" } },
+        \\    { "id": 2, "properties": { "type": "left", "facing": "north" } },
+        \\    { "id": 3, "properties": { "type": "left", "facing": "south" } }
+        \\  ]
+        \\} }
+    , &aw.writer));
+
+    // no default state
+    aw.clearRetainingCapacity();
+    try std.testing.expectError(error.MissingField, testBlockStatesFile(
+        \\{ "minecraft:air": { "states": [ { "id": 0 } ] } }
+    , &aw.writer));
+
+    // two default states
+    aw.clearRetainingCapacity();
+    try std.testing.expectError(error.DuplicateField, testBlockStatesFile(
+        \\{ "minecraft:a": {
+        \\  "properties": { "lit": ["true", "false"] },
+        \\  "states": [
+        \\    { "id": 0, "default": true, "properties": { "lit": "true" } },
+        \\    { "id": 1, "default": true, "properties": { "lit": "false" } }
+        \\  ]
+        \\} }
+    , &aw.writer));
+}
+
+test {
+    _ = BlocksReport;
+}

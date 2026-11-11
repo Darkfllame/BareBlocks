@@ -376,6 +376,13 @@ pub fn build(b: *Build) !void {
     const check_step = b.step("check", "Run semantic analysis");
     proj.makeTests(b, test_step, check_step, use_llvm);
 
+    const gendata_test = b.addTest(.{
+        .name = "test-gen_data",
+        .root_module = mc_gendata.root_module,
+    });
+    test_step.dependOn(&b.addRunArtifact(gendata_test).step);
+    check_step.dependOn(&gendata_test.step);
+
     proj.resolveLocalImports();
 }
 
