@@ -375,95 +375,6 @@ fn printPacketsFile(pack_file: *const PacketsReport, out: *Io.Writer) !void {
     );
 }
 
-const block_states_api =
-    \\const std = @import("std");
-    \\const assert = std.debug.assert;
-    \\
-    \\/// Global block state id, same as the protocol's.
-    \\pub const StateId = u16;
-    \\
-    \\pub const Property = struct {
-    \\    name: []const u8,
-    \\    kind: Kind,
-    \\    /// In vanilla order. A state's value for this property is stored as an index into this.
-    \\    values: []const []const u8,
-    \\
-    \\    pub const Kind = enum { boolean, integer, enumeration };
-    \\};
-    \\
-    \\pub const Block = struct {
-    \\    name: []const u8,
-    \\    first_state: StateId,
-    \\    state_count: u16,
-    \\    default_state: StateId,
-    \\    /// Sorted by name, which is also the order state ids are computed in (last one changes the fastest).
-    \\    properties: []const Layout,
-    \\
-    \\    pub fn find(self: *const Block, name: []const u8) ?*const Layout {
-    \\        for (self.properties) |*layout| {
-    \\            if (std.mem.eql(u8, properties[layout.property].name, name)) return layout;
-    \\        }
-    \\        return null;
-    \\    }
-    \\};
-    \\
-    \\/// Where a property sits in a block's states.
-    \\pub const Layout = struct {
-    \\    /// Index into `properties`.
-    \\    property: u8,
-    \\    /// Position of the value index inside of `state_bits`.
-    \\    bit_offset: u4,
-    \\    bit_size: u3,
-    \\    /// How much the state id moves when the value index goes up by 1.
-    \\    stride: u16,
-    \\
-    \\    /// Returns the value index of this property for `id`.
-    \\    pub fn get(self: Layout, id: StateId) u8 {
-    \\        const mask = (@as(u16, 1) << self.bit_size) - 1;
-    \\        return @intCast((state_bits[id] >> self.bit_offset) & mask);
-    \\    }
-    \\
-    \\    /// Returns the state with this property set to `value_index`, other properties are kept.
-    \\    pub fn with(self: Layout, id: StateId, value_index: u8) StateId {
-    \\        assert(value_index < properties[self.property].values.len);
-    \\        const old: i32 = self.get(id);
-    \\        return @intCast(@as(i32, id) + (@as(i32, value_index) - old) * self.stride);
-    \\    }
-    \\};
-    \\
-    \\pub fn blockOf(id: StateId) *const Block {
-    \\    return &blocks[state_blocks[id]];
-    \\}
-    \\
-    \\test "every property of every state" {
-    \\    for (&blocks, 0..) |*block, block_index| {
-    \\        try std.testing.expect(block.default_state >= block.first_state);
-    \\        try std.testing.expect(block.default_state < block.first_state + block.state_count);
-    \\
-    \\        for (block.first_state..block.first_state + block.state_count) |i| {
-    \\            const id: StateId = @intCast(i);
-    \\            try std.testing.expectEqual(block, blockOf(id));
-    \\            try std.testing.expectEqual(block_index, state_blocks[id]);
-    \\
-    \\            for (block.properties) |layout| {
-    \\                for (0..properties[layout.property].values.len) |value_index| {
-    \\                    const new = layout.with(id, @intCast(value_index));
-    \\                    try std.testing.expect(new >= block.first_state and new < block.first_state + block.state_count);
-    \\                    try std.testing.expectEqual(value_index, layout.get(new));
-    \\                    // Others are kept
-    \\                    for (block.properties) |other| {
-    \\                        if (other.property == layout.property) continue;
-    \\                        try std.testing.expectEqual(other.get(id), other.get(new));
-    \\                    }
-    \\                }
-    \\            }
-    \\        }
-    \\    }
-    \\}
-    \\
-    \\
-;
-
 /// Value index of a state's property, in vanilla order.
 fn stateValueIndex(prop: *const BlocksReport.Property, state: *const BlocksReport.State, name: []const u8) !usize {
     const value = state.properties.get(name) orelse return error.MissingField;
@@ -521,7 +432,7 @@ fn printBlockStatesFile(report: *const BlocksReport, arena: Allocator, out: *Io.
     };
     const Layout = struct { property: usize, bit_offset: usize, bit_size: usize, stride: usize };
 
-    if (report.states_data.len > std.math.maxInt(u16) + 1) return error.Overflow;
+    if (report.states_data.len > std.math.maxInt(u32) + 1) return error.Overflow;
 
     // Properties, sorted so the output doesn't depend on the hash map order
     const props = try arena.alloc(*const BlocksReport.Property, report.all_properties.count());
@@ -530,7 +441,7 @@ fn printBlockStatesFile(report: *const BlocksReport, arena: Allocator, out: *Io.
         var i: usize = 0;
         while (it.next()) |key| : (i += 1) props[i] = key.*;
     }
-    std.mem.sort(*const BlocksReport.Property, props, {}, propertyLessThan);
+    std.mem.sortUnstable(*const BlocksReport.Property, props, {}, propertyLessThan);
     if (props.len > std.math.maxInt(u8) + 1) return error.Overflow;
 
     var prop_indices = std.AutoHashMapUnmanaged(*const BlocksReport.Property, usize).empty;
@@ -553,16 +464,22 @@ fn printBlockStatesFile(report: *const BlocksReport, arena: Allocator, out: *Io.
             entries[i] = .{ .id = kv.key_ptr.*, .entry = kv.value_ptr, .first_state = first };
         }
     }
-    std.mem.sort(SortedEntry, entries, {}, SortedEntry.lessThan);
+    std.mem.sortUnstable(SortedEntry, entries, {}, SortedEntry.lessThan);
+    // `state_blocks` is a u16 table
+    if (entries.len > std.math.maxInt(u16) + 1) return error.Overflow;
 
     const state_bits = try arena.alloc(u16, report.states_data.len);
     const state_blocks = try arena.alloc(u16, report.states_data.len);
 
-    try out.writeAll(gen_file_header ++ block_states_api);
-
-    try out.writeAll("pub const properties = [_]Property{\n");
+    // The types and the API are in src/block_states.zig, this is just the data
+    try out.writeAll(gen_file_header ++
+        \\pub fn Data(comptime Property: type, comptime Block: type) type {
+        \\    return struct {
+        \\        pub const properties = [_]Property{
+        \\
+    );
     for (props) |prop| {
-        try out.print("    .{{ .name = \"{s}\", .kind = .{s}, .values = &.{{ ", .{ prop.name, switch (prop.data) {
+        try out.print("            .{{ .name = \"{s}\", .kind = .{s}, .values = &.{{ ", .{ prop.name, switch (prop.data) {
             .bool => "boolean",
             .integer => "integer",
             .enumeration => "enumeration",
@@ -574,9 +491,12 @@ fn printBlockStatesFile(report: *const BlocksReport, arena: Allocator, out: *Io.
         }
         try out.writeAll(" } },\n");
     }
-    try out.writeAll("};\n\n");
-
-    try out.writeAll("pub const blocks = [_]Block{\n");
+    try out.writeAll(
+        \\        };
+        \\
+        \\        pub const blocks = [_]Block{
+        \\
+    );
     for (entries, 0..) |se, block_index| {
         const entry = se.entry;
 
@@ -633,7 +553,7 @@ fn printBlockStatesFile(report: *const BlocksReport, arena: Allocator, out: *Io.
             }
         }
 
-        try out.print("    .{{ .name = \"{s}:{s}\", .first_state = {d}, .state_count = {d}, .default_state = {d}, .properties = &.{{", .{
+        try out.print("            .{{ .name = \"{s}:{s}\", .first_state = {d}, .state_count = {d}, .default_state = {d}, .properties = &.{{", .{
             se.id.namespace(),
             se.id.path(),
             se.first_state,
@@ -647,13 +567,17 @@ fn printBlockStatesFile(report: *const BlocksReport, arena: Allocator, out: *Io.
         }
         try out.writeAll(if (layouts.len == 0) "} },\n" else " } },\n");
     }
-    try out.writeAll("};\n\n");
-
-    try out.writeAll("/// Packed value indices of each state, see `Layout`.\npub const state_bits = [_]u16{");
+    try out.writeAll(
+        \\        };
+        \\    };
+        \\}
+        \\
+        \\pub const state_bits = [_]u16{
+    );
     for (state_bits, 0..) |bits, i| try out.print("{s}{d},", .{ if (i % 32 == 0) "\n    " else "", bits });
     try out.writeAll("\n};\n\n");
 
-    try out.writeAll("/// Index into `blocks` of each state.\npub const state_blocks = [_]u16{");
+    try out.writeAll("pub const state_blocks = [_]u16{");
     for (state_blocks, 0..) |index, i| try out.print("{s}{d},", .{ if (i % 32 == 0) "\n    " else "", index });
     try out.writeAll("\n};\n");
 }
@@ -839,117 +763,10 @@ pub fn main(init: std.process.Init) !void {
         return error.AstError;
     }
 
-    // Rendering puts every element of the state tables on its own line, keep it as is
-    if (which == .blocks) {
-        try fw.interface.writeAll(written[0 .. written.len - 1]);
-    } else ast.render(init.gpa, &fw.interface, .{}) catch |e| return switch (e) {
+    ast.render(init.gpa, &fw.interface, .{}) catch |e| return switch (e) {
         error.WriteFailed => fw.err.?,
         else => |err| err,
     };
 
     try fw.flush();
-}
-
-fn testBlockStatesFile(src: []const u8, out: *Io.Writer) !void {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-
-    var input: Io.Reader = .fixed(src);
-    var json_r: serial.JsonReader = undefined;
-    json_r.init(std.testing.allocator, &input);
-    defer json_r.deinit();
-
-    const report = try json_r.mapr.deserialize(BlocksReport);
-    try printBlockStatesFile(&report, arena_state.allocator(), out);
-}
-
-test printBlockStatesFile {
-    var aw = Io.Writer.Allocating.init(std.testing.allocator);
-    defer aw.deinit();
-
-    // Like a chest, blocks.json lists `type` first but the ids follow the alphabetical order (facing, type)
-    try testBlockStatesFile(
-        \\{
-        \\  "minecraft:air": { "states": [ { "id": 0, "default": true } ] },
-        \\  "minecraft:chest": {
-        \\    "properties": { "type": ["single", "left", "right"], "facing": ["north", "south"] },
-        \\    "states": [
-        \\      { "id": 1, "properties": { "type": "single", "facing": "north" } },
-        \\      { "id": 2, "default": true, "properties": { "type": "left", "facing": "north" } },
-        \\      { "id": 3, "properties": { "type": "right", "facing": "north" } },
-        \\      { "id": 4, "properties": { "type": "single", "facing": "south" } },
-        \\      { "id": 5, "properties": { "type": "left", "facing": "south" } },
-        \\      { "id": 6, "properties": { "type": "right", "facing": "south" } }
-        \\    ]
-        \\  }
-        \\}
-    , &aw.writer);
-    try aw.writer.writeByte(0);
-    const written = aw.written();
-
-    const expectContains = struct {
-        fn f(haystack: []const u8, needle: []const u8) !void {
-            if (std.mem.indexOf(u8, haystack, needle) == null) {
-                std.debug.print("missing: {s}\n", .{needle});
-                return error.TestExpectedContains;
-            }
-        }
-    }.f;
-
-    try expectContains(written,
-        \\    .{ .name = "facing", .kind = .enumeration, .values = &.{ "north", "south" } },
-        \\    .{ .name = "type", .kind = .enumeration, .values = &.{ "single", "left", "right" } },
-    );
-    try expectContains(written,
-        \\    .{ .name = "minecraft:air", .first_state = 0, .state_count = 1, .default_state = 0, .properties = &.{} },
-        \\    .{ .name = "minecraft:chest", .first_state = 1, .state_count = 6, .default_state = 2, .properties = &.{ .{ .property = 0, .bit_offset = 0, .bit_size = 1, .stride = 3 }, .{ .property = 1, .bit_offset = 1, .bit_size = 2, .stride = 1 } } },
-    );
-    // facing in bit 0, type in bits 1-2
-    try expectContains(written, "pub const state_bits = [_]u16{\n    0,0,2,4,1,3,5,\n};");
-    try expectContains(written, "pub const state_blocks = [_]u16{\n    0,1,1,1,1,1,1,\n};");
-
-    // Must be valid zig
-    var ast = try std.zig.Ast.parse(std.testing.allocator, written[0 .. written.len - 1 :0], .{ .mode = .zig });
-    defer ast.deinit(std.testing.allocator);
-    try std.testing.expectEqual(0, ast.errors.len);
-}
-
-test "printBlockStatesFile errors" {
-    var aw = Io.Writer.Allocating.init(std.testing.allocator);
-    defer aw.deinit();
-
-    // ids in blocks.json's order instead of the alphabetical one
-    try std.testing.expectError(error.UnexpectedToken, testBlockStatesFile(
-        \\{ "minecraft:chest": {
-        \\  "properties": { "type": ["single", "left"], "facing": ["north", "south"] },
-        \\  "states": [
-        \\    { "id": 0, "default": true, "properties": { "type": "single", "facing": "north" } },
-        \\    { "id": 1, "properties": { "type": "single", "facing": "south" } },
-        \\    { "id": 2, "properties": { "type": "left", "facing": "north" } },
-        \\    { "id": 3, "properties": { "type": "left", "facing": "south" } }
-        \\  ]
-        \\} }
-    , &aw.writer));
-
-    // no default state
-    aw.clearRetainingCapacity();
-    try std.testing.expectError(error.MissingField, testBlockStatesFile(
-        \\{ "minecraft:air": { "states": [ { "id": 0 } ] } }
-    , &aw.writer));
-
-    // two default states
-    aw.clearRetainingCapacity();
-    try std.testing.expectError(error.DuplicateField, testBlockStatesFile(
-        \\{ "minecraft:a": {
-        \\  "properties": { "lit": ["true", "false"] },
-        \\  "states": [
-        \\    { "id": 0, "default": true, "properties": { "lit": "true" } },
-        \\    { "id": 1, "default": true, "properties": { "lit": "false" } }
-        \\  ]
-        \\} }
-    , &aw.writer));
-}
-
-test {
-    _ = BlocksReport;
 }

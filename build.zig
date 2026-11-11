@@ -170,10 +170,10 @@ pub fn build(b: *Build) !void {
         const run_exe = b.addRunArtifact(mc_gendata);
         run_exe.addDirectoryArg(mc_generated);
         run_exe.addArg("blocks");
-        break :blk run_exe.addOutputFileArg("block_states.zig");
+        break :blk run_exe.addOutputFileArg("block_states_data.zig");
     };
     const registries_mod = b.createModule(.{ .root_source_file = mc_registries });
-    const block_states_mod = b.createModule(.{ .root_source_file = mc_block_states });
+    const block_states_data_mod = b.createModule(.{ .root_source_file = mc_block_states });
     const packets_mod = b.createModule(.{ .root_source_file = mc_packets });
 
     var proj = Project{
@@ -228,6 +228,14 @@ pub fn build(b: *Build) !void {
         },
     });
     _ = core_mod;
+    const block_states_mod = proj.createModule(b, .{
+        .name = "block_states",
+        .root_source_file = b.path("src/block_states.zig"),
+        .imports = &.{
+            .{ .name = "block_states_data", .module = block_states_data_mod },
+        },
+    });
+    _ = block_states_mod;
     const serial_mod = proj.createModule(b, .{
         .name = "serial",
         .root_source_file = b.path("src/serial/serial.zig"),
@@ -306,7 +314,6 @@ pub fn build(b: *Build) !void {
 
     proj.addModule(.{ .name = "registries", .module = registries_mod });
     proj.addModule(.{ .name = "packets", .module = packets_mod });
-    proj.addModule(.{ .name = "block_states", .module = block_states_mod });
 
     mc_gendata.root_module.addImport("serial", serial_mod);
     mc_gendata.root_module.addImport("utils", utils_mod);
@@ -375,13 +382,6 @@ pub fn build(b: *Build) !void {
     const test_step = b.step("test", "Run test untis");
     const check_step = b.step("check", "Run semantic analysis");
     proj.makeTests(b, test_step, check_step, use_llvm);
-
-    const gendata_test = b.addTest(.{
-        .name = "test-gen_data",
-        .root_module = mc_gendata.root_module,
-    });
-    test_step.dependOn(&b.addRunArtifact(gendata_test).step);
-    check_step.dependOn(&gendata_test.step);
 
     proj.resolveLocalImports();
 }
