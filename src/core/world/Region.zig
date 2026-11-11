@@ -153,11 +153,6 @@ pub const Section = struct {
     }
 
     pub fn deinit(self: *Section, gpa: Allocator) void {
-        for (self.palette.states[0..self.palette.states_len]) |mst| {
-            if (mst) |state| {
-                state.release(gpa);
-            }
-        }
         gpa.free(self.palette.states[0..self.palette.states_cap]);
         deinitBranch(self.data, gpa, 0);
     }
@@ -220,7 +215,7 @@ pub const Section = struct {
             var index: usize = 0;
             for (self.states[0..self.states_len]) |state| {
                 if (state) |st| {
-                    states_slice[index] = st.acquire();
+                    states_slice[index] = st;
                     index += 1;
 
                     if (index == states_slice.len) break; // reached end
@@ -262,7 +257,7 @@ pub const Section = struct {
             }
 
             if (free_space) |idx| {
-                self.states[idx] = state.acquire();
+                self.states[idx] = state;
                 return idx;
             }
 
@@ -284,15 +279,14 @@ pub const Section = struct {
             }
 
             const idx: BlockIndex = @intCast(self.states_len);
-            self.states[idx] = state.acquire();
+            self.states[idx] = state;
             self.states_len += 1;
             return idx;
         }
 
-        pub fn removeId(self: *BlockPalette, id: BlockIndex, gpa: Allocator) void {
-            if (id == self.states_len - 1) return self.removeIdShort(id, gpa);
+        pub fn removeId(self: *BlockPalette, id: BlockIndex) void {
+            if (id == self.states_len - 1) return self.removeIdShort(id);
             const slice = self.states[0..self.states_len];
-            slice[id].?.release(gpa);
             slice[id] = null;
             var i: usize = self.states_len - 1;
             while (true) {
@@ -302,9 +296,8 @@ pub const Section = struct {
             }
         }
 
-        pub fn removeIdShort(self: *BlockPalette, id: BlockIndex, gpa: Allocator) void {
+        pub fn removeIdShort(self: *BlockPalette, id: BlockIndex) void {
             assert(id == self.states_len - 1);
-            self.states[id].?.release(gpa);
             self.states_len -= 1;
         }
     };
@@ -332,7 +325,7 @@ pub const Section = struct {
 
     pub fn setBlock(self: *Section, pos: SectionBlockPosition, gpa: Allocator, state: *Block.State) Allocator.Error!void {
         const state_id, const is_new_id = try self.palette.findOrNewId(gpa, state);
-        errdefer if (is_new_id) self.palette.removeId(state_id, gpa);
+        errdefer if (is_new_id) self.palette.removeId(state_id);
 
         var depth: u8 = 0;
         var x, var y, var z = .{ pos.x, pos.y, pos.z };
@@ -413,7 +406,6 @@ pub fn deinit(self: *Region, dim: *const DimensionProperties, gpa: Allocator) vo
         }
     }
     self.sections.deinit(gpa);
-    self.default_state.release(gpa);
 }
 
 pub fn getBlock(self: *Region, dim: *const DimensionProperties, pos: core.BlockPosition) *Block.State {

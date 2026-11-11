@@ -91,8 +91,9 @@ pub const Property = struct {
             return self.base.valueFrom(value);
         }
 
+        /// A value never crosses a byte boundary, `byte_mask` selects it inside of its byte.
         pub fn get(self: Compiled, bytes: [*]const u8) u8 {
-
+            return (bytes[self.bit_offset >> 3] & self.byte_mask) >> @truncate(self.bit_offset);
         }
     };
 
