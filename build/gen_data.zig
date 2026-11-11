@@ -417,7 +417,8 @@ fn stringLessThan(_: void, a: []const u8, b: []const u8) bool {
     return std.mem.lessThan(u8, a, b);
 }
 
-fn printBlockStatesFile(report: *const BlocksReport, arena: Allocator, out: *Io.Writer) !void {
+/// `property_names` is the output of build/DumpProperties.java: `<FIELD_NAME> <name> <value>,<value>,...` lines
+fn printBlockStatesFile(report: *const BlocksReport, property_names: []const u8, arena: Allocator, out: *Io.Writer) !void {
     const SortedEntry = struct {
         id: utils.Identifier,
         entry: *const BlocksReport.Entry,
@@ -443,6 +444,32 @@ fn printBlockStatesFile(report: *const BlocksReport, arena: Allocator, out: *Io.
 
     var prop_indices = std.AutoHashMapUnmanaged(*const BlocksReport.Property, usize).empty;
     for (props, 0..) |prop, i| try prop_indices.put(arena, prop, i);
+
+    // Mojang's names, names alone collide so properties are matched by "<name> <values>"
+    var field_names = std.StringHashMapUnmanaged([]const u8).empty;
+    {
+        var lines = std.mem.tokenizeScalar(u8, property_names, '\n');
+        while (lines.next()) |line| {
+            const space = std.mem.indexOfScalar(u8, line, ' ') orelse return error.UnexpectedToken;
+            const gop = try field_names.getOrPut(arena, std.mem.trimEnd(u8, line[space + 1 ..], "\r"));
+            if (gop.found_existing) return error.DuplicateField;
+            gop.value_ptr.* = try std.ascii.allocLowerString(arena, line[0..space]);
+        }
+    }
+    const prop_ids = try arena.alloc([]const u8, props.len);
+    for (props, prop_ids) |prop, *id| {
+        var key = Io.Writer.Allocating.init(arena);
+        try key.writer.print("{s} ", .{prop.name});
+        switch (prop.data) {
+            .bool => try key.writer.writeAll("true,false"),
+            .integer => |ints| for (ints, 0..) |v, i| try key.writer.print("{s}{d}", .{ if (i == 0) "" else ",", v }),
+            .enumeration => |names| for (names.keys(), 0..) |v, i| try key.writer.print("{s}{s}", .{ if (i == 0) "" else ",", v }),
+        }
+        id.* = field_names.get(key.written()) orelse {
+            std.debug.print("no BlockStateProperties field for property: {s}\n", .{key.written()});
+            return error.MissingField;
+        };
+    }
 
     // Blocks, sorted by their first state
     const entries = try arena.alloc(SortedEntry, report.entries.count());
@@ -470,6 +497,14 @@ fn printBlockStatesFile(report: *const BlocksReport, arena: Allocator, out: *Io.
 
     // The types and the API are in src/block_states.zig, this is just the data
     try out.writeAll(gen_file_header ++
+        \\/// Mojang's names for the properties (BlockStateProperties' fields), same order as `Data().properties`.
+        \\pub const PropertyId = enum(u8) {
+        \\
+    );
+    for (prop_ids) |id| try out.print("    {f},\n", .{std.zig.fmtId(id)});
+    try out.writeAll(
+        \\};
+        \\
         \\pub fn Data(comptime Property: type, comptime Block: type) type {
         \\    return struct {
         \\        pub const properties = [_]Property{
@@ -558,8 +593,8 @@ fn printBlockStatesFile(report: *const BlocksReport, arena: Allocator, out: *Io.
             default_state orelse return error.MissingField,
         });
         for (layouts, 0..) |layout, i| {
-            try out.print("{s}.{{ .property = {d}, .bit_offset = {d}, .bit_size = {d}, .stride = {d} }}", .{
-                if (i == 0) " " else ", ", layout.property, layout.bit_offset, layout.bit_size, layout.stride,
+            try out.print("{s}.{{ .property = .{f}, .bit_offset = {d}, .bit_size = {d}, .stride = {d} }}", .{
+                if (i == 0) " " else ", ", std.zig.fmtId(prop_ids[layout.property]), layout.bit_offset, layout.bit_size, layout.stride,
             });
         }
         try out.writeAll(if (layouts.len == 0) "} },\n" else " } },\n");
@@ -731,8 +766,10 @@ pub fn main(init: std.process.Init) !void {
             },
             .blocks => {
                 const blocks_file = try json_r.mapr.deserialize(BlocksReport);
+                const names_path = args_it.next() orelse return error.BadArgument;
+                const property_names = try Io.Dir.cwd().readFileAlloc(init.io, names_path, arena, .unlimited);
 
-                printBlockStatesFile(&blocks_file, arena, &aw.writer) catch |e| return switch (e) {
+                printBlockStatesFile(&blocks_file, property_names, arena, &aw.writer) catch |e| return switch (e) {
                     error.WriteFailed => error.OutOfMemory,
                     else => |err| err,
                 };

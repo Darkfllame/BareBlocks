@@ -147,11 +147,23 @@ pub fn build(b: *Build) !void {
         run_exe.addArg("packets");
         break :blk run_exe.addOutputFileArg("packets.zig");
     };
+    const mc_block_properties = blk: {
+        const run_java = b.addSystemCommand(&.{java_path});
+        // Minecraft writes its logs/ in the working directory
+        run_java.setCwd(mkdir(b, b.fmt("run_datagen_{s}", .{mc_version})));
+        run_java.addFileArg(b.path("build/DumpProperties.java"));
+        run_java.addFileArg(mc26_2_jar);
+        _ = run_java.captureStdOut(.{});
+        _ = run_java.captureStdErr(.{});
+        break :blk run_java.addOutputFileArg("block_properties.txt");
+    };
     const mc_block_states = blk: {
         const run_exe = b.addRunArtifact(mc_gendata);
         run_exe.addDirectoryArg(mc_generated);
         run_exe.addArg("blocks");
-        break :blk run_exe.addOutputFileArg("block_states_data.zig");
+        const out = run_exe.addOutputFileArg("block_states_data.zig");
+        run_exe.addFileArg(mc_block_properties);
+        break :blk out;
     };
     const registries_mod = b.createModule(.{ .root_source_file = mc_registries });
     const block_states_data_mod = b.createModule(.{ .root_source_file = mc_block_states });
