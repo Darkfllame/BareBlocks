@@ -442,10 +442,7 @@ fn connectionHandlerInner(self: *Connection, allocator: Allocator) !void {
 
     start_ev.set();
 
-    var res: ?HandlerSelectResult = select.await() catch {
-        select.cancelDiscard();
-        return;
-    };
+    var res: ?HandlerSelectResult = select.await() catch select.cancel();
 
     if (res.? == .read and res.?.read == error.LegacyHandshake) {
         self.disconnect(.{ .static = comptime &.text("LegacyHandshake", .{}) });
@@ -454,6 +451,13 @@ fn connectionHandlerInner(self: *Connection, allocator: Allocator) !void {
     self.send_state.channel.close(.graceful);
     self.writer_state.state.store(.closing, .monotonic);
     self.reader_state.state.store(.closing, .monotonic);
+
+    zio.beginShield();
+    while (self.writer_state.state.load(.monotonic) != .closed) {
+        std.atomic.spinLoopHint();
+        zio.maybeYield() catch unreachable;
+    }
+    zio.endShield();
 
     while (res) |result| : (res = select.cancel()) {
         switch (result) {

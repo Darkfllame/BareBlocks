@@ -11,7 +11,7 @@
             "console": "integratedTerminal",
             "preLaunchTask": "build",
             "initCommands": [
-                "command script import /path/to/zig/tools/lldb_pretty_printers.py",
+                "command script import ${workspaceFolder}/lldb_pretty_printers.py",
                 "type category enable zig.lang",
                 "type category enable zig.std",
                 "type category enable zig.stage2",

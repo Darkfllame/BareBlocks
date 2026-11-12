@@ -14,7 +14,7 @@ const Connection = net.Connection;
 const Allocator = std.mem.Allocator;
 
 const logger = std.log.scoped(.@"core/server");
-const chat_logger = std.log.scoped(.@"chat");
+const chat_logger = std.log.scoped(.chat);
 
 const current_version = net.packets.StatusResponse.Version.@"26.3";
 
@@ -112,13 +112,6 @@ fn coro_acceptConnection(self: *Server, which: enum { v4, v6 }) CoroAccpetError!
 
         logger.debug("Incomming connection to {f}", .{stream.?.socket.address});
 
-        // {
-        //     self.connections_mutex.lock() catch break;
-        //     defer self.connections_mutex.unlock();
-
-        //     try self.connections.ensureUnusedCapacity(self.allocator, 1);
-        // }
-
         const owned = try self.allocator.create(OwnedConnection);
         owned.* = .{
             .owner = self,
@@ -157,17 +150,6 @@ fn coro_acceptConnection(self: *Server, which: enum { v4, v6 }) CoroAccpetError!
         defer conn.release(.failing);
         stream = null;
         logger.debug("[{f}] Initalized", .{conn});
-
-        // {
-        //     self.connections_mutex.lockUncancelable();
-        //     defer self.connections_mutex.unlock();
-
-        //     const gop = self.connections.getOrPutAssumeCapacity(conn);
-        //     if (gop.found_existing) {
-        //         logger.debug("Threw {f}: duplicate connection", .{conn.ip_address});
-        //         conn.release(self.allocator);
-        //     }
-        // }
 
         conn.start.set();
 
@@ -239,8 +221,6 @@ broadcast: struct {
     coro: Io.Future(BroadcastCoroError!void),
 },
 
-connections_mutex: zio.Mutex,
-connections: std.HashMapUnmanaged(*Connection, void, Connection.HashContext, std.hash_map.default_max_load_percentage),
 /// Connections in the play phase.
 players_mutex: zio.Mutex,
 players: std.ArrayList(*Connection),
@@ -292,6 +272,7 @@ pub const OwnedConnection = struct {
 
     owner: *Server,
     connection: Connection,
+    // TODO: flatten this, and include both the encryption and compressin state in this (they're always active)
     data: union(enum) {
         none,
         login: *LoginConnection,
@@ -418,7 +399,7 @@ pub const ConfigPlayCommon = struct {
     latency: u64,
 
     /// Same as vanilla: every 15s, send a keep alive, or disconnect if the last one wasn't answered.
-    fn keepAlive(self: *ConfigPlayCommon, conn: *Connection) net.Connection.WritePacketError!void {
+    fn keepAlive(self: *ConfigPlayCommon, conn: *Connection) Connection.WritePacketError!void {
         const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
 
         const now = getKeepAliveValue();
@@ -436,7 +417,7 @@ pub const ConfigPlayCommon = struct {
         try conn.sendPacket(.newWithArena(owned.owner.allocator, &arena), "keep_alive", net.packets.keep_alive, @bitCast(now));
     }
 
-    fn handleCommonPing(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
+    fn handleCommonPing(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
         const ping = net.packets.ping_pong;
         const pack = try ping.readRoot(params, reader);
         logger.debug("[{f}] Ping: {f}", .{ conn, ping.formatted(pack, params.toAllocPair()) });
@@ -444,7 +425,7 @@ pub const ConfigPlayCommon = struct {
         try conn.sendPacket(params.toAllocPair(), "pong", ping, pack);
     }
 
-    fn handleCommonKeepAlive(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
+    fn handleCommonKeepAlive(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
         const keep_alive = net.packets.keep_alive;
         const pack = try keep_alive.readRoot(params, reader);
         logger.debug("[{f}] Keep Alive: {f}", .{ conn, keep_alive.formatted(pack, params.toAllocPair()) });
@@ -701,6 +682,11 @@ pub fn deinit(self: *Server) void {
     self.allocator.free(self.public_key_bytes);
 }
 
+pub fn close(self: *Server) !void {
+    _ = self; // autofix
+
+}
+
 pub fn addressAlt(self: *const Server) AddressAlt {
     return .{
         .v4 = self.ipv4,
@@ -708,37 +694,37 @@ pub fn addressAlt(self: *const Server) AddressAlt {
     };
 }
 
-pub fn @"serverbound/handshake/intention"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
+pub fn @"serverbound/handshake/intention"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
     const hs = net.packets.handshake_c2s;
     const pack = try hs.readRoot(params, reader);
     logger.debug("[{f}] Hanshake: {f}", .{ conn, hs.formatted(pack, params.toAllocPair()) });
+
+    try conn.lock();
+    defer conn.unlock();
+
     switch (pack.intent) {
         .invalid => return error.InvalidEnumTag,
         .status => {
-            try conn.lock();
-            defer conn.unlock();
-
             conn.reconfigure(.{
                 .in_phase = .status,
                 .out_phase = .status,
             });
         },
         .login => {
-            conn.reconfigure(.{ .out_phase = .login });
+            conn.reconfigure(.{
+                .in_phase = .login,
+                .out_phase = .login,
+            });
             if (pack.protocol_version != current_version.protocol) {
                 conn.disconnect(.{ .static = &.translate("multiplayer.status.incompatible", .{}) });
                 return error.CallbackHandlerFailed;
             }
             conn.reconfigure(.{
-                .in_phase = .login,
                 .timeout = .fromSeconds(20),
                 .vtable = &LoginConnection.vtable,
             });
         },
         .transfer => {
-            try conn.lock();
-            defer conn.unlock();
-
             conn.reconfigure(.{ .out_phase = .login });
             conn.disconnect(.{ .static = &.transfers_disabled });
             return error.CallbackHandlerFailed;
@@ -746,7 +732,7 @@ pub fn @"serverbound/handshake/intention"(conn: *Connection, reader: *Io.Reader,
     }
 }
 
-pub fn @"serverbound/status/status_request"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
+pub fn @"serverbound/status/status_request"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
     const status = net.packets.status_request_c2s;
     const pack = try status.readRoot(params, reader);
     logger.debug("[{f}] Status: {f}", .{ conn, status.formatted(pack, params.toAllocPair()) });
@@ -772,7 +758,7 @@ pub fn @"serverbound/status/status_request"(conn: *Connection, reader: *Io.Reade
     );
 }
 
-pub fn @"serverbound/status/ping_request"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
+pub fn @"serverbound/status/ping_request"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
     const ping = net.packets.ping_pong;
     const pack = try ping.readRoot(params, reader);
     logger.debug("[{f}] Ping: {f}", .{ conn, ping.formatted(pack, params.toAllocPair()) });
@@ -785,7 +771,7 @@ pub fn @"serverbound/status/ping_request"(conn: *Connection, reader: *Io.Reader,
     );
 }
 
-pub fn @"serverbound/login/hello"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
+pub fn @"serverbound/login/hello"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
     const hello = net.packets.login_start_c2s;
     const pack = try hello.readRoot(params, reader);
     logger.debug("[{f}] Login Start: {f}", .{ conn, hello.formatted(pack, params.toAllocPair()) });
@@ -843,7 +829,7 @@ pub fn @"serverbound/login/hello"(conn: *Connection, reader: *Io.Reader, params:
     owned.data = .{ .login = loginging };
 }
 
-pub fn @"serverbound/login/key"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
+pub fn @"serverbound/login/key"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
     const encryption_setup_failed_tc = &utils.TextComponent.text("Internal Error: couldn't setup encryption", .{ .color = .red });
 
     const key = net.packets.key;
@@ -904,7 +890,7 @@ pub fn @"serverbound/login/key"(conn: *Connection, reader: *Io.Reader, params: n
     conn.reconfigure(.{ .out_phase = .configuration });
 }
 
-pub fn @"serverbound/login/login_acknowledged"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
+pub fn @"serverbound/login/login_acknowledged"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
     const ack = net.packets.login_acknowledged_c2s;
     const pack = try ack.readRoot(params, reader);
     logger.debug("[{f}] Login Ack: {f}", .{ conn, ack.formatted(pack, params.toAllocPair()) });
@@ -957,7 +943,7 @@ pub fn @"serverbound/login/login_acknowledged"(conn: *Connection, reader: *Io.Re
 
 /// Same order as vanilla's `ServerConfigurationPacketListenerImpl.startConfiguration`, without
 /// the optional server links.
-fn startConfiguration(conn: *Connection, apair: net.PacketType.AllocPair) net.Connection.WritePacketError!void {
+fn startConfiguration(conn: *Connection, apair: net.PacketType.AllocPair) Connection.WritePacketError!void {
     var brand_buffer: [32]u8 = undefined;
     var brand_w = Io.Writer.fixed(&brand_buffer);
 
@@ -977,7 +963,7 @@ fn startConfiguration(conn: *Connection, apair: net.PacketType.AllocPair) net.Co
     try conn.sendPacket(apair, "select_known_packs", net.packets.known_packs, &known_packs);
 }
 
-pub fn @"serverbound/configuration/select_known_packs"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
+pub fn @"serverbound/configuration/select_known_packs"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
     const known_packs = net.packets.known_packs;
     const pack = try known_packs.readRoot(params, reader);
     logger.debug("[{f}] Known Packs: {f}", .{ conn, known_packs.formatted(pack, params.toAllocPair()) });
@@ -1030,13 +1016,13 @@ pub fn @"serverbound/configuration/select_known_packs"(conn: *Connection, reader
     try conn.sendPacket(apair, "finish_configuration", net.packets.finish_configuration_s2c, .{});
 }
 
-pub fn @"serverbound/configuration/client_information"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
+pub fn @"serverbound/configuration/client_information"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
     const info = net.packets.client_information_c2s;
     const pack = try info.readRoot(params, reader);
     logger.debug("[{f}] Client Information: {f}", .{ conn, info.formatted(pack, params.toAllocPair()) });
 }
 
-pub fn @"serverbound/configuration/custom_payload"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
+pub fn @"serverbound/configuration/custom_payload"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
     const message = net.packets.plugin_message;
     const pack = try message.readRoot(params, reader);
     logger.debug("[{f}] Plugin Message: {f} ({d} bytes)", .{ conn, pack.channel, pack.data.len });
@@ -1044,7 +1030,7 @@ pub fn @"serverbound/configuration/custom_payload"(conn: *Connection, reader: *I
 
 pub const @"serverbound/configuration/keep_alive" = ConfigPlayCommon.handleCommonKeepAlive;
 
-pub fn @"serverbound/configuration/finish_configuration"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
+pub fn @"serverbound/configuration/finish_configuration"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
     const ack = net.packets.ack_finish_configuration_c2s;
     const pack = try ack.readRoot(params, reader);
     logger.debug("[{f}] Finish Configuration Ack: {f}", .{ conn, ack.formatted(pack, params.toAllocPair()) });
@@ -1105,7 +1091,7 @@ fn syncedEntryIndex(comptime registry: []const u8, comptime entry: []const u8) i
     @compileError("No " ++ entry ++ " in " ++ registry);
 }
 
-fn joinWorld(conn: *Connection, apair: net.PacketType.AllocPair) net.Connection.ReadCallbackError!void {
+fn joinWorld(conn: *Connection, apair: net.PacketType.AllocPair) Connection.ReadCallbackError!void {
     const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
     const owner = owned.owner;
     const playing = owned.data.play;
@@ -1211,18 +1197,18 @@ fn broadcastSystemChatLocked(self: *Server, apair: net.PacketType.AllocPair, mes
 
 pub const @"serverbound/play/keep_alive" = ConfigPlayCommon.handleCommonKeepAlive;
 
-pub fn @"serverbound/play/accept_teleportation"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
+pub fn @"serverbound/play/accept_teleportation"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
     const accept = net.packets.accept_teleportation_c2s;
     const pack = try accept.readRoot(params, reader);
     logger.debug("[{f}] Accept Teleportation: {f}", .{ conn, accept.formatted(pack, params.toAllocPair()) });
 }
 
-pub fn @"serverbound/play/player_loaded"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
+pub fn @"serverbound/play/player_loaded"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
     _ = try net.packets.player_loaded_c2s.readRoot(params, reader);
     logger.debug("[{f}] Player loaded", .{conn});
 }
 
-pub fn @"serverbound/play/chat"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
+pub fn @"serverbound/play/chat"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
     const chat = net.packets.chat_c2s;
     const pack = try chat.readRoot(params, reader);
 
@@ -1240,7 +1226,7 @@ pub fn @"serverbound/play/chat"(conn: *Connection, reader: *Io.Reader, params: n
     owner.broadcastSystemChatLocked(params.toAllocPair(), message);
 }
 
-pub fn @"serverbound/play/chat_command"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
+pub fn @"serverbound/play/chat_command"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
     const command = net.packets.chat_command_c2s;
     const pack = try command.readRoot(params, reader);
     logger.info("[{f}] Command: /{s}", .{ conn, pack });
@@ -1252,7 +1238,7 @@ pub fn @"serverbound/play/chat_command"(conn: *Connection, reader: *Io.Reader, p
 }
 
 /// For packets a client keeps sending while idling, they don't do anything yet.
-fn ignorePacket(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) net.Connection.ReadCallbackError!void {
+fn ignorePacket(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
     _ = conn;
     _ = params;
     _ = try reader.discardRemaining();
