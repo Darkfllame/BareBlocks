@@ -13,6 +13,8 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
@@ -22,8 +24,10 @@ import java.util.stream.Stream;
 /// - `<properties_out>`: every property of BlockStateProperties as `<FIELD_NAME> <name> <value>,<value>,...` lines
 /// - `<registries_out>`: `known_pack <namespace> <id> <version>`, then a `registry <id> <entry>,<entry>,...` line
 ///   per synchronized registry, in the order the vanilla server sends them
+/// - `<biome_parameters_out>`: `biome_parameters <preset> <biome> <min> <max> (temperature, humidity, continentalness,
+///   erosion, depth, weirdness) <offset>` lines for the multi noise biome source presets, quantized like vanilla has them
 ///
-/// Usage: java DumpVanilla.java <server.jar> <properties_out> <registries_out>
+/// Usage: java DumpVanilla.java <server.jar> <properties_out> <registries_out> <biome_parameters_out>
 public class DumpVanilla {
     public static void main(String[] args) throws Exception {
         Path tmp = Files.createTempDirectory("bare_blocks_properties");
@@ -103,6 +107,36 @@ public class DumpVanilla {
                         List<String> entries = new ArrayList<>();
                         for (String file : files) entries.add("minecraft:" + file.substring(0, file.length() - ".json".length()));
                         out.println("registry " + id + " " + String.join(",", entries));
+                    }
+                }
+
+                try (PrintWriter out = new PrintWriter(Files.newBufferedWriter(Path.of(args[3])))) {
+                    Class<?> parameterList = loader.loadClass("net.minecraft.world.level.biome.MultiNoiseBiomeSourceParameterList");
+                    Class<?> point = loader.loadClass("net.minecraft.world.level.biome.Climate$ParameterPoint");
+                    Class<?> parameter = loader.loadClass("net.minecraft.world.level.biome.Climate$Parameter");
+                    Method identifier = loader.loadClass("net.minecraft.resources.ResourceKey").getMethod("identifier");
+                    Method min = parameter.getMethod("min");
+                    Method max = parameter.getMethod("max");
+
+                    // The overworld's is built by code (OverworldBiomeBuilder), the report has it but as floats
+                    TreeMap<String, Object> presets = new TreeMap<>();
+                    for (var preset : ((Map<?, ?>) parameterList.getMethod("knownPresets").invoke(null)).entrySet()) {
+                        Object key = preset.getKey();
+                        presets.put(key.getClass().getMethod("id").invoke(key).toString(), preset.getValue());
+                    }
+                    for (var preset : presets.entrySet()) {
+                        Object list = preset.getValue();
+                        for (Object pair : (List<?>) list.getClass().getMethod("values").invoke(list)) {
+                            Object params = pair.getClass().getMethod("getFirst").invoke(pair);
+                            Object biome = pair.getClass().getMethod("getSecond").invoke(pair);
+
+                            StringBuilder line = new StringBuilder("biome_parameters " + preset.getKey() + " " + identifier.invoke(biome));
+                            for (String name : new String[] { "temperature", "humidity", "continentalness", "erosion", "depth", "weirdness" }) {
+                                Object range = point.getMethod(name).invoke(params);
+                                line.append(' ').append(min.invoke(range)).append(' ').append(max.invoke(range));
+                            }
+                            out.println(line.append(' ').append(point.getMethod("offset").invoke(params)));
+                        }
                     }
                 }
             }

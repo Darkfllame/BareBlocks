@@ -134,7 +134,7 @@ pub fn build(b: *Build) !void {
         break :blk out_dir;
     };
     const mc_generated = mcDatagenDir(b, java_path, mc26_2_jar, mc_version);
-    const mc_block_properties, const mc_synced_registries = blk: {
+    const mc_block_properties, const mc_synced_registries, const mc_biome_parameters = blk: {
         const run_java = b.addSystemCommand(&.{java_path});
         // Minecraft writes its logs/ in the working directory
         run_java.setCwd(mkdir(b, b.fmt("run_datagen_{s}", .{mc_version})));
@@ -145,6 +145,7 @@ pub fn build(b: *Build) !void {
         break :blk .{
             run_java.addOutputFileArg("block_properties.txt"),
             run_java.addOutputFileArg("synced_registries.txt"),
+            run_java.addOutputFileArg("biome_parameters.txt"),
         };
     };
     const mc_registries = blk: {
@@ -170,7 +171,17 @@ pub fn build(b: *Build) !void {
         run_exe.addFileArg(mc_block_properties);
         break :blk out;
     };
+    const mc_worldgen = blk: {
+        const run_exe = b.addRunArtifact(mc_gendata);
+        run_exe.addDirectoryArg(mc_generated);
+        run_exe.addArg("worldgen");
+        const out = run_exe.addOutputFileArg("worldgen_data.zig");
+        run_exe.addFileArg(mc_synced_registries);
+        run_exe.addFileArg(mc_biome_parameters);
+        break :blk out;
+    };
     const registries_mod = b.createModule(.{ .root_source_file = mc_registries });
+    const worldgen_data_mod = b.createModule(.{ .root_source_file = mc_worldgen });
     const block_states_data_mod = b.createModule(.{ .root_source_file = mc_block_states });
     const packets_mod = b.createModule(.{ .root_source_file = mc_packets });
 
@@ -234,6 +245,15 @@ pub fn build(b: *Build) !void {
         },
     });
     _ = block_states_mod;
+    const worldgen_mod = proj.createModule(b, .{
+        .name = "worldgen",
+        .root_source_file = b.path("src/worldgen/worldgen.zig"),
+        .imports = &.{
+            .{ .name = "worldgen_data", .module = worldgen_data_mod },
+        },
+        .local_imports = &.{"block_states"},
+    });
+    _ = worldgen_mod;
     const serial_mod = proj.createModule(b, .{
         .name = "serial",
         .root_source_file = b.path("src/serial/serial.zig"),
