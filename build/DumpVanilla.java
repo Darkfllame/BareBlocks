@@ -51,8 +51,9 @@ public class DumpVanilla {
                     }
                 }
             }
+            assert serverJar != null;
 
-            try (URLClassLoader loader = new URLClassLoader(urls.toArray(new URL[0]))) {
+            try (URLClassLoader loader = new URLClassLoader(urls.toArray(URL[]::new))) {
                 Thread.currentThread().setContextClassLoader(loader);
                 // Some properties' values (NoteBlockInstrument...) need the registries
                 loader.loadClass("net.minecraft.SharedConstants").getMethod("tryDetectVersion").invoke(null);
