@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const zio = @import("zio");
 const core = @import("core");
+const crypto = @import("crypto");
 const utils = @import("utils");
 
 const Io = std.Io;
@@ -10,6 +11,9 @@ const use_safe_allocator = !builtin.cpu.arch.isWasm() and switch (builtin.mode) 
     .debug, .safe => true,
     .fast, .small => !builtin.link_libc and builtin.single_threaded, // Also not ideal.
 };
+
+var zio_runtime: zio.Runtime = undefined;
+var global_arena: std.heap.ArenaAllocator = .init(.failing);
 
 pub const std_options = std.Options{
     // .log_level = .info,
@@ -30,6 +34,12 @@ pub const zio_options = zio.Options{
 
 pub const std_options_debug_io = zio.debug_io;
 
+// pub const debug = struct {
+//     pub fn getDebugInfoAllocator() std.mem.Allocator {
+//         return global_arena.allocator();
+//     }
+// };
+
 pub fn main(init: std.process.Init.Minimal) !@typeInfo(@typeInfo(@TypeOf(asyncMain)).@"fn".return_type.?).error_union.payload {
     // Initialization code STRAIGHT stolen from std/start.zig
     var sa = if (use_safe_allocator) std.heap.SafeAllocator.init(std.heap.page_allocator, .{});
@@ -46,8 +56,9 @@ pub fn main(init: std.process.Init.Minimal) !@typeInfo(@typeInfo(@TypeOf(asyncMa
     else
         comptime unreachable;
 
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    defer arena.deinit();
+    global_arena = std.heap.ArenaAllocator.init(gpa);
+    defer global_arena.deinit();
+    const arena = global_arena.allocator();
 
     var environ_map = std.process.Environ.createMap(.{ .block = init.environ.block }, gpa) catch |err| {
         std.log.err("Failed to parse environment variables", .{});
@@ -55,35 +66,38 @@ pub fn main(init: std.process.Init.Minimal) !@typeInfo(@typeInfo(@TypeOf(asyncMa
     };
     defer environ_map.deinit();
 
-    const preopens = std.process.Preopens.init(arena.allocator()) catch |err| {
+    const preopens = std.process.Preopens.init(arena) catch |err| {
         std.log.err("Failed to init preopens", .{});
         return err;
     };
 
-    var rt: zio.Runtime = undefined;
-    rt.initStatic(gpa, .{
+    zio_runtime.initStatic(gpa, .{
         .executors = .auto,
     }) catch |err| {
         std.log.err("Failed to initialize ZIO runtime", .{});
         return err;
     };
-    defer rt.deinit();
+    defer zio_runtime.deinit();
 
-    utils.translation.init(arena.allocator()) catch |err| {
+    utils.translation.init(arena) catch |err| {
         std.log.err("Failed to initialize en_us translation table", .{});
         return err;
     };
 
-    const io = rt.blockingIo();
+    const io = zio_runtime.blockingIo();
+
+    // const si= std.debug.getSelfDebugInfo() catch unreachable;
+    // _=try si.getModuleName(io, @intFromPtr(&main));
+    // _=try si.getModuleName(io, @intFromPtr(&crypto.EVP_PKEY_CTX_new_id));
 
     var main_fut = io.async(asyncMain, .{ .{
         .minimal = init,
-        .arena = &arena,
+        .arena = &global_arena,
         .gpa = gpa,
-        .io = rt.io(),
+        .io = zio_runtime.io(),
         .environ_map = &environ_map,
         .preopens = preopens,
-    }, &rt });
+    }, &zio_runtime });
 
     return main_fut.await(io);
 }

@@ -10,8 +10,8 @@
             .hash = "openssl-3.6.0-wZcA73uP8QHT8CNa45HlKpMb3ReSXH9gqLwHOKp5m8_y",
         },
         .zio = .{
-            .url = "git+https://github.com/lalinsky/zio.git#3bbd74d68a889e5d4da7274afdc7c7617ec614d6",
-            .hash = "zio-0.19.0-xHbVVMFBLACx1T0028HttNTseV6bDeL0AI4id51AHx57",
+            .url = "git+https://github.com/lalinsky/zio.git?ref=v0.20.0#eccab30c757e1581af5add30a88cddf105d27cd9",
+            .hash = "zio-0.20.0-xHbVVI4kLwCrl85NKhbOHM9TGXag6V7XXHoerMk29jLw",
         },
     },
 

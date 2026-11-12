@@ -339,6 +339,7 @@ fn readEntry(self: *Connection, allocator: Allocator, start_event: *zio.Event) C
                 error.OutOfMemory,
                 => |err| err,
             };
+            if (err == error.Disconnected) break;
             logger.debug("[{f}] Error while reading: {t}", .{ self, err });
             return err;
         };
@@ -388,6 +389,7 @@ fn writeEntry(self: *Connection, allocator: Allocator, start_event: *zio.Event) 
                 },
                 error.Disconnected => |err| err,
             };
+            if (err == error.Disconnected) break;
             return err;
         };
     }
@@ -404,6 +406,7 @@ fn tickEntry(self: *Connection, allocator: Allocator, start_event: *zio.Event) T
     logger.debug("[{f}] Started ticking", .{self});
 
     const io = self.runtime.io();
+    // TODO: Tick synchronization
     while (io.sleep(.fromMilliseconds(50), .boot)) {
         try self.lock();
         defer self.unlock();
@@ -451,13 +454,6 @@ fn connectionHandlerInner(self: *Connection, allocator: Allocator) !void {
     self.send_state.channel.close(.graceful);
     self.writer_state.state.store(.closing, .monotonic);
     self.reader_state.state.store(.closing, .monotonic);
-
-    zio.beginShield();
-    while (self.writer_state.state.load(.monotonic) != .closed) {
-        std.atomic.spinLoopHint();
-        zio.maybeYield() catch unreachable;
-    }
-    zio.endShield();
 
     while (res) |result| : (res = select.cancel()) {
         switch (result) {
@@ -589,12 +585,7 @@ fn writeConnection(self: *Connection, allocator: Allocator) !void {
         error.Canceled => |err| return err,
         error.Closed => return error.Disconnected,
     };
-    while (pnode) |packet| : ({
-        pnode = self.send_state.channel.tryReceive() catch |e| switch (e) {
-            error.Closed => return error.Disconnected,
-            error.WouldBlock => null,
-        };
-    }) {
+    while (pnode) |packet| : (pnode = self.send_state.channel.tryReceive() catch null) {
         defer allocator.free(packet.getBytes());
         const bytes = packet.getData();
 
@@ -1004,8 +995,11 @@ pub const HashContext = struct {
 };
 
 pub const VTable = struct {
+    /// Called when the server needs to inform the client why they're getting disconnected.
     disconnect: *const DisconnectCallbackFn = noDisconnectMessage,
+    /// Called when the interface needs to inform clients why they're getting disconnected.
     deinit: *const DeinitCallbackFn = noDeinit,
+    /// Called every ~50ms.
     tick: *const TickCallbackFn = noTick,
 };
 
@@ -1085,11 +1079,20 @@ pub fn init(self: *Connection, allocator: Allocator, group: *Io.Group, options: 
 }
 
 pub fn acquire(self: *Connection) *Connection {
+    // freezes, thanks bro
+    // var buf: [4]usize = undefined;
+    // const st = std.debug.captureCurrentStackTrace(.{ .first_address = @returnAddress() }, &buf);
+    // logger.debug("{d} frames, {d} skipped", .{ st.return_addresses.len, st.skipped });
+    // logger.debug("acquire at: {f}", .{std.debug.FormatStackTrace{ .stack_trace = st, .terminal_mode = .escape_codes }});
     self.refcount.acquire();
     return self;
 }
 
 pub fn release(self: *Connection, allocator: Allocator) void {
+    // var buf: [4]usize = undefined;
+    // const st = std.debug.captureCurrentStackTrace(.{ .first_address = @returnAddress() }, &buf);
+    // logger.debug("{d} frames, {d} skipped", .{ st.return_addresses.len, st.skipped });
+    // logger.debug("acquire at: {f}", .{std.debug.FormatStackTrace{ .stack_trace = st, .terminal_mode = .escape_codes }});
     if (self.refcount.release()) {
         assert(self.tryLock()); // Nice lifetimes management bro...
         self.deinit(allocator);

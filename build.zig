@@ -262,6 +262,7 @@ pub fn build(b: *Build) !void {
         .optimize = optimize,
         .link_libc = false,
         .error_tracing = true,
+        .strip = false,
         .imports = &.{
             .{ .name = "zio", .module = zio_mod },
             .{ .name = "crypto", .module = crypto_mod },
