@@ -224,6 +224,7 @@ broadcast: struct {
 /// Connections in the play phase.
 players_mutex: zio.Mutex,
 players: std.ArrayList(*Connection),
+player_count: std.atomic.Value(u32),
 next_entity_id: std.atomic.Value(i32),
 accept_coro: Io.Future(CoroAccpetError!void),
 acceptv6_coro: Io.Future(CoroAccpetError!void),
@@ -492,6 +493,7 @@ pub const PlayConnection = struct {
         {
             owner.players_mutex.lockUncancelable();
             defer owner.players_mutex.unlock();
+            _ = owner.player_count.fetchSub(1, .monotonic);
 
             for (owner.players.items, 0..) |player, i| {
                 if (player == conn) {
@@ -598,10 +600,9 @@ pub fn init(self: *Server, options: InitOptions) InitError!void {
             .coro = .{ .any_future = null, .result = {} },
         },
 
-        .connections_mutex = .init,
-        .connections = .empty,
         .players_mutex = .init,
         .players = .empty,
+        .player_count = .init(0),
         .next_entity_id = .init(1),
         .accept_coro = .{ .any_future = null, .result = {} },
         .acceptv6_coro = .{ .any_future = null, .result = {} },
@@ -646,6 +647,15 @@ pub fn init(self: *Server, options: InitOptions) InitError!void {
 pub fn deinit(self: *Server) void {
     const io = self.runtime.io();
 
+    if (false) { // somehow this causes Connection's writeEntry to hang ? i'm lowk fried tho, might investigate next
+        self.players_mutex.lockUncancelable();
+        defer self.players_mutex.unlock();
+
+        for (self.players.items) |conn| {
+            conn.disconnect(.{ .static = &.server_shutdown });
+        }
+    }
+
     self.deinitBroadcast();
 
     self.group.cancel(io);
@@ -668,23 +678,10 @@ pub fn deinit(self: *Server) void {
         }, io);
     }
 
-    self.connections_mutex.lockUncancelable();
-    var conn_it = self.connections.keyIterator();
-    while (conn_it.next()) |conn_ptr| {
-        const conn = conn_ptr.*;
-
-        conn.release(self.allocator);
-    }
-    self.connections.deinit(self.allocator);
     self.players.deinit(self.allocator);
 
     crypto.EVP_PKEY_free(self.rsa_key);
     self.allocator.free(self.public_key_bytes);
-}
-
-pub fn close(self: *Server) !void {
-    _ = self; // autofix
-
 }
 
 pub fn addressAlt(self: *const Server) AddressAlt {
@@ -741,7 +738,7 @@ pub fn @"serverbound/status/status_request"(conn: *Connection, reader: *Io.Reade
 
     const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
 
-    const count = @atomicLoad(u32, &owned.owner.connections.size, .monotonic);
+    const count = @atomicLoad(u32, &owned.owner.player_count.load(.monotonic), .monotonic);
 
     try conn.sendPacket(
         params.toAllocPair(),
@@ -986,6 +983,7 @@ pub fn @"serverbound/configuration/select_known_packs"(conn: *Connection, reader
     const registry_data = net.packets.registry_data_s2c;
     const Entry = @typeInfo(@FieldType(registry_data.getZigType(), "entries")).pointer.child;
     const apair = params.toAllocPair();
+    // TODO: Pre-compute that when reloading datapacks and shii
     for (registries.synchronized) |registry| {
         const entries = try apair.arena.alloc(Entry, registry.entries.len);
         for (entries, registry.entries) |*entry, id| {
@@ -1140,11 +1138,12 @@ fn joinWorld(conn: *Connection, apair: net.PacketType.AllocPair) Connection.Read
     owner.players_mutex.lockUncancelable();
     defer owner.players_mutex.unlock();
     try owner.players.append(owner.allocator, conn);
+    _ = owner.player_count.fetchAdd(1, .monotonic);
 
     // Same as vanilla's `PlayerList.placeNewPlayer`: everyone gets the new player, the new player
     // gets everyone. The client also needs its own entry, it's where it gets its game mode from.
     const player_info = net.packets.player_info_initialize_s2c;
-    const PlayerEntry = net.packets.PlayerInfoEntry.getZigType();
+    const PlayerEntry = net.packets.player_info_entry.getZigType();
     const all_actions: std.EnumSet(net.packets.PlayerInfoAction) = .full;
 
     var new_entry = [_]PlayerEntry{playerInfoEntry(playing)};
@@ -1172,7 +1171,7 @@ fn joinWorld(conn: *Connection, apair: net.PacketType.AllocPair) Connection.Read
     owner.broadcastSystemChatLocked(apair, message);
 }
 
-fn playerInfoEntry(playing: *const PlayConnection) net.packets.PlayerInfoEntry.getZigType() {
+fn playerInfoEntry(playing: *const PlayConnection) net.packets.player_info_entry.getZigType() {
     return .{
         .profile = playing.profile,
         .chat_session = null,

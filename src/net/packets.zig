@@ -533,7 +533,7 @@ pub const ChatSession = StructuredPacket.getType(.{
     },
 });
 /// A player in `player_info_initialize_s2c`, with every action's data in the actions' order.
-pub const PlayerInfoEntry = StructuredPacket.getType(.{
+pub const player_info_entry = StructuredPacket.getType(.{
     .name = "PlayerInfoEntry",
     .fields = &.{
         // The uuid, then add_player's name and properties, same bytes as a game profile
@@ -560,7 +560,7 @@ pub const player_info_initialize_s2c = StructuredPacket.getType(.{
     .fields = &.{
         // A fixed `java.util.BitSet` of 8 bits, all set
         .{ .name = "actions", .type = .{ .enum_set = .of(PlayerInfoAction, .u8) } },
-        .{ .name = "players", .type = .prefixedArray(PlayerInfoEntry) },
+        .{ .name = "players", .type = .prefixedArray(player_info_entry) },
     },
 });
 pub const player_info_remove_s2c = PacketType.prefixedArray(.uuid);
@@ -629,7 +629,7 @@ test "player_info_initialize_s2c size" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var players = [_]PlayerInfoEntry.getZigType(){.{
+    var players = [_]player_info_entry.getZigType(){.{
         .profile = try .validate("sioworker", .{ .value = 0 }),
         .chat_session = null,
         .game_mode = .spectator,
