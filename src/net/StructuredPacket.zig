@@ -644,7 +644,7 @@ pub const Type = union(enum) {
 
     pub inline fn default(comptime self: Type) self.getZigType() {
         return comptime switch (self) {
-            .custom => |c| @as(*const c.type, @ptrCast(@alignCast(c.default_value_ptr))),
+            .custom => |c| @as(*const c.type, @ptrCast(@alignCast(c.default_value_ptr))).*,
             .structured => |s| {
                 var res: self.getZigType() = undefined;
                 for (s.fields) |f| {

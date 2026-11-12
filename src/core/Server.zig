@@ -8,6 +8,7 @@ const packets = @import("packets");
 const registries = @import("registries");
 const crypto = @import("crypto");
 const core = @import("core.zig");
+const World = core.world.World;
 
 const Io = std.Io;
 const Connection = net.Connection;
@@ -226,6 +227,7 @@ players_mutex: zio.Mutex,
 players: std.ArrayList(*Connection),
 player_count: std.atomic.Value(u32),
 next_entity_id: std.atomic.Value(i32),
+world: World,
 accept_coro: Io.Future(CoroAccpetError!void),
 acceptv6_coro: Io.Future(CoroAccpetError!void),
 
@@ -241,7 +243,7 @@ pub const server_id_header = "gecko_";
 
 pub const InitError = error{
     EncryptionSetupFailed,
-} || Io.ConcurrentError || Io.net.IpAddress.ListenError || Allocator.Error;
+} || Io.ConcurrentError || Io.net.IpAddress.ListenError || Allocator.Error || World.Error;
 
 pub const InitOptions = struct {
     // packet_registry: *const net.PacketRegistry,
@@ -252,6 +254,7 @@ pub const InitOptions = struct {
     max_connections: u31 = Io.net.default_kernel_backlog,
     compression_threshold: u31 = 256,
     broadcast: bool = false,
+    seed: i64 = 0,
 };
 
 pub const AddressAlt = struct {
@@ -582,6 +585,9 @@ pub fn init(self: *Server, options: InitOptions) InitError!void {
     };
     errdefer options.allocator.free(der);
 
+    var world: World = try .init(options.allocator, options.seed);
+    errdefer world.deinit();
+
     self.* = .{
         .packet_registry = comptime &packets.registry(net.PacketRegistry, Server),
         .allocator = options.allocator,
@@ -604,6 +610,7 @@ pub fn init(self: *Server, options: InitOptions) InitError!void {
         .players = .empty,
         .player_count = .init(0),
         .next_entity_id = .init(1),
+        .world = world,
         .accept_coro = .{ .any_future = null, .result = {} },
         .acceptv6_coro = .{ .any_future = null, .result = {} },
 
@@ -679,6 +686,7 @@ pub fn deinit(self: *Server) void {
     }
 
     self.players.deinit(self.allocator);
+    self.world.deinit();
 
     crypto.EVP_PKEY_free(self.rsa_key);
     self.allocator.free(self.public_key_bytes);
@@ -1060,20 +1068,19 @@ pub fn @"serverbound/configuration/finish_configuration"(conn: *Connection, read
     }
 
     try joinWorld(conn, params.toAllocPair());
+    try sendChunks(conn, params.toAllocPair());
 }
 
 //=====================play===========================//
 
-/// An empty world, no chunks are ever sent.
-const limbo = struct {
+/// Everyone's in the overworld, around its origin.
+const overworld = struct {
     const dimension = "minecraft:overworld";
     const dimension_type = syncedEntryIndex("minecraft:dimension_type", "minecraft:overworld");
-    /// Spectators don't wait for the chunk they're in to leave the loading screen, see
-    /// the client's `LevelLoadTracker`.
-    const game_mode: net.packets.GameMode = .spectator;
-    const x = 0.5;
-    const y = 100.0;
-    const z = 0.5;
+    const game_mode: net.packets.GameMode = .creative;
+    /// Chunks around the spawn that are sent, they never change after that.
+    const view_distance = 6;
+    const spawn_chunk: World.Position = .{ .x = 0, .z = 0 };
     // LEVEL_CHUNKS_LOAD_START in vanilla's `ClientboundGameEventPacket`
     const level_chunks_load_start = 13;
 };
@@ -1094,35 +1101,38 @@ fn joinWorld(conn: *Connection, apair: net.PacketType.AllocPair) Connection.Read
     const owner = owned.owner;
     const playing = owned.data.play;
 
-    var dimensions = [_]utils.Identifier{.literal(limbo.dimension)};
+    // On top of the first column of the spawn chunk
+    const spawn_y = try owner.world.surfaceAt(overworld.spawn_chunk);
+
+    var dimensions = [_]utils.Identifier{.literal(overworld.dimension)};
     try conn.sendPacket(apair, "login", net.packets.login_s2c, .{
         .entity_id = playing.entity_id,
         .hardcore = false,
         .dimensions = &dimensions,
         .max_players = 20,
-        .view_distance = 2,
-        .simulation_distance = 2,
+        .view_distance = overworld.view_distance,
+        .simulation_distance = overworld.view_distance,
         .reduced_debug_info = false,
         .show_death_screen = true,
         .limited_crafting = false,
-        .dimension_type = limbo.dimension_type,
-        .dimension = .literal(limbo.dimension),
-        .hashed_seed = 0,
-        .game_mode = limbo.game_mode,
+        .dimension_type = overworld.dimension_type,
+        .dimension = .literal(overworld.dimension),
+        .hashed_seed = owner.world.generation.zoom_seed,
+        .game_mode = overworld.game_mode,
         .previous_game_mode = 0,
         .debug = false,
-        .flat = true,
+        .flat = false,
         .death_location = null,
         .portal_cooldown = 0,
-        .sea_level = 63,
+        .sea_level = owner.world.generation.settings.sea_level,
         .online_mode = false,
         .enforces_secure_chat = false,
     });
     try conn.sendPacket(apair, "player_position", net.packets.player_position_s2c, .{
         .teleport_id = 1,
-        .x = limbo.x,
-        .y = limbo.y,
-        .z = limbo.z,
+        .x = @as(f64, @floatFromInt(overworld.spawn_chunk.x * 16)) + 0.5,
+        .y = @floatFromInt(spawn_y),
+        .z = @as(f64, @floatFromInt(overworld.spawn_chunk.z * 16)) + 0.5,
         .velocity_x = 0,
         .velocity_y = 0,
         .velocity_z = 0,
@@ -1131,7 +1141,7 @@ fn joinWorld(conn: *Connection, apair: net.PacketType.AllocPair) Connection.Read
         .flags = .empty,
     });
     try conn.sendPacket(apair, "game_event", net.packets.game_event_s2c, .{
-        .event = limbo.level_chunks_load_start,
+        .event = overworld.level_chunks_load_start,
         .value = 0,
     });
 
@@ -1171,11 +1181,42 @@ fn joinWorld(conn: *Connection, apair: net.PacketType.AllocPair) Connection.Read
     owner.broadcastSystemChatLocked(apair, message);
 }
 
+/// Every chunk in view of the spawn, the closest ones first.
+fn sendChunks(conn: *Connection, apair: net.PacketType.AllocPair) Connection.ReadCallbackError!void {
+    const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
+    const world = &owned.owner.world;
+    const center = overworld.spawn_chunk;
+
+    try conn.sendPacket(apair, "set_chunk_cache_center", net.packets.set_chunk_cache_center_s2c, .{ .x = center.x, .z = center.z });
+    try conn.sendPacket(apair, "chunk_batch_start", net.packets.chunk_batch_start_s2c, .{});
+    var count: i32 = 0;
+    var ring: i32 = 0;
+    while (ring <= overworld.view_distance) : (ring += 1) {
+        var dz: i32 = -ring;
+        while (dz <= ring) : (dz += 1) {
+            var dx: i32 = -ring;
+            while (dx <= ring) : (dx += 1) {
+                if (@max(@abs(dx), @abs(dz)) != ring) continue;
+                const pos: World.Position = .{ .x = center.x + dx, .z = center.z + dz };
+                try conn.sendPacket(apair, "level_chunk_with_light", net.packets.level_chunk_with_light_s2c, .{
+                    .x = pos.x,
+                    .z = pos.z,
+                    .data = try world.encodedChunk(pos),
+                });
+                count += 1;
+                // Generating takes a while, the other connections still have to run
+                try zio.maybeYield();
+            }
+        }
+    }
+    try conn.sendPacket(apair, "chunk_batch_finished", net.packets.chunk_batch_finished_s2c, count);
+}
+
 fn playerInfoEntry(playing: *const PlayConnection) net.packets.player_info_entry.getZigType() {
     return .{
         .profile = playing.profile,
         .chat_session = null,
-        .game_mode = limbo.game_mode,
+        .game_mode = overworld.game_mode,
         .listed = true,
         .latency = @intCast(@min(playing.common.latency, std.math.maxInt(i32))),
         .display_name = null,

@@ -11,7 +11,7 @@ x: i32,
 z: i32,
 min_y: i32,
 height: i32,
-/// `y + (x + z * 16) * height`, like a `Volume` of the chunk.
+/// `y + (x + z * 16) * height`, like a `Volume` of the chunk. Empty until the terrain is generated.
 states: []StateId,
 /// One per 4x4x4 blocks, `y + (x + z * 4) * (height / 4)`.
 biomes: []data.BiomeId,
@@ -19,12 +19,22 @@ biomes: []data.BiomeId,
 surface: [256]i32,
 
 pub fn init(gpa: Allocator, x: i32, z: i32, min_y: i32, height: i32) Allocator.Error!Chunk {
-    const states = try gpa.alloc(StateId, @intCast(16 * 16 * height));
-    errdefer gpa.free(states);
     const biomes = try gpa.alloc(data.BiomeId, @intCast(4 * 4 * @divExact(height, 4)));
-    @memset(states, blocks.air);
     @memset(biomes, 0);
-    return .{ .x = x, .z = z, .min_y = min_y, .height = height, .states = states, .biomes = biomes, .surface = @splat(min_y) };
+    return .{ .x = x, .z = z, .min_y = min_y, .height = height, .states = &.{}, .biomes = biomes, .surface = @splat(min_y) };
+}
+
+/// Makes room for the blocks, all air.
+pub fn allocStates(self: *Chunk, gpa: Allocator) Allocator.Error!void {
+    if (self.states.len != 0) return;
+    self.states = try gpa.alloc(StateId, @intCast(16 * 16 * self.height));
+    @memset(self.states, blocks.air);
+}
+
+/// Only the biomes are kept, what the chunks next to it need.
+pub fn freeStates(self: *Chunk, gpa: Allocator) void {
+    gpa.free(self.states);
+    self.states = &.{};
 }
 
 pub fn deinit(self: *Chunk, gpa: Allocator) void {

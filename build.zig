@@ -234,6 +234,8 @@ pub fn build(b: *Build) !void {
             "net",
             "registries",
             "packets",
+            "block_states",
+            "worldgen",
         },
     });
     _ = core_mod;

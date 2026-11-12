@@ -73,6 +73,7 @@ pub fn buildTerrain(state: *const RandomState, gpa: Allocator, chunk: *Chunk, ne
 
 /// The shape of the terrain: the default block where the density is above 0 (`doFill`).
 pub fn fill(state: *const RandomState, ctx: *density.Context, chunk: *Chunk) Allocator.Error!void {
+    try chunk.allocStates(ctx.gpa);
     const volume: Volume = .{ .size_x = 16, .size_y = chunk.height, .size_z = 16, .min_x = chunk.x * 16, .min_y = chunk.min_y, .min_z = chunk.z * 16 };
     const densities = try ctx.acquire(volume);
     defer ctx.release(densities);
