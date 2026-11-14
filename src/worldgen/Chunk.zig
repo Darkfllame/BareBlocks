@@ -7,6 +7,10 @@ const data = @import("data.zig");
 const Allocator = std.mem.Allocator;
 const StateId = blocks.StateId;
 
+fn index(self: *const Chunk, x: i32, y: i32, z: i32) usize {
+    return @intCast((y - self.min_y) + (x + z * 16) * self.height);
+}
+
 x: i32,
 z: i32,
 min_y: i32,
@@ -41,10 +45,6 @@ pub fn deinit(self: *Chunk, gpa: Allocator) void {
     gpa.free(self.states);
     gpa.free(self.biomes);
     self.* = undefined;
-}
-
-fn index(self: *const Chunk, x: i32, y: i32, z: i32) usize {
-    return @intCast((y - self.min_y) + (x + z * 16) * self.height);
 }
 
 /// Local x and z, world y. Air outside of the build height.

@@ -347,7 +347,7 @@ pub const Token = union(TokenType) {
     double: f64,
     string: []const u8,
     /// Only emitted by text formats (json). Fields with a `null` value are considered absent.
-    /// 
+    ///
     /// TODO: Tweak existing deserialize function to handle this when not using FieldGatherer
     null,
     /// The length field allows readers to pre-allocate memory based upon the given type.

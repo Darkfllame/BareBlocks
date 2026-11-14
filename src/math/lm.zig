@@ -1341,7 +1341,7 @@ pub const Quatf = Quat(f32);
 pub const Quatd = Quat(f64);
 
 pub fn lerp(comptime T: type, a: T, b: T, t: T) T {
-    return a + (b - a) * t;
+    return @mulAdd(T, (b - a), t, a);
 }
 
 inline fn isLMTypeInner(comptime T: type, comptime LM_TYPE: LMType) ?Type {

@@ -1235,6 +1235,13 @@ fn broadcastSystemChatLocked(self: *Server, apair: net.PacketType.AllocPair, mes
     }
 }
 
+/// For packets a client keeps sending while idling, they don't do anything yet.
+fn ignorePacket(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
+    _ = conn;
+    _ = params;
+    _ = try reader.discardRemaining();
+}
+
 pub const @"serverbound/play/keep_alive" = ConfigPlayCommon.handleCommonKeepAlive;
 
 pub fn @"serverbound/play/accept_teleportation"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
@@ -1275,13 +1282,6 @@ pub fn @"serverbound/play/chat_command"(conn: *Connection, reader: *Io.Reader, p
         .content = .text("Commands aren't implemented yet", .{}),
         .overlay = false,
     });
-}
-
-/// For packets a client keeps sending while idling, they don't do anything yet.
-fn ignorePacket(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
-    _ = conn;
-    _ = params;
-    _ = try reader.discardRemaining();
 }
 
 pub const @"serverbound/play/attack" = ignorePacket;

@@ -53,6 +53,48 @@ const MixinHooksProvider = struct {
     }
 };
 
+fn downloadMCExec(b: *Build) *Step.Compile {
+    const download_jar_mod = b.createModule(.{
+        .root_source_file = b.path("build/mc_downloader.zig"),
+        .target = b.resolveTargetQuery(.{}),
+        .optimize = .Debug,
+    });
+    const download_jar_exe = b.addExecutable(.{
+        .name = "mc_downloader",
+        .root_module = download_jar_mod,
+    });
+    return download_jar_exe;
+}
+
+fn genDataMCExec(b: *Build) *Step.Compile {
+    const gendata_mod = b.createModule(.{
+        .root_source_file = b.path("build/gen_data.zig"),
+        .target = b.resolveTargetQuery(.{}),
+        .optimize = .Debug,
+    });
+    const gendata_exe = b.addExecutable(.{
+        .name = "gen_data",
+        .root_module = gendata_mod,
+    });
+    return gendata_exe;
+}
+
+fn mcDatagenDir(b: *Build, java_path: []const u8, jar_path: LazyPath, _version: []const u8) LazyPath {
+    const data_gen_dir = mkdir(b, b.fmt("run_datagen_{s}", .{_version}));
+    const run_mc = b.addSystemCommand(&.{ java_path, "-DbundlerMainClass=net.minecraft.data.Main", "-jar" });
+    run_mc.setCwd(data_gen_dir);
+    run_mc.addFileArg(jar_path);
+    _ = run_mc.captureStdOut(.{});
+    _ = run_mc.captureStdErr(.{});
+    run_mc.addArgs(&.{ "--all", "--output" });
+    return run_mc.addOutputDirectoryArg("generated");
+}
+
+fn mkdir(b: *Build, path: []const u8) LazyPath {
+    b.root.createDirPath(b.graph.io, path) catch @panic("Failed to make path");
+    return b.path(path);
+}
+
 pub fn build(b: *Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -355,45 +397,4 @@ pub fn build(b: *Build) !void {
     proj.makeTests(b, test_step, check_step, use_llvm);
 
     proj.resolveLocalImports();
-}
-
-fn downloadMCExec(b: *Build) *Step.Compile {
-    const download_jar_mod = b.createModule(.{
-        .root_source_file = b.path("build/mc_downloader.zig"),
-        .target = b.resolveTargetQuery(.{}),
-        .optimize = .Debug,
-    });
-    const download_jar_exe = b.addExecutable(.{
-        .name = "mc_downloader",
-        .root_module = download_jar_mod,
-    });
-    return download_jar_exe;
-}
-fn genDataMCExec(b: *Build) *Step.Compile {
-    const gendata_mod = b.createModule(.{
-        .root_source_file = b.path("build/gen_data.zig"),
-        .target = b.resolveTargetQuery(.{}),
-        .optimize = .Debug,
-    });
-    const gendata_exe = b.addExecutable(.{
-        .name = "gen_data",
-        .root_module = gendata_mod,
-    });
-    return gendata_exe;
-}
-
-fn mcDatagenDir(b: *Build, java_path: []const u8, jar_path: LazyPath, _version: []const u8) LazyPath {
-    const data_gen_dir = mkdir(b, b.fmt("run_datagen_{s}", .{_version}));
-    const run_mc = b.addSystemCommand(&.{ java_path, "-DbundlerMainClass=net.minecraft.data.Main", "-jar" });
-    run_mc.setCwd(data_gen_dir);
-    run_mc.addFileArg(jar_path);
-    _ = run_mc.captureStdOut(.{});
-    _ = run_mc.captureStdErr(.{});
-    run_mc.addArgs(&.{ "--all", "--output" });
-    return run_mc.addOutputDirectoryArg("generated");
-}
-
-fn mkdir(b: *Build, path: []const u8) LazyPath {
-    b.root.createDirPath(b.graph.io, path) catch @panic("Failed to make path");
-    return b.path(path);
 }

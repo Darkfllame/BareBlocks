@@ -14,9 +14,7 @@ const assert = std.debug.assert;
 // NOTE: pre-loaded states. So "setting" a property just results in taking a different state from these.
 // NOTE: They are addressed as neighbours[propertyIndex][valueIndex].
 
-pub const PropertyType = enum {
-    
-};
+pub const PropertyType = enum {};
 
 pub const PropertiesValues = opaque {};
 
@@ -85,7 +83,6 @@ pub const Property = struct {
         /// u8's gives a 32 bytes addressing capability.
         bit_offset: u8,
         byte_mask: u8,
-
 
         pub fn valueFrom(comptime self: Compiled, value: anytype) Property.Value {
             return self.base.valueFrom(value);

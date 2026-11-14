@@ -26,11 +26,6 @@ pub const Property = struct {
 
     pub const Kind = enum { boolean, integer, enumeration };
 };
-
-pub fn property(id: PropertyId) *const Property {
-    return &properties[@backingInt(id)];
-}
-
 pub const Block = struct {
     name: []const u8,
     first_state: StateId,
@@ -77,6 +72,10 @@ pub const Layout = struct {
         return @intCast(@as(i64, id) + (@as(i64, value_index) - old) * self.stride);
     }
 };
+
+pub fn property(id: PropertyId) *const Property {
+    return &properties[@backingInt(id)];
+}
 
 pub fn blockOf(id: StateId) *const Block {
     return &blocks[state_blocks[id]];

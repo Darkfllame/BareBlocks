@@ -46,3 +46,9 @@ pub const Mat4f = lm.Mat4f;
 pub const Mat4d = lm.Mat4d;
 pub const Quatf = lm.Quatf;
 pub const Quatd = lm.Quatd;
+
+pub const lerp = lm.lerp;
+pub const isVec = lm.isVec;
+pub const isMat = lm.isMat;
+pub const isQuat = lm.isQuat;
+pub const supportsArithmetics = lm.supportsArithmetics;

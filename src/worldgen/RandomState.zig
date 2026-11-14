@@ -16,7 +16,57 @@ const Allocator = std.mem.Allocator;
 const Sampler = density.Sampler;
 const StateId = blocks.StateId;
 
-pub const Error = Compiler.Error || error{UnknownBlock};
+fn block(name: []const u8) error{UnknownBlock}!StateId {
+    return blocks.find(name) orelse error.UnknownBlock;
+}
+
+/// `RandomState.getOrCreateRandomFactory`
+fn randomFactory(self: *const RandomState, name: []const u8) random.Positional {
+    var rand = self.positional.fromHashOf(name);
+    return random.forkPositional(&rand);
+}
+
+fn namedNoise(self: *RandomState, id: []const u8) Allocator.Error!*const noise.Noise {
+    return self.compiler.getNoise(data.noiseByName(id).?);
+}
+
+fn makeBands(rand: *random.Xoroshiro, bands: *[192]StateId, base_width: u32, state: StateId) void {
+    const count = rand.nextIntBetweenInclusive(6, 15);
+    for (0..@intCast(count)) |_| {
+        const width = base_width + rand.nextInt(3);
+        const start = rand.nextInt(bands.len);
+        var p: u32 = 0;
+        while (start + p < bands.len and p < width) : (p += 1) bands[start + p] = state;
+    }
+}
+
+/// `MaterialSystem.generateBands`
+fn generateBands(rand: *random.Xoroshiro) error{UnknownBlock}![192]StateId {
+    var bands: [192]StateId = @splat(try block("minecraft:terracotta"));
+    const light_gray = try block("minecraft:light_gray_terracotta");
+
+    var i: u32 = 0;
+    while (i < bands.len) : (i += 1) {
+        i += rand.nextInt(5) + 1;
+        if (i < bands.len) bands[i] = try block("minecraft:orange_terracotta");
+    }
+    makeBands(rand, &bands, 1, try block("minecraft:yellow_terracotta"));
+    makeBands(rand, &bands, 2, try block("minecraft:brown_terracotta"));
+    makeBands(rand, &bands, 1, try block("minecraft:red_terracotta"));
+
+    const white_count = rand.nextIntBetweenInclusive(9, 15);
+    var start: u32 = 0;
+    i = 0;
+    while (i < @as(u32, @intCast(white_count)) and start < bands.len) : ({
+        i += 1;
+        start += rand.nextInt(16) + 4;
+    }) {
+        bands[start] = try block("minecraft:white_terracotta");
+        if (start > 1 and rand.nextBoolean()) bands[start - 1] = light_gray;
+        if (start + 1 < bands.len and rand.nextBoolean()) bands[start + 1] = light_gray;
+    }
+    return bands;
+}
 
 arena: std.heap.ArenaAllocator,
 seed: i64,
@@ -62,6 +112,8 @@ temperature_noise: noise.Simplex,
 frozen_temperature_noise: [3]noise.Simplex,
 biome_info_noise: noise.Simplex,
 
+pub const Error = Compiler.Error || error{UnknownBlock};
+
 pub const Rule = union(enum) {
     none,
     block: StateId,
@@ -74,10 +126,6 @@ pub const Rule = union(enum) {
         filler_gap: *const Sampler,
     },
 };
-
-fn block(name: []const u8) error{UnknownBlock}!StateId {
-    return blocks.find(name) orelse error.UnknownBlock;
-}
 
 pub fn create(gpa: Allocator, seed: i64, settings: *const data.NoiseSettings) Error!*RandomState {
     const self = try gpa.create(RandomState);
@@ -169,57 +217,9 @@ pub fn destroy(self: *RandomState) void {
     gpa.destroy(self);
 }
 
-/// `RandomState.getOrCreateRandomFactory`
-fn randomFactory(self: *const RandomState, name: []const u8) random.Positional {
-    var rand = self.positional.fromHashOf(name);
-    return random.forkPositional(&rand);
-}
-
-fn namedNoise(self: *RandomState, id: []const u8) Allocator.Error!*const noise.Noise {
-    return self.compiler.getNoise(data.noiseByName(id).?);
-}
-
 /// A noise of a material condition, `create` made all of them.
 pub fn getNoise(self: *const RandomState, id: data.NoiseId) *const noise.Noise {
     return &self.compiler.noises[id].?;
-}
-
-fn makeBands(rand: *random.Xoroshiro, bands: *[192]StateId, base_width: u32, state: StateId) void {
-    const count = rand.nextIntBetweenInclusive(6, 15);
-    for (0..@intCast(count)) |_| {
-        const width = base_width + rand.nextInt(3);
-        const start = rand.nextInt(bands.len);
-        var p: u32 = 0;
-        while (start + p < bands.len and p < width) : (p += 1) bands[start + p] = state;
-    }
-}
-
-/// `MaterialSystem.generateBands`
-fn generateBands(rand: *random.Xoroshiro) error{UnknownBlock}![192]StateId {
-    var bands: [192]StateId = @splat(try block("minecraft:terracotta"));
-    const light_gray = try block("minecraft:light_gray_terracotta");
-
-    var i: u32 = 0;
-    while (i < bands.len) : (i += 1) {
-        i += rand.nextInt(5) + 1;
-        if (i < bands.len) bands[i] = try block("minecraft:orange_terracotta");
-    }
-    makeBands(rand, &bands, 1, try block("minecraft:yellow_terracotta"));
-    makeBands(rand, &bands, 2, try block("minecraft:brown_terracotta"));
-    makeBands(rand, &bands, 1, try block("minecraft:red_terracotta"));
-
-    const white_count = rand.nextIntBetweenInclusive(9, 15);
-    var start: u32 = 0;
-    i = 0;
-    while (i < @as(u32, @intCast(white_count)) and start < bands.len) : ({
-        i += 1;
-        start += rand.nextInt(16) + 4;
-    }) {
-        bands[start] = try block("minecraft:white_terracotta");
-        if (start > 1 and rand.nextBoolean()) bands[start - 1] = light_gray;
-        if (start + 1 < bands.len and rand.nextBoolean()) bands[start + 1] = light_gray;
-    }
-    return bands;
 }
 
 /// A biome's temperature at a block (`Biome.getHeightAdjustedTemperature`).

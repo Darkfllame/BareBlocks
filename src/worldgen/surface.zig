@@ -20,13 +20,6 @@ const min_int = std.math.minInt(i32);
 /// `DimensionType.WAY_BELOW_MIN_Y`: no stone under the block.
 const way_below_min_y = -2032 << 4;
 
-fn biomeId(comptime name: []const u8) data.BiomeId {
-    @setEvalBranchQuota(100_000);
-    return comptime for (data.biomes, 0..) |biome, i| {
-        if (std.mem.eql(u8, biome.id, name)) break @intCast(i);
-    } else @compileError("no biome named " ++ name);
-}
-
 /// What the rules can ask about the block they're deciding (`MaterialRuleContext`).
 const Context = struct {
     state: *const RandomState,
@@ -141,7 +134,7 @@ const Context = struct {
                 if (self.block_y >= false_at_and_above) return false;
                 const from: f64 = @floatFromInt(true_at_and_below);
                 const to: f64 = @floatFromInt(false_at_and_above);
-                const probability = math.lm.lerp(f64, 1.0, 0.0, (@as(f64, @floatFromInt(self.block_y)) - from) / (to - from));
+                const probability = math.lerp(f64, 1.0, 0.0, (@as(f64, @floatFromInt(self.block_y)) - from) / (to - from));
                 var rand = self.state.gradient_randoms[id].?.at(self.block_x, self.block_y, self.block_z);
                 return @as(f64, rand.nextFloat()) < probability;
             },
@@ -160,7 +153,7 @@ const Context = struct {
                 const secondary = if (c.secondary_depth_range == 0)
                     0
                 else
-                    java.toInt(math.lm.lerp(f64, 0.0, @floatFromInt(c.secondary_depth_range), (self.surfaceSecondary() - -1.0) / (1.0 - -1.0)));
+                    java.toInt(math.lerp(f64, 0.0, @floatFromInt(c.secondary_depth_range), (self.surfaceSecondary() - -1.0) / (1.0 - -1.0)));
                 return stone_depth <= 1 + c.offset + surface_depth + secondary;
             },
             .not => |inverted| return !try self.testCondition(inverted),
@@ -238,12 +231,11 @@ const Context = struct {
     }
 };
 
-/// The biome of a block: its quart's, or one next to it (`BiomeManager.getBiome`).
-pub fn biomeAt(state: *const RandomState, chunk: *const Chunk, neighbors: generator.Neighbors, x: i32, y: i32, z: i32) data.BiomeId {
-    const quart = climate.zoom(state.zoom_seed, x, y, z);
-    const dx = (quart[0] >> 2) - chunk.x;
-    const dz = (quart[2] >> 2) - chunk.z;
-    return neighbors[@intCast(dz + 1)][@intCast(dx + 1)].biome(quart[0], quart[1], quart[2]);
+fn biomeId(comptime name: []const u8) data.BiomeId {
+    @setEvalBranchQuota(100_000);
+    return comptime for (data.biomes, 0..) |biome, i| {
+        if (std.mem.eql(u8, biome.id, name)) break @intCast(i);
+    } else @compileError("no biome named " ++ name);
 }
 
 fn isStone(state: StateId) bool {
@@ -252,6 +244,85 @@ fn isStone(state: StateId) bool {
 
 fn height(chunk: *const Chunk, x: i32, z: i32) i32 {
     return chunk.surface[@intCast(x + z * 16)] - 1;
+}
+
+/// The stone pillars of eroded badlands.
+fn erodedBadlandsExtension(state: *const RandomState, chunk: *Chunk, x: i32, z: i32, column_height: i32) void {
+    const block_x: f64 = @floatFromInt(chunk.x * 16 + x);
+    const block_z: f64 = @floatFromInt(chunk.z * 16 + z);
+    const pillar_buffer = java.javaMin(
+        f64,
+        @abs(@as(f64, state.badlands_surface_noise.get(block_x, 0.0, block_z)) * 8.25),
+        state.badlands_pillar_noise.get(block_x * 0.2, 0.0, block_z * 0.2) * 15.0,
+    );
+    if (pillar_buffer <= 0.0) return;
+
+    const pillar_floor = @abs(@as(f64, state.badlands_pillar_roof_noise.get(block_x * 0.75, 0.0, block_z * 0.75)) * 1.5);
+    const extension_top = 64.0 + java.javaMin(f64, pillar_buffer * pillar_buffer * 2.5, @ceil(pillar_floor * 50.0) + 24.0);
+    const start_y = java.floor(extension_top);
+    if (column_height > start_y) return;
+
+    var y = start_y;
+    while (y >= chunk.min_y) : (y -= 1) {
+        const old = chunk.get(x, y, z);
+        if (blocks.isStoneBlock(old)) break;
+        if (blocks.isWater(old)) return;
+    }
+    y = start_y;
+    while (y >= chunk.min_y and blocks.isAir(chunk.get(x, y, z))) : (y -= 1) chunk.set(x, y, z, state.default_block);
+}
+
+/// The icebergs of frozen oceans.
+fn frozenOceanExtension(state: *const RandomState, chunk: *Chunk, min_surface_level: i32, biome: data.BiomeId, x: i32, z: i32, column_height: i32) Allocator.Error!void {
+    const sea_level = state.settings.sea_level;
+    const world_x = chunk.x * 16 + x;
+    const world_z = chunk.z * 16 + z;
+    const block_x: f64 = @floatFromInt(world_x);
+    const block_z: f64 = @floatFromInt(world_z);
+    const iceberg = java.javaMin(
+        f64,
+        @abs(@as(f64, state.iceberg_surface_noise.get(block_x, 0.0, block_z)) * 8.25),
+        state.iceberg_pillar_noise.get(block_x * 1.28, 0.0, block_z * 1.28) * 15.0,
+    );
+    if (iceberg <= 1.8) return;
+
+    const iceberg_roof = @abs(@as(f64, state.iceberg_pillar_roof_noise.get(block_x * 1.17, 0.0, block_z * 1.17)) * 1.5);
+    var top = java.javaMin(f64, iceberg * iceberg * 1.2, @ceil(iceberg_roof * 40.0) + 14.0);
+    // Melts a bit where it's warm
+    if (state.biomeTemperature(biome, world_x, sea_level, world_z) > 0.1) top -= 2.0;
+    if (top <= 2.0) return;
+
+    const extension_bottom = @as(f64, @floatFromInt(sea_level)) - top - 7.0;
+    top += @floatFromInt(sea_level);
+    const top_y = java.toInt(top);
+    const bottom_y = java.toInt(extension_bottom);
+
+    var rand = state.positional.at(world_x, 0, world_z);
+    const max_snow_depth = 2 + rand.nextInt(4);
+    const min_snow_height = sea_level + 18 + @as(i32, @intCast(rand.nextInt(10)));
+    var snow_depth: u32 = 0;
+    var y = @max(column_height, top_y + 1);
+    while (y >= min_surface_level) : (y -= 1) {
+        const old = chunk.get(x, y, z);
+        const in_air = blocks.isAir(old) and y < top_y and rand.nextDouble() > 0.01;
+        if (!in_air) {
+            if (!blocks.isWater(old) or y <= bottom_y or y >= sea_level or !(rand.nextDouble() > 0.15)) continue;
+        }
+        if (snow_depth <= max_snow_depth and y > min_snow_height) {
+            chunk.set(x, y, z, blocks.snow_block);
+            snow_depth += 1;
+        } else {
+            chunk.set(x, y, z, blocks.packed_ice);
+        }
+    }
+}
+
+/// The biome of a block: its quart's, or one next to it (`BiomeManager.getBiome`).
+pub fn biomeAt(state: *const RandomState, chunk: *const Chunk, neighbors: generator.Neighbors, x: i32, y: i32, z: i32) data.BiomeId {
+    const quart = climate.zoom(state.zoom_seed, x, y, z);
+    const dx = (quart[0] >> 2) - chunk.x;
+    const dz = (quart[2] >> 2) - chunk.z;
+    return neighbors[@intCast(dz + 1)][@intCast(dx + 1)].biome(quart[0], quart[1], quart[2]);
 }
 
 pub fn build(state: *const RandomState, ctx: *density.Context, gpa: Allocator, chunk: *Chunk, neighbors: generator.Neighbors) Allocator.Error!void {
@@ -342,77 +413,6 @@ pub fn build(state: *const RandomState, ctx: *density.Context, gpa: Allocator, c
             if (surface_biome == biomeId("minecraft:frozen_ocean") or surface_biome == biomeId("minecraft:deep_frozen_ocean")) {
                 try frozenOceanExtension(state, chunk, try context.minSurfaceLevel(), surface_biome, x, z, starting_height);
             }
-        }
-    }
-}
-
-/// The stone pillars of eroded badlands.
-fn erodedBadlandsExtension(state: *const RandomState, chunk: *Chunk, x: i32, z: i32, column_height: i32) void {
-    const block_x: f64 = @floatFromInt(chunk.x * 16 + x);
-    const block_z: f64 = @floatFromInt(chunk.z * 16 + z);
-    const pillar_buffer = java.javaMin(
-        f64,
-        @abs(@as(f64, state.badlands_surface_noise.get(block_x, 0.0, block_z)) * 8.25),
-        state.badlands_pillar_noise.get(block_x * 0.2, 0.0, block_z * 0.2) * 15.0,
-    );
-    if (pillar_buffer <= 0.0) return;
-
-    const pillar_floor = @abs(@as(f64, state.badlands_pillar_roof_noise.get(block_x * 0.75, 0.0, block_z * 0.75)) * 1.5);
-    const extension_top = 64.0 + java.javaMin(f64, pillar_buffer * pillar_buffer * 2.5, @ceil(pillar_floor * 50.0) + 24.0);
-    const start_y = java.floor(extension_top);
-    if (column_height > start_y) return;
-
-    var y = start_y;
-    while (y >= chunk.min_y) : (y -= 1) {
-        const old = chunk.get(x, y, z);
-        if (blocks.isStoneBlock(old)) break;
-        if (blocks.isWater(old)) return;
-    }
-    y = start_y;
-    while (y >= chunk.min_y and blocks.isAir(chunk.get(x, y, z))) : (y -= 1) chunk.set(x, y, z, state.default_block);
-}
-
-/// The icebergs of frozen oceans.
-fn frozenOceanExtension(state: *const RandomState, chunk: *Chunk, min_surface_level: i32, biome: data.BiomeId, x: i32, z: i32, column_height: i32) Allocator.Error!void {
-    const sea_level = state.settings.sea_level;
-    const world_x = chunk.x * 16 + x;
-    const world_z = chunk.z * 16 + z;
-    const block_x: f64 = @floatFromInt(world_x);
-    const block_z: f64 = @floatFromInt(world_z);
-    const iceberg = java.javaMin(
-        f64,
-        @abs(@as(f64, state.iceberg_surface_noise.get(block_x, 0.0, block_z)) * 8.25),
-        state.iceberg_pillar_noise.get(block_x * 1.28, 0.0, block_z * 1.28) * 15.0,
-    );
-    if (iceberg <= 1.8) return;
-
-    const iceberg_roof = @abs(@as(f64, state.iceberg_pillar_roof_noise.get(block_x * 1.17, 0.0, block_z * 1.17)) * 1.5);
-    var top = java.javaMin(f64, iceberg * iceberg * 1.2, @ceil(iceberg_roof * 40.0) + 14.0);
-    // Melts a bit where it's warm
-    if (state.biomeTemperature(biome, world_x, sea_level, world_z) > 0.1) top -= 2.0;
-    if (top <= 2.0) return;
-
-    const extension_bottom = @as(f64, @floatFromInt(sea_level)) - top - 7.0;
-    top += @floatFromInt(sea_level);
-    const top_y = java.toInt(top);
-    const bottom_y = java.toInt(extension_bottom);
-
-    var rand = state.positional.at(world_x, 0, world_z);
-    const max_snow_depth = 2 + rand.nextInt(4);
-    const min_snow_height = sea_level + 18 + @as(i32, @intCast(rand.nextInt(10)));
-    var snow_depth: u32 = 0;
-    var y = @max(column_height, top_y + 1);
-    while (y >= min_surface_level) : (y -= 1) {
-        const old = chunk.get(x, y, z);
-        const in_air = blocks.isAir(old) and y < top_y and rand.nextDouble() > 0.01;
-        if (!in_air) {
-            if (!blocks.isWater(old) or y <= bottom_y or y >= sea_level or !(rand.nextDouble() > 0.15)) continue;
-        }
-        if (snow_depth <= max_snow_depth and y > min_snow_height) {
-            chunk.set(x, y, z, blocks.snow_block);
-            snow_depth += 1;
-        } else {
-            chunk.set(x, y, z, blocks.packed_ice);
         }
     }
 }

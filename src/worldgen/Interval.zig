@@ -6,6 +6,41 @@ const Interval = @This();
 const std = @import("std");
 const java = @import("java.zig");
 
+fn fmin(a: f32, b: f32) f32 {
+    return java.javaMin(f32, a, b);
+}
+
+fn fmax(a: f32, b: f32) f32 {
+    return java.javaMax(f32, a, b);
+}
+
+fn mulBound(left: f32, right: f32) f32 {
+    return if (left == 0.0 or right == 0.0) 0.0 else left * right;
+}
+
+fn lerpValues(alpha: Interval, first: f32, second: f32) Interval {
+    if (alpha.isNai() or first != first or second != second) return nai;
+    if (std.math.isFinite(first) and std.math.isFinite(second)) {
+        return encapsulatingValues(first + mulBound(alpha.min, second - first), first + mulBound(alpha.max, second - first));
+    }
+    if (first == second) return .exact(first);
+    const new_min = lerpInfiniteBound(alpha.min, first, second);
+    const new_max = lerpInfiniteBound(alpha.max, first, second);
+    if (new_min != new_min or new_max != new_max) return nai;
+    return encapsulatingValues(new_min, new_max);
+}
+
+fn lerpInfiniteBound(alpha: f32, first: f32, second: f32) f32 {
+    const first_part = mulBound(1.0 - alpha, first);
+    const second_part = mulBound(alpha, second);
+    if (std.math.isInf(first_part) and std.math.isInf(second_part)) {
+        if (alpha <= 0.0) return if (second > first) -std.math.inf(f32) else std.math.inf(f32);
+        if (alpha >= 1.0) return if (second > first) std.math.inf(f32) else -std.math.inf(f32);
+        return std.math.nan(f32);
+    }
+    return first_part + second_part;
+}
+
 min: f32,
 max: f32,
 
@@ -32,14 +67,6 @@ pub fn symmetric(range: f32) Interval {
 
 pub fn contains(self: Interval, value: f32) bool {
     return value >= self.min and value <= self.max;
-}
-
-fn fmin(a: f32, b: f32) f32 {
-    return java.javaMin(f32, a, b);
-}
-
-fn fmax(a: f32, b: f32) f32 {
-    return java.javaMax(f32, a, b);
 }
 
 pub fn encapsulating(intervals: []const Interval) Interval {
@@ -73,10 +100,6 @@ pub fn sub(left: Interval, right: Interval) Interval {
     const max = left.max - right.min;
     if (min != min or max != max) return nai;
     return .of(min, max);
-}
-
-fn mulBound(left: f32, right: f32) f32 {
-    return if (left == 0.0 or right == 0.0) 0.0 else left * right;
 }
 
 pub fn mul(left: Interval, right: Interval) Interval {
@@ -158,29 +181,6 @@ pub fn lerp(alpha: Interval, first: Interval, second: Interval) Interval {
         lerpValues(alpha, first.min, second.max),
         lerpValues(alpha, first.max, second.max),
     });
-}
-
-fn lerpValues(alpha: Interval, first: f32, second: f32) Interval {
-    if (alpha.isNai() or first != first or second != second) return nai;
-    if (std.math.isFinite(first) and std.math.isFinite(second)) {
-        return encapsulatingValues(first + mulBound(alpha.min, second - first), first + mulBound(alpha.max, second - first));
-    }
-    if (first == second) return .exact(first);
-    const new_min = lerpInfiniteBound(alpha.min, first, second);
-    const new_max = lerpInfiniteBound(alpha.max, first, second);
-    if (new_min != new_min or new_max != new_max) return nai;
-    return encapsulatingValues(new_min, new_max);
-}
-
-fn lerpInfiniteBound(alpha: f32, first: f32, second: f32) f32 {
-    const first_part = mulBound(1.0 - alpha, first);
-    const second_part = mulBound(alpha, second);
-    if (std.math.isInf(first_part) and std.math.isInf(second_part)) {
-        if (alpha <= 0.0) return if (second > first) -std.math.inf(f32) else std.math.inf(f32);
-        if (alpha >= 1.0) return if (second > first) std.math.inf(f32) else -std.math.inf(f32);
-        return std.math.nan(f32);
-    }
-    return first_part + second_part;
 }
 
 test Interval {

@@ -9,17 +9,6 @@ const chunk_packet = @import("chunk_packet.zig");
 const Allocator = std.mem.Allocator;
 const Chunk = worldgen.Chunk;
 
-pub const Error = worldgen.RandomState.Error;
-pub const GetError = Allocator.Error || std.Io.Cancelable;
-
-allocator: Allocator,
-generation: *worldgen.RandomState,
-mutex: zio.Mutex,
-chunks: std.AutoHashMapUnmanaged(Position, *Entry),
-biome_search: worldgen.climate.ParameterList.Search,
-
-pub const Position = struct { x: i32, z: i32 };
-
 const Entry = struct {
     /// Only its biomes once it's encoded.
     chunk: Chunk,
@@ -28,28 +17,6 @@ const Entry = struct {
     /// The first y without blocks above it, of the chunk's first column.
     surface: i32 = 0,
 };
-
-pub fn init(allocator: Allocator, seed: i64) Error!World {
-    return .{
-        .allocator = allocator,
-        .generation = try .create(allocator, seed, worldgen.data.settingsByName("minecraft:overworld").?),
-        .mutex = .init,
-        .chunks = .empty,
-        .biome_search = .{},
-    };
-}
-
-pub fn deinit(self: *World) void {
-    var it = self.chunks.valueIterator();
-    while (it.next()) |entry| {
-        entry.*.chunk.deinit(self.allocator);
-        if (entry.*.encoded) |bytes| self.allocator.free(bytes);
-        self.allocator.destroy(entry.*);
-    }
-    self.chunks.deinit(self.allocator);
-    self.generation.destroy();
-    self.* = undefined;
-}
 
 /// The chunk with its biomes, `mutex` must be locked.
 fn biomes(self: *World, pos: Position) Allocator.Error!*Entry {
@@ -89,6 +56,39 @@ fn generated(self: *World, pos: Position) GetError!*const Entry {
     entry.encoded = try chunk_packet.encode(self.allocator, &entry.chunk);
     entry.surface = entry.chunk.surface[0];
     return entry;
+}
+
+allocator: Allocator,
+generation: *worldgen.RandomState,
+mutex: zio.Mutex,
+chunks: std.AutoHashMapUnmanaged(Position, *Entry),
+biome_search: worldgen.climate.ParameterList.Search,
+
+pub const Error = worldgen.RandomState.Error;
+pub const GetError = Allocator.Error || std.Io.Cancelable;
+
+pub const Position = struct { x: i32, z: i32 };
+
+pub fn init(allocator: Allocator, seed: i64) Error!World {
+    return .{
+        .allocator = allocator,
+        .generation = try .create(allocator, seed, worldgen.data.settingsByName("minecraft:overworld").?),
+        .mutex = .init,
+        .chunks = .empty,
+        .biome_search = .{},
+    };
+}
+
+pub fn deinit(self: *World) void {
+    var it = self.chunks.valueIterator();
+    while (it.next()) |entry| {
+        entry.*.chunk.deinit(self.allocator);
+        if (entry.*.encoded) |bytes| self.allocator.free(bytes);
+        self.allocator.destroy(entry.*);
+    }
+    self.chunks.deinit(self.allocator);
+    self.generation.destroy();
+    self.* = undefined;
 }
 
 /// The chunk like `net.packets.level_chunk_with_light_s2c` wants it, generated if it wasn't yet.

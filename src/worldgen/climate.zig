@@ -6,18 +6,6 @@ const data = @import("data.zig");
 
 const Allocator = std.mem.Allocator;
 
-/// Temperature, humidity, continentalness, erosion, depth, weirdness, and 0 for the biomes' offsets.
-pub const Target = [7]i64;
-
-/// `Climate.quantizeCoord`
-pub fn quantize(coord: f32) i64 {
-    return java.toLong(coord * 10000.0);
-}
-
-pub fn target(temperature: f32, humidity: f32, continentalness: f32, erosion: f32, depth: f32, weirdness: f32) Target {
-    return .{ quantize(temperature), quantize(humidity), quantize(continentalness), quantize(erosion), quantize(depth), quantize(weirdness), 0 };
-}
-
 const Range = struct {
     min: i64,
     max: i64,
@@ -66,6 +54,37 @@ const Node = struct {
         return closest.?;
     }
 };
+
+fn lcg(seed: i64, salt: i64) i64 {
+    return seed *% (seed *% 6364136223846793005 +% 1442695040888963407) +% salt;
+}
+
+fn fiddle(seed: i64) f64 {
+    const uniform = @as(f64, @floatFromInt(@mod(seed >> 24, 1024))) / 1024.0;
+    return (uniform - 0.5) * 0.9;
+}
+
+fn fiddledDistance(seed: i64, x: i32, y: i32, z: i32, distance_x: f64, distance_y: f64, distance_z: f64) f64 {
+    var rval = seed;
+    rval = lcg(rval, x);
+    rval = lcg(rval, y);
+    rval = lcg(rval, z);
+    rval = lcg(rval, x);
+    rval = lcg(rval, y);
+    rval = lcg(rval, z);
+    const fiddle_x = fiddle(rval);
+    rval = lcg(rval, seed);
+    const fiddle_y = fiddle(rval);
+    rval = lcg(rval, seed);
+    const fiddle_z = fiddle(rval);
+    const dz = distance_z + fiddle_z;
+    const dy = distance_y + fiddle_y;
+    const dx = distance_x + fiddle_x;
+    return dz * dz + dy * dy + dx * dx;
+}
+
+/// Temperature, humidity, continentalness, erosion, depth, weirdness, and 0 for the biomes' offsets.
+pub const Target = [7]i64;
 
 /// The biomes in a tree of their ranges (`Climate.RTree`). Built the same way as vanilla's:
 /// the order of the nodes decides which biome wins when two are as close.
@@ -183,6 +202,15 @@ pub const ParameterList = struct {
     }
 };
 
+/// `Climate.quantizeCoord`
+pub fn quantize(coord: f32) i64 {
+    return java.toLong(coord * 10000.0);
+}
+
+pub fn target(temperature: f32, humidity: f32, continentalness: f32, erosion: f32, depth: f32, weirdness: f32) Target {
+    return .{ quantize(temperature), quantize(humidity), quantize(continentalness), quantize(erosion), quantize(depth), quantize(weirdness), 0 };
+}
+
 /// What's added to the seed for the biome zoom: the first 8 bytes of its sha256 (`BiomeManager.obfuscateSeed`).
 pub fn obfuscateSeed(seed: i64) i64 {
     var bytes: [8]u8 = undefined;
@@ -190,34 +218,6 @@ pub fn obfuscateSeed(seed: i64) i64 {
     var hash: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(&bytes, &hash, .{});
     return std.mem.readInt(i64, hash[0..8], .little);
-}
-
-fn lcg(seed: i64, salt: i64) i64 {
-    return seed *% (seed *% 6364136223846793005 +% 1442695040888963407) +% salt;
-}
-
-fn fiddle(seed: i64) f64 {
-    const uniform = @as(f64, @floatFromInt(@mod(seed >> 24, 1024))) / 1024.0;
-    return (uniform - 0.5) * 0.9;
-}
-
-fn fiddledDistance(seed: i64, x: i32, y: i32, z: i32, distance_x: f64, distance_y: f64, distance_z: f64) f64 {
-    var rval = seed;
-    rval = lcg(rval, x);
-    rval = lcg(rval, y);
-    rval = lcg(rval, z);
-    rval = lcg(rval, x);
-    rval = lcg(rval, y);
-    rval = lcg(rval, z);
-    const fiddle_x = fiddle(rval);
-    rval = lcg(rval, seed);
-    const fiddle_y = fiddle(rval);
-    rval = lcg(rval, seed);
-    const fiddle_z = fiddle(rval);
-    const dz = distance_z + fiddle_z;
-    const dy = distance_y + fiddle_y;
-    const dx = distance_x + fiddle_x;
-    return dz * dz + dy * dy + dx * dx;
 }
 
 /// The quart (4x4x4 cell) a block gets its biome from (`BiomeManager.getBiome`): the closest of the

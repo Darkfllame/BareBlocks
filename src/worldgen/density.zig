@@ -11,6 +11,174 @@ const Volume = @import("Volume.zig");
 
 const Allocator = std.mem.Allocator;
 
+fn lerpInterpolated(s: *const Sampler.Interpolated, out: []f32, out_volume: Volume, cell_volume: Volume, cell: [3]i32, v: [8]f32) void {
+    const cell_out_x = cell_volume.blockX(cell[0]) - out_volume.min_x;
+    const cell_out_y = cell_volume.blockY(cell[1]) - out_volume.min_y;
+    const cell_out_z = cell_volume.blockZ(cell[2]) - out_volume.min_z;
+    const x0 = @max(0, -cell_out_x);
+    const y0 = @max(0, -cell_out_y);
+    const z0 = @max(0, -cell_out_z);
+    const x1 = @min(s.cell_size_xz, out_volume.size_x - cell_out_x) - 1;
+    const y1 = @min(s.cell_size_y, out_volume.size_y - cell_out_y) - 1;
+    const z1 = @min(s.cell_size_xz, out_volume.size_z - cell_out_z) - 1;
+
+    // v is 000, 100, 010, 110, 001, 101, 011, 111 (x, y, z)
+    var z = z0;
+    while (z <= z1) : (z += 1) {
+        const alpha_z = @as(f32, @floatFromInt(z)) * s.cell_size_xz_inv;
+        const v00 = math.lerp(f32, v[0], v[4], alpha_z);
+        const v01 = math.lerp(f32, v[2], v[6], alpha_z);
+        const v10 = math.lerp(f32, v[1], v[5], alpha_z);
+        const v11 = math.lerp(f32, v[3], v[7], alpha_z);
+        var x = x0;
+        while (x <= x1) : (x += 1) {
+            const alpha_x = @as(f32, @floatFromInt(x)) * s.cell_size_xz_inv;
+            const bottom = math.lerp(f32, v00, v10, alpha_x);
+            const top = math.lerp(f32, v01, v11, alpha_x);
+            // Not a lerp along y: the step gets added block after block, the error with it
+            const step = (top - bottom) * s.cell_size_y_inv;
+            var value = bottom + step * @as(f32, @floatFromInt(y0));
+            var index = out_volume.index(cell_out_x + x, cell_out_y + y0, cell_out_z + z);
+            var y = y0;
+            while (y <= y1) : (y += 1) {
+                out[index] = value;
+                index += 1;
+                value += step;
+            }
+        }
+    }
+}
+
+fn interpolatedBlockStep(s: *const Sampler.Interpolated, ctx: *Context, out: []f32, volume: Volume) Error!void {
+    const min_cell_x = @divFloor(volume.min_x, s.cell_size_xz);
+    const min_cell_y = @divFloor(volume.min_y, s.cell_size_y);
+    const min_cell_z = @divFloor(volume.min_z, s.cell_size_xz);
+    const count_x = @divFloor(volume.maxX(), s.cell_size_xz) - min_cell_x + 1;
+    const count_y = @divFloor(volume.maxY(), s.cell_size_y) - min_cell_y + 1;
+    const count_z = @divFloor(volume.maxZ(), s.cell_size_xz) - min_cell_z + 1;
+    // The corners of the cells, one more than the cells unless the volume ends on a corner
+    const cell_volume: Volume = .{
+        .size_x = if (@mod(volume.maxX(), s.cell_size_xz) == 0) count_x else count_x + 1,
+        .size_y = if (@mod(volume.maxY(), s.cell_size_y) == 0) count_y else count_y + 1,
+        .size_z = if (@mod(volume.maxZ(), s.cell_size_xz) == 0) count_z else count_z + 1,
+        .min_x = min_cell_x * s.cell_size_xz,
+        .min_y = min_cell_y * s.cell_size_y,
+        .min_z = min_cell_z * s.cell_size_xz,
+        .step_x = s.cell_size_xz,
+        .step_y = s.cell_size_y,
+        .step_z = s.cell_size_xz,
+    };
+    const cells = try ctx.acquire(cell_volume);
+    defer ctx.release(cells);
+    try s.input.sampleVolume(ctx, cells, cell_volume);
+
+    var cell_z: i32 = 0;
+    while (cell_z < count_z) : (cell_z += 1) {
+        const next_z = @min(cell_z + 1, cell_volume.size_z - 1);
+        var cell_x: i32 = 0;
+        while (cell_x < count_x) : (cell_x += 1) {
+            const next_x = @min(cell_x + 1, cell_volume.size_x - 1);
+            var v000 = cells[cell_volume.index(cell_x, 0, cell_z)];
+            var v100 = cells[cell_volume.index(next_x, 0, cell_z)];
+            var v001 = cells[cell_volume.index(cell_x, 0, next_z)];
+            var v101 = cells[cell_volume.index(next_x, 0, next_z)];
+            var cell_y: i32 = 0;
+            while (cell_y < count_y) : (cell_y += 1) {
+                const next_y = @min(cell_y + 1, cell_volume.size_y - 1);
+                const v010 = cells[cell_volume.index(cell_x, next_y, cell_z)];
+                const v110 = cells[cell_volume.index(next_x, next_y, cell_z)];
+                const v011 = cells[cell_volume.index(cell_x, next_y, next_z)];
+                const v111 = cells[cell_volume.index(next_x, next_y, next_z)];
+                lerpInterpolated(s, out, volume, cell_volume, .{ cell_x, cell_y, cell_z }, .{ v000, v100, v010, v110, v001, v101, v011, v111 });
+                v000 = v010;
+                v100 = v110;
+                v001 = v011;
+                v101 = v111;
+            }
+        }
+    }
+}
+
+fn interpolatedVolume(s: *const Sampler.Interpolated, ctx: *Context, out: []f32, volume: Volume) Error!void {
+    // Already only the cells' corners (or a single position on that axis)
+    const on_corners = (volume.step_x == s.cell_size_xz or volume.size_x == 1) and
+        (volume.step_y == s.cell_size_y or volume.size_y == 1) and
+        (volume.step_z == s.cell_size_xz or volume.size_z == 1) and
+        @mod(volume.min_x, s.cell_size_xz) == 0 and
+        @mod(volume.min_y, s.cell_size_y) == 0 and
+        @mod(volume.min_z, s.cell_size_xz) == 0;
+    if (on_corners) return s.input.sampleVolume(ctx, out, volume);
+
+    if (volume.step_x == 1 and volume.step_y == 1 and volume.step_z == 1) return interpolatedBlockStep(s, ctx, out, volume);
+
+    // Every block, then the ones asked for
+    const block_volume: Volume = .{
+        .size_x = volume.size_x * volume.step_x,
+        .size_y = volume.size_y * volume.step_y,
+        .size_z = volume.size_z * volume.step_z,
+        .min_x = volume.min_x,
+        .min_y = volume.min_y,
+        .min_z = volume.min_z,
+    };
+    const blocks = try ctx.acquire(block_volume);
+    defer ctx.release(blocks);
+    try interpolatedBlockStep(s, ctx, blocks, block_volume);
+    var z: i32 = 0;
+    while (z < volume.size_z) : (z += 1) {
+        var x: i32 = 0;
+        while (x < volume.size_x) : (x += 1) {
+            var y: i32 = 0;
+            while (y < volume.size_y) : (y += 1) {
+                out[volume.index(x, y, z)] = blocks[block_volume.index(x * volume.step_x, y * volume.step_y, z * volume.step_z)];
+            }
+        }
+    }
+}
+
+fn interpolatedValue(s: *const Sampler.Interpolated, ctx: *Context, x: i32, y: i32, z: i32) Error!f32 {
+    const x_in_cell = @mod(x, s.cell_size_xz);
+    const y_in_cell = @mod(y, s.cell_size_y);
+    const z_in_cell = @mod(z, s.cell_size_xz);
+    if (x_in_cell == 0 and y_in_cell == 0 and z_in_cell == 0) return s.input.sampleValue(ctx, x, y, z);
+
+    const volume: Volume = .{
+        .size_x = 2,
+        .size_y = 2,
+        .size_z = 2,
+        .min_x = x - x_in_cell,
+        .min_y = y - y_in_cell,
+        .min_z = z - z_in_cell,
+        .step_x = s.cell_size_xz,
+        .step_y = s.cell_size_y,
+        .step_z = s.cell_size_xz,
+    };
+    var corners: [8]f32 = undefined;
+    try s.input.sampleVolume(ctx, &corners, volume);
+    return java.lerp3(
+        @as(f32, @floatFromInt(x_in_cell)) / @as(f32, @floatFromInt(s.cell_size_xz)),
+        @as(f32, @floatFromInt(y_in_cell)) / @as(f32, @floatFromInt(s.cell_size_y)),
+        @as(f32, @floatFromInt(z_in_cell)) / @as(f32, @floatFromInt(s.cell_size_xz)),
+        corners[volume.index(0, 0, 0)],
+        corners[volume.index(1, 0, 0)],
+        corners[volume.index(0, 1, 0)],
+        corners[volume.index(1, 1, 0)],
+        corners[volume.index(0, 0, 1)],
+        corners[volume.index(1, 0, 1)],
+        corners[volume.index(0, 1, 1)],
+        corners[volume.index(1, 1, 1)],
+    );
+}
+
+fn findSurfaceFrom(s: *const Sampler.FindTopSurface, ctx: *Context, x: i32, z: i32, upper_bound: f32) Error!i32 {
+    const top_y = java.floor(upper_bound / @as(f32, @floatFromInt(s.cell_height))) *% s.cell_height;
+    if (top_y <= s.lower_bound) return s.lower_bound;
+    var probe_y = top_y;
+    while (probe_y >= s.lower_bound) : (probe_y -= s.cell_height) {
+        if (try s.density.sampleValue(ctx, x, probe_y, z) > 0.0) return probe_y;
+    }
+    return s.lower_bound;
+}
+
 pub const Error = Allocator.Error;
 
 /// What a sampling needs besides the sampler: buffers and the `cache` functions' cells.
@@ -140,7 +308,7 @@ pub const Spline = union(enum) {
         const y2 = try s.values[start + 1].sample(input);
         const a = d1 * (x2 - x1) - (y2 - y1);
         const b = -d2 * (x2 - x1) + (y2 - y1);
-        return math.lm.lerp(f32, y1, y2, t) + t * (1.0 - t) * math.lm.lerp(f32, a, b, t);
+        return math.lerp(f32, y1, y2, t) + t * (1.0 - t) * math.lerp(f32, a, b, t);
     }
 
     pub fn linearExtend(input: f32, location: f32, value: f32, derivative: f32) f32 {
@@ -665,7 +833,7 @@ pub const Sampler = union(enum) {
     fn lerpOrEnd(alpha: f32, first: f32, second: f32) f32 {
         if (alpha == 0.0) return first;
         if (alpha == 1.0) return second;
-        return math.lm.lerp(f32, first, second, alpha);
+        return math.lerp(f32, first, second, alpha);
     }
 
     fn selectInterval(thresholds: []const f32, count: usize, input: f32) usize {
@@ -730,19 +898,19 @@ pub const Sampler = union(enum) {
                 if (alpha == 0.0) return s.first.sampleValue(ctx, x, y, z);
                 if (alpha == 1.0) return s.second.sampleValue(ctx, x, y, z);
                 const first = try s.first.sampleValue(ctx, x, y, z);
-                return math.lm.lerp(f32, first, try s.second.sampleValue(ctx, x, y, z), alpha);
+                return math.lerp(f32, first, try s.second.sampleValue(ctx, x, y, z), alpha);
             },
             .lerp_const_first => |s| {
                 const alpha = try s.alpha.sampleValue(ctx, x, y, z);
                 if (alpha == 0.0) return s.first;
                 if (alpha == 1.0) return s.second.sampleValue(ctx, x, y, z);
-                return math.lm.lerp(f32, s.first, try s.second.sampleValue(ctx, x, y, z), alpha);
+                return math.lerp(f32, s.first, try s.second.sampleValue(ctx, x, y, z), alpha);
             },
             .lerp_const_second => |s| {
                 const alpha = try s.alpha.sampleValue(ctx, x, y, z);
                 if (alpha == 0.0) return s.first.sampleValue(ctx, x, y, z);
                 if (alpha == 1.0) return s.second;
-                return math.lm.lerp(f32, try s.first.sampleValue(ctx, x, y, z), s.second, alpha);
+                return math.lerp(f32, try s.first.sampleValue(ctx, x, y, z), s.second, alpha);
             },
             .range_choice => |s| {
                 const input = try s.input.sampleValue(ctx, x, y, z);
@@ -835,171 +1003,3 @@ pub const Sampler = union(enum) {
         }
     }
 };
-
-fn lerpInterpolated(s: *const Sampler.Interpolated, out: []f32, out_volume: Volume, cell_volume: Volume, cell: [3]i32, v: [8]f32) void {
-    const cell_out_x = cell_volume.blockX(cell[0]) - out_volume.min_x;
-    const cell_out_y = cell_volume.blockY(cell[1]) - out_volume.min_y;
-    const cell_out_z = cell_volume.blockZ(cell[2]) - out_volume.min_z;
-    const x0 = @max(0, -cell_out_x);
-    const y0 = @max(0, -cell_out_y);
-    const z0 = @max(0, -cell_out_z);
-    const x1 = @min(s.cell_size_xz, out_volume.size_x - cell_out_x) - 1;
-    const y1 = @min(s.cell_size_y, out_volume.size_y - cell_out_y) - 1;
-    const z1 = @min(s.cell_size_xz, out_volume.size_z - cell_out_z) - 1;
-
-    // v is 000, 100, 010, 110, 001, 101, 011, 111 (x, y, z)
-    var z = z0;
-    while (z <= z1) : (z += 1) {
-        const alpha_z = @as(f32, @floatFromInt(z)) * s.cell_size_xz_inv;
-        const v00 = math.lm.lerp(f32, v[0], v[4], alpha_z);
-        const v01 = math.lm.lerp(f32, v[2], v[6], alpha_z);
-        const v10 = math.lm.lerp(f32, v[1], v[5], alpha_z);
-        const v11 = math.lm.lerp(f32, v[3], v[7], alpha_z);
-        var x = x0;
-        while (x <= x1) : (x += 1) {
-            const alpha_x = @as(f32, @floatFromInt(x)) * s.cell_size_xz_inv;
-            const bottom = math.lm.lerp(f32, v00, v10, alpha_x);
-            const top = math.lm.lerp(f32, v01, v11, alpha_x);
-            // Not a lerp along y: the step gets added block after block, the error with it
-            const step = (top - bottom) * s.cell_size_y_inv;
-            var value = bottom + step * @as(f32, @floatFromInt(y0));
-            var index = out_volume.index(cell_out_x + x, cell_out_y + y0, cell_out_z + z);
-            var y = y0;
-            while (y <= y1) : (y += 1) {
-                out[index] = value;
-                index += 1;
-                value += step;
-            }
-        }
-    }
-}
-
-fn interpolatedBlockStep(s: *const Sampler.Interpolated, ctx: *Context, out: []f32, volume: Volume) Error!void {
-    const min_cell_x = @divFloor(volume.min_x, s.cell_size_xz);
-    const min_cell_y = @divFloor(volume.min_y, s.cell_size_y);
-    const min_cell_z = @divFloor(volume.min_z, s.cell_size_xz);
-    const count_x = @divFloor(volume.maxX(), s.cell_size_xz) - min_cell_x + 1;
-    const count_y = @divFloor(volume.maxY(), s.cell_size_y) - min_cell_y + 1;
-    const count_z = @divFloor(volume.maxZ(), s.cell_size_xz) - min_cell_z + 1;
-    // The corners of the cells, one more than the cells unless the volume ends on a corner
-    const cell_volume: Volume = .{
-        .size_x = if (@mod(volume.maxX(), s.cell_size_xz) == 0) count_x else count_x + 1,
-        .size_y = if (@mod(volume.maxY(), s.cell_size_y) == 0) count_y else count_y + 1,
-        .size_z = if (@mod(volume.maxZ(), s.cell_size_xz) == 0) count_z else count_z + 1,
-        .min_x = min_cell_x * s.cell_size_xz,
-        .min_y = min_cell_y * s.cell_size_y,
-        .min_z = min_cell_z * s.cell_size_xz,
-        .step_x = s.cell_size_xz,
-        .step_y = s.cell_size_y,
-        .step_z = s.cell_size_xz,
-    };
-    const cells = try ctx.acquire(cell_volume);
-    defer ctx.release(cells);
-    try s.input.sampleVolume(ctx, cells, cell_volume);
-
-    var cell_z: i32 = 0;
-    while (cell_z < count_z) : (cell_z += 1) {
-        const next_z = @min(cell_z + 1, cell_volume.size_z - 1);
-        var cell_x: i32 = 0;
-        while (cell_x < count_x) : (cell_x += 1) {
-            const next_x = @min(cell_x + 1, cell_volume.size_x - 1);
-            var v000 = cells[cell_volume.index(cell_x, 0, cell_z)];
-            var v100 = cells[cell_volume.index(next_x, 0, cell_z)];
-            var v001 = cells[cell_volume.index(cell_x, 0, next_z)];
-            var v101 = cells[cell_volume.index(next_x, 0, next_z)];
-            var cell_y: i32 = 0;
-            while (cell_y < count_y) : (cell_y += 1) {
-                const next_y = @min(cell_y + 1, cell_volume.size_y - 1);
-                const v010 = cells[cell_volume.index(cell_x, next_y, cell_z)];
-                const v110 = cells[cell_volume.index(next_x, next_y, cell_z)];
-                const v011 = cells[cell_volume.index(cell_x, next_y, next_z)];
-                const v111 = cells[cell_volume.index(next_x, next_y, next_z)];
-                lerpInterpolated(s, out, volume, cell_volume, .{ cell_x, cell_y, cell_z }, .{ v000, v100, v010, v110, v001, v101, v011, v111 });
-                v000 = v010;
-                v100 = v110;
-                v001 = v011;
-                v101 = v111;
-            }
-        }
-    }
-}
-
-fn interpolatedVolume(s: *const Sampler.Interpolated, ctx: *Context, out: []f32, volume: Volume) Error!void {
-    // Already only the cells' corners (or a single position on that axis)
-    const on_corners = (volume.step_x == s.cell_size_xz or volume.size_x == 1) and
-        (volume.step_y == s.cell_size_y or volume.size_y == 1) and
-        (volume.step_z == s.cell_size_xz or volume.size_z == 1) and
-        @mod(volume.min_x, s.cell_size_xz) == 0 and
-        @mod(volume.min_y, s.cell_size_y) == 0 and
-        @mod(volume.min_z, s.cell_size_xz) == 0;
-    if (on_corners) return s.input.sampleVolume(ctx, out, volume);
-
-    if (volume.step_x == 1 and volume.step_y == 1 and volume.step_z == 1) return interpolatedBlockStep(s, ctx, out, volume);
-
-    // Every block, then the ones asked for
-    const block_volume: Volume = .{
-        .size_x = volume.size_x * volume.step_x,
-        .size_y = volume.size_y * volume.step_y,
-        .size_z = volume.size_z * volume.step_z,
-        .min_x = volume.min_x,
-        .min_y = volume.min_y,
-        .min_z = volume.min_z,
-    };
-    const blocks = try ctx.acquire(block_volume);
-    defer ctx.release(blocks);
-    try interpolatedBlockStep(s, ctx, blocks, block_volume);
-    var z: i32 = 0;
-    while (z < volume.size_z) : (z += 1) {
-        var x: i32 = 0;
-        while (x < volume.size_x) : (x += 1) {
-            var y: i32 = 0;
-            while (y < volume.size_y) : (y += 1) {
-                out[volume.index(x, y, z)] = blocks[block_volume.index(x * volume.step_x, y * volume.step_y, z * volume.step_z)];
-            }
-        }
-    }
-}
-
-fn interpolatedValue(s: *const Sampler.Interpolated, ctx: *Context, x: i32, y: i32, z: i32) Error!f32 {
-    const x_in_cell = @mod(x, s.cell_size_xz);
-    const y_in_cell = @mod(y, s.cell_size_y);
-    const z_in_cell = @mod(z, s.cell_size_xz);
-    if (x_in_cell == 0 and y_in_cell == 0 and z_in_cell == 0) return s.input.sampleValue(ctx, x, y, z);
-
-    const volume: Volume = .{
-        .size_x = 2,
-        .size_y = 2,
-        .size_z = 2,
-        .min_x = x - x_in_cell,
-        .min_y = y - y_in_cell,
-        .min_z = z - z_in_cell,
-        .step_x = s.cell_size_xz,
-        .step_y = s.cell_size_y,
-        .step_z = s.cell_size_xz,
-    };
-    var corners: [8]f32 = undefined;
-    try s.input.sampleVolume(ctx, &corners, volume);
-    return java.lerp3(
-        @as(f32, @floatFromInt(x_in_cell)) / @as(f32, @floatFromInt(s.cell_size_xz)),
-        @as(f32, @floatFromInt(y_in_cell)) / @as(f32, @floatFromInt(s.cell_size_y)),
-        @as(f32, @floatFromInt(z_in_cell)) / @as(f32, @floatFromInt(s.cell_size_xz)),
-        corners[volume.index(0, 0, 0)],
-        corners[volume.index(1, 0, 0)],
-        corners[volume.index(0, 1, 0)],
-        corners[volume.index(1, 1, 0)],
-        corners[volume.index(0, 0, 1)],
-        corners[volume.index(1, 0, 1)],
-        corners[volume.index(0, 1, 1)],
-        corners[volume.index(1, 1, 1)],
-    );
-}
-
-fn findSurfaceFrom(s: *const Sampler.FindTopSurface, ctx: *Context, x: i32, z: i32, upper_bound: f32) Error!i32 {
-    const top_y = java.floor(upper_bound / @as(f32, @floatFromInt(s.cell_height))) *% s.cell_height;
-    if (top_y <= s.lower_bound) return s.lower_bound;
-    var probe_y = top_y;
-    while (probe_y >= s.lower_bound) : (probe_y -= s.cell_height) {
-        if (try s.density.sampleValue(ctx, x, probe_y, z) > 0.0) return probe_y;
-    }
-    return s.lower_bound;
-}

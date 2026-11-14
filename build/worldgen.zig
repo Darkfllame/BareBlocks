@@ -16,20 +16,6 @@ const Interned = std.StringArrayHashMapUnmanaged(void);
 
 const Error = Allocator.Error || error{ UnexpectedToken, MissingField, UnknownReference, Unsupported };
 
-arena: Allocator,
-noises: Named = .empty,
-named_functions: Named = .empty,
-named_rules: Named = .empty,
-named_conditions: Named = .empty,
-biomes: []const []const u8 = &.{},
-
-functions: Interned = .empty,
-splines: Interned = .empty,
-rules: std.ArrayList([]const u8) = .empty,
-conditions: std.ArrayList([]const u8) = .empty,
-resolved_rules: std.StringHashMapUnmanaged(u32) = .empty,
-resolved_conditions: std.StringHashMapUnmanaged(u32) = .empty,
-
 const unary = [_][]const u8{ "abs", "square", "cube", "sqrt", "half_negative", "quarter_negative", "reciprocal", "negate", "squeeze", "log", "sign" };
 const binary = [_][]const u8{ "add", "sub", "mul", "div", "min", "max" };
 
@@ -446,6 +432,20 @@ fn condition(self: *Generator, v: Value) Error!u32 {
     return @intCast(self.conditions.items.len - 1);
 }
 
+arena: Allocator,
+noises: Named = .empty,
+named_functions: Named = .empty,
+named_rules: Named = .empty,
+named_conditions: Named = .empty,
+biomes: []const []const u8 = &.{},
+
+functions: Interned = .empty,
+splines: Interned = .empty,
+rules: std.ArrayList([]const u8) = .empty,
+conditions: std.ArrayList([]const u8) = .empty,
+resolved_rules: std.StringHashMapUnmanaged(u32) = .empty,
+resolved_conditions: std.StringHashMapUnmanaged(u32) = .empty,
+
 /// `synced` is DumpVanilla's registries (biomes get their network ids from it), `biome_parameters` its
 /// multi noise presets.
 pub fn generate(
@@ -530,10 +530,10 @@ pub fn generate(
     }
 
     try out.writeAll(
-        \\/// `t` is src/worldgen/data.zig
-        \\pub fn Data(comptime t: type) type {
+        \\/// `data` is src/worldgen/data.zig
+        \\pub fn Data(comptime data: type) type {
         \\    return struct {
-        \\        pub const noises = [_]t.NamedNoise{
+        \\        pub const noises = [_]data.NamedNoise{
         \\
     );
     for (self.noises.keys(), self.noises.values()) |id, v| {
@@ -556,24 +556,24 @@ pub fn generate(
         try out.writeAll(" } },\n");
     }
 
-    try out.writeAll("};\n\npub const functions = [_]t.DensityFunction{\n");
+    try out.writeAll("};\n\npub const functions = [_]data.DensityFunction{\n");
     for (self.functions.keys()) |literal| try out.print("{s},\n", .{literal});
 
-    try out.writeAll("};\n\n/// What `DensityFunction.reference` is an index of.\npub const named_functions = [_]t.NamedFunction{\n");
+    try out.writeAll("};\n\n/// What `DensityFunction.reference` is an index of.\npub const named_functions = [_]data.NamedFunction{\n");
     for (self.named_functions.keys(), named_function_ids) |id, function_id| {
         try out.print(".{{ .id = \"{s}\", .function = {d} }},\n", .{ id, function_id });
     }
 
-    try out.writeAll("};\n\npub const splines = [_]t.Spline{\n");
+    try out.writeAll("};\n\npub const splines = [_]data.Spline{\n");
     for (self.splines.keys()) |literal| try out.print("{s},\n", .{literal});
 
-    try out.writeAll("};\n\npub const rules = [_]t.Rule{\n");
+    try out.writeAll("};\n\npub const rules = [_]data.Rule{\n");
     for (self.rules.items) |literal| try out.print("{s},\n", .{literal});
 
-    try out.writeAll("};\n\npub const conditions = [_]t.Condition{\n");
+    try out.writeAll("};\n\npub const conditions = [_]data.Condition{\n");
     for (self.conditions.items) |literal| try out.print("{s},\n", .{literal});
 
-    try out.writeAll("};\n\n/// In the order of their network ids.\npub const biomes = [_]t.Biome{\n");
+    try out.writeAll("};\n\n/// In the order of their network ids.\npub const biomes = [_]data.Biome{\n");
     for (self.biomes) |id| {
         const v = biomes.get(id) orelse return error.UnknownReference;
         try out.print(".{{ .id = \"{s}\", .temperature = {s}, .frozen = {} }},\n", .{
@@ -583,7 +583,7 @@ pub fn generate(
         });
     }
 
-    try out.writeAll("};\n\npub const noise_settings = [_]t.NoiseSettings{\n");
+    try out.writeAll("};\n\npub const noise_settings = [_]data.NoiseSettings{\n");
     for (settings.items) |s| try out.print("{s},\n", .{s.literal});
     try out.writeAll("};\n\n");
 
@@ -598,7 +598,7 @@ pub fn generate(
             if (preset != null) try out.writeAll("};\n\n");
             preset = name;
             try out.print("/// The multi noise biome source's `{s}` preset, already quantized.\n", .{name});
-            try out.print("pub const {s}_biomes = [_]t.BiomeParameters{{\n", .{withoutNamespace(name)});
+            try out.print("pub const {s}_biomes = [_]data.BiomeParameters{{\n", .{withoutNamespace(name)});
         }
         const biome_id = try self.biome(.{ .string = parts.next() orelse return error.BadBiomeParameters });
         try out.print(".{{ .biome = {d}, .parameters = .{{", .{biome_id});

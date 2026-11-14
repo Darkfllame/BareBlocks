@@ -6,12 +6,6 @@ const java = @import("java.zig");
 /// `XoroshiroRandomSource`
 pub const Xoroshiro = utils.Xoroshiro128PlusPlus;
 
-/// `RandomSource.forkPositional`
-pub fn forkPositional(rand: *Xoroshiro) Positional {
-    const lo = rand.next();
-    return .{ .lo = lo, .hi = rand.next() };
-}
-
 /// `XoroshiroPositionalRandomFactory`
 pub const Positional = struct {
     lo: u64,
@@ -63,6 +57,12 @@ pub const Legacy = struct {
         return @as(f64, @floatFromInt((upper << 27) + lower)) * 0x1p-53;
     }
 };
+
+/// `RandomSource.forkPositional`
+pub fn forkPositional(rand: *Xoroshiro) Positional {
+    const lo = rand.next();
+    return .{ .lo = lo, .hi = rand.next() };
+}
 
 test Positional {
     var r: Xoroshiro = .init(12345);

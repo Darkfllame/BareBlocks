@@ -21,6 +21,22 @@ fn upgradeSeedTo128Bit(seed: u64) [2]u64 {
     return .{ mixStafford13(lo), mixStafford13(hi) };
 }
 
+fn fill(self: *Xoroshiro128PlusPlus, buf: []u8) void {
+    var index: usize = 0;
+    while (index < buf.len) {
+        const res = self.next();
+        const size = @min(buf.len - index, 8);
+        @memcpy(buf[index..][0..size], std.mem.asBytes(&res)[0..size]);
+        index += size;
+    }
+}
+
+// What vanilla's `XoroshiroRandomSource` makes of it, worldgen needs the same numbers
+
+fn nextBits(self: *Xoroshiro128PlusPlus, comptime bits: u7) u64 {
+    return self.next() >> (64 - bits);
+}
+
 s: [2]u64,
 
 pub fn init(s: u64) Xoroshiro128PlusPlus {
@@ -51,22 +67,6 @@ pub fn next(self: *Xoroshiro128PlusPlus) u64 {
     self.s[0] = std.math.rotl(u64, s0, 49) ^ s1 ^ s1 << 21;
     self.s[1] = std.math.rotl(u64, s1, 28);
     return result;
-}
-
-fn fill(self: *Xoroshiro128PlusPlus, buf: []u8) void {
-    var index: usize = 0;
-    while (index < buf.len) {
-        const res = self.next();
-        const size = @min(buf.len - index, 8);
-        @memcpy(buf[index..][0..size], std.mem.asBytes(&res)[0..size]);
-        index += size;
-    }
-}
-
-// What vanilla's `XoroshiroRandomSource` makes of it, worldgen needs the same numbers
-
-fn nextBits(self: *Xoroshiro128PlusPlus, comptime bits: u7) u64 {
-    return self.next() >> (64 - bits);
 }
 
 /// In `[0; bound[`

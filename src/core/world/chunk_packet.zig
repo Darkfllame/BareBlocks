@@ -10,6 +10,9 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const StateId = block_states.StateId;
 
+const blocks_motion = blockTag("minecraft:blocks_motion_in_heightmap");
+const blocks_motion_no_leaves = blockTag("minecraft:blocks_motion_in_heightmap_no_leaves");
+
 /// Ids of vanilla's `Heightmap.Types`, only the ones the client gets.
 const HeightmapType = enum(u8) {
     world_surface = 1,
@@ -33,9 +36,6 @@ fn blockTag(comptime name: []const u8) [block_states.blocks.len]bool {
         @compileError("no block tag named " ++ name);
     }
 }
-
-const blocks_motion = blockTag("minecraft:blocks_motion_in_heightmap");
-const blocks_motion_no_leaves = blockTag("minecraft:blocks_motion_in_heightmap_no_leaves");
 
 fn countsFor(kind: HeightmapType, state: StateId) bool {
     return switch (kind) {

@@ -17,21 +17,11 @@ const Interval = @import("Interval.zig");
 const Allocator = std.mem.Allocator;
 const Sampler = density.Sampler;
 
-pub const Error = Allocator.Error || error{UnsupportedDensityFunction};
-
 const Axes = u3;
 const axis_x: Axes = 1;
 const axis_y: Axes = 2;
 const axis_z: Axes = 4;
 const all_axes: Axes = 7;
-
-fn axisBit(axis: data.Axis) Axes {
-    return switch (axis) {
-        .x => axis_x,
-        .y => axis_y,
-        .z => axis_z,
-    };
-}
 
 /// A function being rewritten, references are gone and caches are prepared.
 const Node = union(enum) {
@@ -72,36 +62,12 @@ const SplineNode = union(enum) {
     },
 };
 
-arena: Allocator,
-/// The world's random, noises are made from it (`RandomState.random`).
-positional: random.Positional,
-/// By `data.NoiseId`, made when first used.
-noises: []?noise.Noise,
-samplers: std.AutoHashMapUnmanaged(data.FunctionId, *const Sampler) = .empty,
-/// By the input of the `cache` function.
-caches: std.AutoHashMapUnmanaged(data.FunctionId, *Node) = .empty,
-next_cache_id: u32 = 0,
-
-pub fn init(arena: Allocator, positional: random.Positional) Allocator.Error!Compiler {
-    const noises = try arena.alloc(?noise.Noise, data.noises.len);
-    @memset(noises, null);
-    return .{ .arena = arena, .positional = positional, .noises = noises };
-}
-
-/// `RandomState.getOrCreateNoise`
-pub fn getNoise(self: *Compiler, id: data.NoiseId) Allocator.Error!*const noise.Noise {
-    if (self.noises[id] == null) {
-        const named = data.noises[id];
-        self.noises[id] = try noise.instantiate(self.arena, self.positional, named.id, named.parameters);
-    }
-    return &self.noises[id].?;
-}
-
-pub fn getSampler(self: *Compiler, function: data.FunctionId) Error!*const Sampler {
-    if (self.samplers.get(function)) |sampler| return sampler;
-    const sampler = try self.compile(try self.optimize(function));
-    try self.samplers.put(self.arena, function, sampler);
-    return sampler;
+fn axisBit(axis: data.Axis) Axes {
+    return switch (axis) {
+        .x => axis_x,
+        .y => axis_y,
+        .z => axis_z,
+    };
 }
 
 fn optimize(self: *Compiler, function: data.FunctionId) Error!*Node {
@@ -719,4 +685,38 @@ fn compileSpline(self: *Compiler, spline: *const SplineNode, coordinates: *std.A
         .values = values,
         .derivatives = s.derivatives,
     } };
+}
+
+arena: Allocator,
+/// The world's random, noises are made from it (`RandomState.random`).
+positional: random.Positional,
+/// By `data.NoiseId`, made when first used.
+noises: []?noise.Noise,
+samplers: std.AutoHashMapUnmanaged(data.FunctionId, *const Sampler) = .empty,
+/// By the input of the `cache` function.
+caches: std.AutoHashMapUnmanaged(data.FunctionId, *Node) = .empty,
+next_cache_id: u32 = 0,
+
+pub const Error = Allocator.Error || error{UnsupportedDensityFunction};
+
+pub fn init(arena: Allocator, positional: random.Positional) Allocator.Error!Compiler {
+    const noises = try arena.alloc(?noise.Noise, data.noises.len);
+    @memset(noises, null);
+    return .{ .arena = arena, .positional = positional, .noises = noises };
+}
+
+/// `RandomState.getOrCreateNoise`
+pub fn getNoise(self: *Compiler, id: data.NoiseId) Allocator.Error!*const noise.Noise {
+    if (self.noises[id] == null) {
+        const named = data.noises[id];
+        self.noises[id] = try noise.instantiate(self.arena, self.positional, named.id, named.parameters);
+    }
+    return &self.noises[id].?;
+}
+
+pub fn getSampler(self: *Compiler, function: data.FunctionId) Error!*const Sampler {
+    if (self.samplers.get(function)) |sampler| return sampler;
+    const sampler = try self.compile(try self.optimize(function));
+    try self.samplers.put(self.arena, function, sampler);
+    return sampler;
 }

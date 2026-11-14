@@ -4,13 +4,10 @@ const block_states = @import("block_states");
 
 pub const StateId = block_states.StateId;
 
-/// The default state of a block, `null` if there's no such block.
-pub fn find(name: []const u8) ?StateId {
-    for (block_states.blocks) |*block| {
-        if (std.mem.eql(u8, block.name, name)) return block.default_state;
-    }
-    return null;
-}
+pub const air = known("minecraft:air").default_state;
+pub const lava = known("minecraft:lava").default_state;
+pub const snow_block = known("minecraft:snow_block").default_state;
+pub const packed_ice = known("minecraft:packed_ice").default_state;
 
 fn known(comptime name: []const u8) *const block_states.Block {
     @setEvalBranchQuota(1_000_000);
@@ -19,14 +16,17 @@ fn known(comptime name: []const u8) *const block_states.Block {
     } else @compileError("no block named " ++ name);
 }
 
-pub const air = known("minecraft:air").default_state;
-pub const lava = known("minecraft:lava").default_state;
-pub const snow_block = known("minecraft:snow_block").default_state;
-pub const packed_ice = known("minecraft:packed_ice").default_state;
-
 fn isBlock(comptime name: []const u8, state: StateId) bool {
     const block = comptime known(name);
     return state >= block.first_state and state < block.first_state + block.state_count;
+}
+
+/// The default state of a block, `null` if there's no such block.
+pub fn find(name: []const u8) ?StateId {
+    for (block_states.blocks) |*block| {
+        if (std.mem.eql(u8, block.name, name)) return block.default_state;
+    }
+    return null;
 }
 
 pub fn isAir(state: StateId) bool {
