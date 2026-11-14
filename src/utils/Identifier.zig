@@ -150,6 +150,10 @@ pub fn eql(a: Identifier, b: Identifier) bool {
         std.mem.eql(u8, a.path(), b.path());
 }
 
+pub fn strEql(a: Identifier, str: []const u8) bool {
+    return a.eql(validate(str) catch return false);
+}
+
 pub fn deserialize(mapr: *MapReader) MapReader.ReadError!Identifier {
     const tok_cpy = try mapr.nextDupeExpectString();
     errdefer mapr.getArena().free(tok_cpy);

@@ -1,6 +1,7 @@
 //! Every block and block state, the data itself is generated from blocks.json by build/gen_data.zig.
 const std = @import("std");
 const bsd = @import("block_states_data");
+const utils = @import("utils");
 const data = bsd.Data(Property, Block);
 
 const assert = std.debug.assert;
@@ -79,6 +80,17 @@ pub fn property(id: PropertyId) *const Property {
 
 pub fn blockOf(id: StateId) *const Block {
     return &blocks[state_blocks[id]];
+}
+
+pub fn findBlock(id: utils.Identifier) ?*const Block {
+    @setEvalBranchQuota(blocks.len);
+    for (blocks) |*block| {
+        if (id.strEql(block.name)) return block;
+    }
+    if (@inComptime()) {
+        @compileError(std.fmt.comptimePrint("Couldn't find block with id: {f}", .{id.alt(.full)}));
+    }
+    return null;
 }
 
 test "every property of every state" {

@@ -287,6 +287,9 @@ pub fn build(b: *Build) !void {
         .imports = &.{
             .{ .name = "block_states_data", .module = block_states_data_mod },
         },
+        .local_imports = &.{
+            "utils",
+        },
     });
     _ = block_states_mod;
     const worldgen_mod = proj.createModule(b, .{

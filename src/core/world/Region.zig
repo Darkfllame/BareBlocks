@@ -3,12 +3,12 @@
 const Region = @This();
 const std = @import("std");
 const utils = @import("utils");
+const block_states = @import("block_states");
 const core = @import("../core.zig");
-const world = @import("world.zig");
 const DimensionProperties = @import("DimensionProperties.zig");
 
-const Block = core.block.Block;
 const Allocator = std.mem.Allocator;
+const BlockStateId = block_states.StateId;
 
 const assert = std.debug.assert;
 
@@ -70,7 +70,7 @@ section_indices: [max_sections_per_regions]SectionIndex,
 /// Size of sub-lists depend on the dimension's build height.
 sections: std.ArrayList(Section),
 /// Likely air.
-default_state: *Block.State,
+default_state: BlockStateId,
 
 /// A 32x32 blocks section of the world.
 ///
@@ -138,14 +138,10 @@ pub const Section = struct {
     pub const total_blocks = side_length * side_length * side_length;
     pub const max_octree_depth = std.math.log2(side_length);
 
-    pub fn initFill(gpa: Allocator, empty_state: *Block.State) Allocator.Error!Section {
+    pub fn initFill(gpa: Allocator, empty_state: BlockStateId) Allocator.Error!Section {
         var self = Section{
             .data = .{ .leaf = 0 },
-            .palette = .{
-                .states = &[0]?*Block.State{},
-                .states_cap = 0,
-                .states_len = 0,
-            },
+            .palette = .empty,
         };
         const id = try self.palette.newId(gpa, empty_state);
         assert(id == 0);
@@ -190,73 +186,78 @@ pub const Section = struct {
     };
 
     pub const BlockPalette = struct {
-        states: [*]?*Block.State,
+        mask: std.bit_set.Array(usize, total_blocks),
+        states: [*]BlockStateId,
         states_cap: PaletteSize,
         states_len: PaletteSize,
 
         pub const max_unused_states = 16;
 
         pub const empty = BlockPalette{
-            .states = &[0]?*Block.State{},
+            .mask = .empty,
+            .states = &[0]BlockStateId{},
             .states_cap = 0,
             .states_len = 0,
         };
 
         pub fn countUsedStates(self: BlockPalette) usize {
-            var count: usize = 0;
-            for (self.states[0..self.states_len]) |s| {
-                count += @intFromBool(s != null);
-            }
-            return count;
+            return self.mask.count();
         }
 
         pub fn copyInto(self: BlockPalette, gpa: Allocator, out: *BlockPalette) Allocator.Error!void {
-            const states_slice = try gpa.alloc(?*Block.State, self.countUsedStates());
-            var index: usize = 0;
-            for (self.states[0..self.states_len]) |state| {
-                if (state) |st| {
-                    states_slice[index] = st;
-                    index += 1;
+            const states_slice = try gpa.alloc(BlockStateId, self.countUsedStates());
+            var states_array = std.ArrayList(BlockStateId).initBuffer(states_slice);
 
-                    if (index == states_slice.len) break; // reached end
-                }
+            var masks = std.bit_set.Array(usize, total_blocks).empty;
+            masks.setRangeValue(.{
+                .start = 0,
+                .end = states_slice.len,
+            }, true);
+
+            var it = self.mask.iterator(.{});
+            while (it.next()) |idx| {
+                states_array.appendAssumeCapacity(self.states[idx]);
             }
+
             out.* = .{
+                .mask = masks,
                 .states = states_slice.ptr,
                 .states_cap = @intCast(states_slice.len),
                 .states_len = @intCast(states_slice.len),
             };
         }
 
-        pub fn getAt(self: BlockPalette, i: BlockIndex) *Block.State {
-            return self.states[0..self.states_len][i].?;
+        pub fn getAt(self: BlockPalette, i: BlockIndex) BlockStateId {
+            assert(self.mask.isSet(i));
+            return self.states[0..self.states_len][i];
         }
 
-        pub fn setAt(self: BlockPalette, i: BlockIndex, state: *Block.State) void {
+        pub fn setAt(self: BlockPalette, i: BlockIndex, state: BlockStateId) void {
             const slice = self.states[0..self.states_len];
-            if (utils.is_safe and slice[i] != null) @panic("Cannot overwrite state");
+            if (utils.is_safe and self.mask.isSet(i)) @panic("Cannot overwrite state");
             slice[i] = state;
         }
 
-        pub fn findOrNewId(self: *BlockPalette, gpa: Allocator, state: *Block.State) Allocator.Error!struct { BlockIndex, bool } {
-            for (self.states[0..self.states_len], 0..) |may_st, i| {
-                if (may_st == state) return .{ @as(BlockIndex, @intCast(i)), false };
+        pub fn findOrNewId(self: *BlockPalette, gpa: Allocator, state: BlockStateId) Allocator.Error!struct { BlockIndex, bool } {
+            var it = self.mask.iterator(.{});
+            while (it.next()) |idx| {
+                if (self.states[idx] == state) return .{ @as(BlockIndex, @intCast(idx)), false };
             }
 
             return .{ try self.newId(gpa, state), true };
         }
 
-        pub fn newId(self: *BlockPalette, gpa: Allocator, state: *Block.State) Allocator.Error!BlockIndex {
+        pub fn newId(self: *BlockPalette, gpa: Allocator, state: BlockStateId) Allocator.Error!BlockIndex {
             var free_space: ?BlockIndex = null;
-            for (self.states[0..self.states_len], 0..) |*st_p, i| {
+            var it = self.mask.iterator(.{});
+            while (it.next()) |idx| {
+                const st_p = &self.states[idx];
                 if (st_p.* == state) @panic("Invalid call to newId");
-                if (st_p.* == null and free_space == null) {
-                    free_space = @intCast(i);
-                    continue;
-                }
+                if (free_space == null) free_space = @intCast(idx);
             }
 
             if (free_space) |idx| {
+                self.mask.set(idx);
                 self.states[idx] = state;
                 return idx;
             }
@@ -271,7 +272,7 @@ pub const Section = struct {
                     break :blk;
                 }
 
-                const new_sl = try gpa.alloc(?*Block.State, new_cap);
+                const new_sl = try gpa.alloc(BlockStateId, new_cap);
                 @memmove(new_sl[0..self.states_len], self.states[0..self.states_len]);
                 gpa.free(self.states[0..self.states_cap]);
                 self.states = new_sl.ptr;
@@ -279,30 +280,19 @@ pub const Section = struct {
             }
 
             const idx: BlockIndex = @intCast(self.states_len);
+            self.mask.set(idx);
             self.states[idx] = state;
             self.states_len += 1;
             return idx;
         }
 
         pub fn removeId(self: *BlockPalette, id: BlockIndex) void {
-            if (id == self.states_len - 1) return self.removeIdShort(id);
-            const slice = self.states[0..self.states_len];
-            slice[id] = null;
-            var i: usize = self.states_len - 1;
-            while (true) {
-                const st = slice[i];
-                i, const ov = @subWithOverflow(i, 1);
-                if (st != null or ov == 1) break;
-            }
-        }
-
-        pub fn removeIdShort(self: *BlockPalette, id: BlockIndex) void {
-            assert(id == self.states_len - 1);
-            self.states_len -= 1;
+            if (utils.is_safe and !self.mask.isSet(id)) std.debug.panic("Index #{d} in palette wasn't valid for removal", .{id});
+            self.mask.unset(id);
         }
     };
 
-    pub fn getBlock(self: *Section, pos: SectionBlockPosition) *Block.State {
+    pub fn getBlock(self: *Section, pos: SectionBlockPosition) BlockStateId {
         var depth: u8 = 0;
         var x, var y, var z = .{ pos.x, pos.y, pos.z };
         const pal_idx = sw: switch (self.data) {
@@ -323,7 +313,7 @@ pub const Section = struct {
         return self.palette.getAt(pal_idx);
     }
 
-    pub fn setBlock(self: *Section, pos: SectionBlockPosition, gpa: Allocator, state: *Block.State) Allocator.Error!void {
+    pub fn setBlock(self: *Section, pos: SectionBlockPosition, gpa: Allocator, state: BlockStateId) Allocator.Error!void {
         const state_id, const is_new_id = try self.palette.findOrNewId(gpa, state);
         errdefer if (is_new_id) self.palette.removeId(state_id);
 
@@ -385,7 +375,7 @@ pub const Section = struct {
     }
 };
 
-pub fn initEmpty(self: *Region, default: *Block.State) void {
+pub fn initEmpty(self: *Region, default: BlockStateId) void {
     self.* = .{
         .sections_mask = .empty,
         .section_indices = undefined,
@@ -408,7 +398,7 @@ pub fn deinit(self: *Region, dim: *const DimensionProperties, gpa: Allocator) vo
     self.sections.deinit(gpa);
 }
 
-pub fn getBlock(self: *Region, dim: *const DimensionProperties, pos: core.BlockPosition) *Block.State {
+pub fn getBlock(self: *Region, dim: *const DimensionProperties, pos: core.BlockPosition) BlockStateId {
     const sec_pos = core.BlockPosition{
         .x = @rem(pos.x, region_side_length),
         .y = pos.y,
@@ -436,7 +426,7 @@ pub fn setBlock(
     dim: *const DimensionProperties,
     gpa: Allocator,
     pos: core.BlockPosition,
-    state: *Block.State,
+    state: BlockStateId,
 ) Allocator.Error!void {
     const sec_pos = core.BlockPosition{
         .x = @rem(pos.x, region_side_length),
@@ -492,43 +482,46 @@ test {
 test Section {
     const gpa = std.testing.allocator;
 
-    var states = Block.State.dummyIota(4, 0);
+    const air = comptime block_states.findBlock(.vanilla("air")).?;
+    const grass = comptime block_states.findBlock(.vanilla("grass_block")).?;
+    const dirt = comptime block_states.findBlock(.vanilla("dirt")).?;
+    const stone = comptime block_states.findBlock(.vanilla("stone")).?;
 
-    var sec = try Section.initFill(gpa, &states[0]);
+    var sec = try Section.initFill(gpa, air.default_state);
     defer sec.deinit(gpa);
 
     try sec.setBlock(.{
         .x = 0,
         .y = 0,
         .z = 0,
-    }, gpa, &states[3]);
+    }, gpa, stone.default_state);
     try sec.setBlock(.{
         .x = 1,
         .y = 0,
         .z = 0,
-    }, gpa, &states[1]);
+    }, gpa, dirt.default_state);
     try sec.setBlock(.{
         .x = 0,
         .y = 1,
         .z = 0,
-    }, gpa, &states[2]);
+    }, gpa, grass.default_state);
 
-    try std.testing.expectEqual(&states[3], sec.getBlock(.{
+    try std.testing.expectEqual(stone.default_state, sec.getBlock(.{
         .x = 0,
         .y = 0,
         .z = 0,
     }));
-    try std.testing.expectEqual(&states[1], sec.getBlock(.{
+    try std.testing.expectEqual(dirt.default_state, sec.getBlock(.{
         .x = 1,
         .y = 0,
         .z = 0,
     }));
-    try std.testing.expectEqual(&states[2], sec.getBlock(.{
+    try std.testing.expectEqual(grass.default_state, sec.getBlock(.{
         .x = 0,
         .y = 1,
         .z = 0,
     }));
-    try std.testing.expectEqual(&states[0], sec.getBlock(.{
+    try std.testing.expectEqual(air.default_state, sec.getBlock(.{
         .x = 0,
         .y = 0,
         .z = 1,
@@ -538,39 +531,42 @@ test Section {
 test Region {
     const gpa = std.testing.allocator;
 
-    var states = Block.State.dummyIota(4, 0);
+    const air = comptime block_states.findBlock(.vanilla("air")).?;
+    const grass = comptime block_states.findBlock(.vanilla("grass_block")).?;
+    const dirt = comptime block_states.findBlock(.vanilla("dirt")).?;
+    const stone = comptime block_states.findBlock(.vanilla("stone")).?;
 
     var region: Region = undefined;
-    region.initEmpty(&states[0]);
+    region.initEmpty(air.default_state);
     defer region.deinit(&.overworld, gpa);
 
     try region.setBlock(&.overworld, gpa, .{
         .x = 0,
         .y = 64,
         .z = 0,
-    }, &states[1]);
+    }, stone.default_state);
     try region.setBlock(&.overworld, gpa, .{
         .x = 0,
         .y = 65,
         .z = 0,
-    }, &states[2]);
+    }, grass.default_state);
     try region.setBlock(&.overworld, gpa, .{
         .x = 1,
         .y = 64,
         .z = 0,
-    }, &states[3]);
+    }, dirt.default_state);
 
-    try std.testing.expectEqual(&states[1], region.getBlock(&.overworld, .{
+    try std.testing.expectEqual(stone.default_state, region.getBlock(&.overworld, .{
         .x = 0,
         .y = 64,
         .z = 0,
     }));
-    try std.testing.expectEqual(&states[2], region.getBlock(&.overworld, .{
+    try std.testing.expectEqual(grass.default_state, region.getBlock(&.overworld, .{
         .x = 0,
         .y = 65,
         .z = 0,
     }));
-    try std.testing.expectEqual(&states[3], region.getBlock(&.overworld, .{
+    try std.testing.expectEqual(dirt.default_state, region.getBlock(&.overworld, .{
         .x = 1,
         .y = 64,
         .z = 0,
