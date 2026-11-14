@@ -564,6 +564,25 @@ pub const player_info_initialize_s2c = StructuredPacket.getType(.{
     },
 });
 pub const player_info_remove_s2c = PacketType.prefixedArray(.uuid);
+pub const set_chunk_cache_center_s2c = StructuredPacket.getType(.{
+    .name = "SetChunkCacheCenterS2C",
+    .fields = &.{
+        .{ .name = "x", .type = .var_int },
+        .{ .name = "z", .type = .var_int },
+    },
+});
+pub const chunk_batch_start_s2c = StructuredPacket.named("ChunkBatchStartS2C");
+/// How many chunks the batch had.
+pub const chunk_batch_finished_s2c = PacketType{ .var_int = {} };
+pub const level_chunk_with_light_s2c = StructuredPacket.getType(.{
+    .name = "LevelChunkWithLightS2C",
+    .fields = &.{
+        .{ .name = "x", .type = .int },
+        .{ .name = "z", .type = .int },
+        // Heightmaps, sections, block entities and light: core's `world.chunk_packet`
+        .{ .name = "data", .type = .remainingArray(.ubyte) },
+    },
+});
 pub const system_chat_s2c = StructuredPacket.getType(.{
     .name = "SystemChatS2C",
     .fields = &.{

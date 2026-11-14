@@ -8,6 +8,7 @@ const BlocksReport = @import("reports/BlocksReport.zig");
 const RegistriesReport = @import("reports/RegistriesReport.zig");
 const PacketsReport = @import("reports/PacketsReport.zig");
 const DatapackReport = @import("reports/DatapackReport.zig");
+const worldgen = @import("worldgen.zig");
 
 const json = std.json;
 const Io = std.Io;
@@ -24,9 +25,12 @@ const ReportKind = enum {
     registries,
     packets,
     blocks,
+    /// Not a report, made from the data/minecraft/worldgen directory.
+    worldgen,
 
     pub fn filename(self: ReportKind) []const u8 {
         return switch (self) {
+            .worldgen => unreachable,
             inline else => |tag| "reports/" ++ @tagName(tag) ++ ".json",
         };
     }
@@ -936,7 +940,21 @@ pub fn main(init: std.process.Init) !void {
     var aw = Io.Writer.Allocating.init(init.gpa);
     defer aw.deinit();
 
-    {
+    gen: {
+        if (which == .worldgen) {
+            const synced_path = args_it.next() orelse return error.BadArgument;
+            const synced = try Io.Dir.cwd().readFileAlloc(init.io, synced_path, arena, .unlimited);
+            const biomes_path = args_it.next() orelse return error.BadArgument;
+            const biome_parameters = try Io.Dir.cwd().readFileAlloc(init.io, biomes_path, arena, .unlimited);
+
+            aw.writer.writeAll(gen_file_header) catch return error.OutOfMemory;
+            worldgen.generate(arena, init.io, dir, synced, biome_parameters, &aw.writer) catch |e| return switch (e) {
+                error.WriteFailed => error.OutOfMemory,
+                else => |err| err,
+            };
+            break :gen;
+        }
+
         const report_file = try dir.openFile(init.io, which.filename(), .{ .lock = .shared });
         defer report_file.close(init.io);
 
@@ -947,6 +965,7 @@ pub fn main(init: std.process.Init) !void {
         defer json_r.deinit();
 
         switch (which) {
+            .worldgen => unreachable,
             .registries => {
                 const reg_file = try json_r.mapr.deserialize(RegistriesReport);
                 const dpr = blk: {
