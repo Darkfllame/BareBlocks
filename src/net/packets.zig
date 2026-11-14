@@ -574,31 +574,13 @@ pub const set_chunk_cache_center_s2c = StructuredPacket.getType(.{
 pub const chunk_batch_start_s2c = StructuredPacket.named("ChunkBatchStartS2C");
 /// How many chunks the batch had.
 pub const chunk_batch_finished_s2c = PacketType{ .var_int = {} };
-/// Bytes that are written as they are, for what's encoded somewhere else. Takes everything left when read.
-const raw_bytes = PacketType{ .custom = .{
-    .type = []const u8,
-    .readFn = struct {
-        fn read(params: PacketType.ReadParams, reader: *std.Io.Reader, _: anytype, out: anytype) PacketType.ReadError!void {
-            out.* = reader.allocRemaining(params.arena.allocator(), .unlimited) catch |e| return switch (e) {
-                error.StreamTooLong => unreachable,
-                else => |err| err,
-            };
-        }
-    }.read,
-    .writeFn = struct {
-        fn write(_: PacketType.AllocPair, writer: *std.Io.Writer, val: anytype) PacketType.WriteError!void {
-            try writer.writeAll(val);
-        }
-    }.write,
-    .default_value_ptr = @ptrCast(&@as([]const u8, &.{})),
-} };
 pub const level_chunk_with_light_s2c = StructuredPacket.getType(.{
     .name = "LevelChunkWithLightS2C",
     .fields = &.{
         .{ .name = "x", .type = .int },
         .{ .name = "z", .type = .int },
         // Heightmaps, sections, block entities and light: core's `world.chunk_packet`
-        .{ .name = "data", .type = raw_bytes },
+        .{ .name = "data", .type = .remainingArray(.ubyte) },
     },
 });
 pub const system_chat_s2c = StructuredPacket.getType(.{

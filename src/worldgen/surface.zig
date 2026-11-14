@@ -1,6 +1,7 @@
 //! Replaces the stone of a filled chunk with what the material rules say (vanilla's `MaterialSystem`):
 //! grass, dirt, sand, deepslate, bedrock, the ore veins...
 const std = @import("std");
+const math = @import("math");
 const blocks = @import("blocks.zig");
 const climate = @import("climate.zig");
 const data = @import("data.zig");
@@ -140,7 +141,7 @@ const Context = struct {
                 if (self.block_y >= false_at_and_above) return false;
                 const from: f64 = @floatFromInt(true_at_and_below);
                 const to: f64 = @floatFromInt(false_at_and_above);
-                const probability = java.lerp(f64, (@as(f64, @floatFromInt(self.block_y)) - from) / (to - from), 1.0, 0.0);
+                const probability = math.lm.lerp(f64, 1.0, 0.0, (@as(f64, @floatFromInt(self.block_y)) - from) / (to - from));
                 var rand = self.state.gradient_randoms[id].?.at(self.block_x, self.block_y, self.block_z);
                 return @as(f64, rand.nextFloat()) < probability;
             },
@@ -159,7 +160,7 @@ const Context = struct {
                 const secondary = if (c.secondary_depth_range == 0)
                     0
                 else
-                    java.toInt(java.lerp(f64, (self.surfaceSecondary() - -1.0) / (1.0 - -1.0), 0.0, @floatFromInt(c.secondary_depth_range)));
+                    java.toInt(math.lm.lerp(f64, 0.0, @floatFromInt(c.secondary_depth_range), (self.surfaceSecondary() - -1.0) / (1.0 - -1.0)));
                 return stone_depth <= 1 + c.offset + surface_depth + secondary;
             },
             .not => |inverted| return !try self.testCondition(inverted),

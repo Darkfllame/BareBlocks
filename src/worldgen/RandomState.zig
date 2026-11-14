@@ -88,10 +88,10 @@ pub fn create(gpa: Allocator, seed: i64, settings: *const data.NoiseSettings) Er
 
     // Only the overworld's for now, the others use the legacy random
     std.debug.assert(!settings.legacy_random_source);
-    var world_random: random.Xoroshiro = .init(seed);
+    var world_random: random.Xoroshiro = .init(@bitCast(seed));
     self.seed = seed;
     self.settings = settings;
-    self.positional = world_random.forkPositional();
+    self.positional = random.forkPositional(&world_random);
     self.compiler = try .init(arena, self.positional);
 
     self.temperature = try self.compiler.getSampler(settings.temperature);
@@ -172,7 +172,7 @@ pub fn destroy(self: *RandomState) void {
 /// `RandomState.getOrCreateRandomFactory`
 fn randomFactory(self: *const RandomState, name: []const u8) random.Positional {
     var rand = self.positional.fromHashOf(name);
-    return rand.forkPositional();
+    return random.forkPositional(&rand);
 }
 
 fn namedNoise(self: *RandomState, id: []const u8) Allocator.Error!*const noise.Noise {

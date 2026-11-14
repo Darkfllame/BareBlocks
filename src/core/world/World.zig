@@ -24,7 +24,7 @@ const Entry = struct {
     /// Only its biomes once it's encoded.
     chunk: Chunk,
     /// What `net.packets.level_chunk_with_light_s2c` has after the coordinates.
-    encoded: ?[]const u8 = null,
+    encoded: ?[]u8 = null,
     /// The first y without blocks above it, of the chunk's first column.
     surface: i32 = 0,
 };
@@ -93,7 +93,7 @@ fn generated(self: *World, pos: Position) GetError!*const Entry {
 
 /// The chunk like `net.packets.level_chunk_with_light_s2c` wants it, generated if it wasn't yet.
 /// Stays valid as long as the world.
-pub fn encodedChunk(self: *World, pos: Position) GetError![]const u8 {
+pub fn encodedChunk(self: *World, pos: Position) GetError![]u8 {
     return (try self.generated(pos)).encoded.?;
 }
 

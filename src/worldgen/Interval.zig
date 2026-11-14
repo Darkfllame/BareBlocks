@@ -14,7 +14,7 @@ pub const nai: Interval = .{ .min = std.math.nan(f32), .max = std.math.nan(f32) 
 pub const infinite: Interval = .{ .min = -std.math.inf(f32), .max = std.math.inf(f32) };
 
 pub fn isNai(self: Interval) bool {
-    return self.min != self.min;
+    return self.min != self.min or self.max != self.max;
 }
 
 pub fn of(min: f32, max: f32) Interval {

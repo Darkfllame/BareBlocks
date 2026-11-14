@@ -1,6 +1,7 @@
 //! Java's arithmetic where it's different from Zig's, and the bits of `Mth` worldgen uses.
 //! Everything in worldgen has to round the same way vanilla does, so the order of operations matters.
 const std = @import("std");
+const lerp = @import("math").lm.lerp;
 
 /// `(int)` of a double: saturates, NaN is 0.
 pub fn toInt(v: f64) i32 {
@@ -23,16 +24,12 @@ pub fn floor(v: f64) i32 {
     return toInt(@floor(v));
 }
 
-pub fn lerp(comptime T: type, alpha: T, p0: T, p1: T) T {
-    return p0 + alpha * (p1 - p0);
-}
-
 pub fn lerp2(alpha1: f32, alpha2: f32, x00: f32, x10: f32, x01: f32, x11: f32) f32 {
-    return lerp(f32, alpha2, lerp(f32, alpha1, x00, x10), lerp(f32, alpha1, x01, x11));
+    return lerp(f32, lerp(f32, x00, x10, alpha1), lerp(f32, x01, x11, alpha1), alpha2);
 }
 
 pub fn lerp3(alpha1: f32, alpha2: f32, alpha3: f32, x000: f32, x100: f32, x010: f32, x110: f32, x001: f32, x101: f32, x011: f32, x111: f32) f32 {
-    return lerp(f32, alpha3, lerp2(alpha1, alpha2, x000, x100, x010, x110), lerp2(alpha1, alpha2, x001, x101, x011, x111));
+    return lerp(f32, lerp2(alpha1, alpha2, x000, x100, x010, x110), lerp2(alpha1, alpha2, x001, x101, x011, x111), alpha3);
 }
 
 pub fn smoothstep(x: f32) f32 {

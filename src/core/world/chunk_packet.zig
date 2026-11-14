@@ -1,6 +1,7 @@
 //! Encodes a chunk like vanilla's `ClientboundLevelChunkWithLightPacket`, everything after the
 //! chunk's coordinates: heightmaps, sections, block entities and light.
 const std = @import("std");
+const net = @import("net");
 const registries = @import("registries");
 const block_states = @import("block_states");
 const worldgen = @import("worldgen");
@@ -45,13 +46,7 @@ fn countsFor(kind: HeightmapType, state: StateId) bool {
 }
 
 fn varInt(w: *Io.Writer, value: usize) Io.Writer.Error!void {
-    var remaining: u32 = @intCast(value);
-    while (true) {
-        const byte: u8 = @truncate(remaining & 0x7F);
-        remaining >>= 7;
-        if (remaining == 0) return w.writeByte(byte);
-        try w.writeByte(byte | 0x80);
-    }
+    return net.StructuredPacket.writeVarInt(w, @as(i32, @intCast(value)));
 }
 
 fn ceilLog2(count: usize) u6 {

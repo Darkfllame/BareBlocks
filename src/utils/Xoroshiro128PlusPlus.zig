@@ -43,7 +43,7 @@ pub fn random(self: *Xoroshiro128PlusPlus) std.Random {
     };
 }
 
-fn next(self: *Xoroshiro128PlusPlus) u64 {
+pub fn next(self: *Xoroshiro128PlusPlus) u64 {
     const s0 = self.s[0];
     var s1 = self.s[1];
     const result = std.math.rotl(u64, s0 +% s1, 17) +% s0;
@@ -57,9 +57,57 @@ fn fill(self: *Xoroshiro128PlusPlus, buf: []u8) void {
     var index: usize = 0;
     while (index < buf.len) {
         const res = self.next();
-        const size = @min(buf.len, 8);
-        const res_bytes = @as([]const u8, @ptrCast(&res))[0..size];
-        @memcpy(buf[index..][0..size], res_bytes);
+        const size = @min(buf.len - index, 8);
+        @memcpy(buf[index..][0..size], std.mem.asBytes(&res)[0..size]);
         index += size;
     }
+}
+
+// What vanilla's `XoroshiroRandomSource` makes of it, worldgen needs the same numbers
+
+fn nextBits(self: *Xoroshiro128PlusPlus, comptime bits: u7) u64 {
+    return self.next() >> (64 - bits);
+}
+
+/// In `[0; bound[`
+pub fn nextInt(self: *Xoroshiro128PlusPlus, bound: u32) u32 {
+    std.debug.assert(bound > 0);
+    var multiplied = @as(u64, @as(u32, @truncate(self.next()))) * bound;
+    var fractional: u32 = @truncate(multiplied);
+    if (fractional < bound) {
+        const unbiased_start = (0 -% bound) % bound;
+        while (fractional < unbiased_start) {
+            multiplied = @as(u64, @as(u32, @truncate(self.next()))) * bound;
+            fractional = @truncate(multiplied);
+        }
+    }
+    return @intCast(multiplied >> 32);
+}
+
+pub fn nextIntBetweenInclusive(self: *Xoroshiro128PlusPlus, min: i32, max: i32) i32 {
+    return @as(i32, @intCast(self.nextInt(@intCast(max - min + 1)))) + min;
+}
+
+pub fn nextBoolean(self: *Xoroshiro128PlusPlus) bool {
+    return self.next() & 1 != 0;
+}
+
+pub fn nextFloat(self: *Xoroshiro128PlusPlus) f32 {
+    return @as(f32, @floatFromInt(self.nextBits(24))) * 0x1p-24;
+}
+
+pub fn nextDouble(self: *Xoroshiro128PlusPlus) f64 {
+    return @as(f64, @floatFromInt(self.nextBits(53))) * 0x1p-53;
+}
+
+test Xoroshiro128PlusPlus {
+    // Same as vanilla's `XoroshiroRandomSource(12345)`
+    var r: Xoroshiro128PlusPlus = .init(12345);
+    try std.testing.expectEqual(@as(u64, @bitCast(@as(i64, -8118485274630516485))), r.next());
+    try std.testing.expectEqual(209, r.nextInt(256));
+    try std.testing.expectEqual(@as(u64, 4597261291842716824), @as(u64, @bitCast(r.nextDouble())));
+    try std.testing.expectEqual(@as(u32, 1032334136), @as(u32, @bitCast(r.nextFloat())));
+
+    var buf: [12]u8 = undefined;
+    r.random().bytes(&buf);
 }

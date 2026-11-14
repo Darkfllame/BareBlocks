@@ -3,6 +3,7 @@
 //! Every sampler can be sampled a whole volume at once or one position at a time. The two don't
 //! always round the same way (`interpolated`), and vanilla uses both, so do we.
 const std = @import("std");
+const math = @import("math");
 const java = @import("java.zig");
 const noise = @import("noise.zig");
 const data = @import("data.zig");
@@ -139,7 +140,7 @@ pub const Spline = union(enum) {
         const y2 = try s.values[start + 1].sample(input);
         const a = d1 * (x2 - x1) - (y2 - y1);
         const b = -d2 * (x2 - x1) + (y2 - y1);
-        return java.lerp(f32, t, y1, y2) + t * (1.0 - t) * java.lerp(f32, t, a, b);
+        return math.lm.lerp(f32, y1, y2, t) + t * (1.0 - t) * math.lm.lerp(f32, a, b, t);
     }
 
     pub fn linearExtend(input: f32, location: f32, value: f32, derivative: f32) f32 {
@@ -664,7 +665,7 @@ pub const Sampler = union(enum) {
     fn lerpOrEnd(alpha: f32, first: f32, second: f32) f32 {
         if (alpha == 0.0) return first;
         if (alpha == 1.0) return second;
-        return java.lerp(f32, alpha, first, second);
+        return math.lm.lerp(f32, first, second, alpha);
     }
 
     fn selectInterval(thresholds: []const f32, count: usize, input: f32) usize {
@@ -729,19 +730,19 @@ pub const Sampler = union(enum) {
                 if (alpha == 0.0) return s.first.sampleValue(ctx, x, y, z);
                 if (alpha == 1.0) return s.second.sampleValue(ctx, x, y, z);
                 const first = try s.first.sampleValue(ctx, x, y, z);
-                return java.lerp(f32, alpha, first, try s.second.sampleValue(ctx, x, y, z));
+                return math.lm.lerp(f32, first, try s.second.sampleValue(ctx, x, y, z), alpha);
             },
             .lerp_const_first => |s| {
                 const alpha = try s.alpha.sampleValue(ctx, x, y, z);
                 if (alpha == 0.0) return s.first;
                 if (alpha == 1.0) return s.second.sampleValue(ctx, x, y, z);
-                return java.lerp(f32, alpha, s.first, try s.second.sampleValue(ctx, x, y, z));
+                return math.lm.lerp(f32, s.first, try s.second.sampleValue(ctx, x, y, z), alpha);
             },
             .lerp_const_second => |s| {
                 const alpha = try s.alpha.sampleValue(ctx, x, y, z);
                 if (alpha == 0.0) return s.first.sampleValue(ctx, x, y, z);
                 if (alpha == 1.0) return s.second;
-                return java.lerp(f32, alpha, try s.first.sampleValue(ctx, x, y, z), s.second);
+                return math.lm.lerp(f32, try s.first.sampleValue(ctx, x, y, z), s.second, alpha);
             },
             .range_choice => |s| {
                 const input = try s.input.sampleValue(ctx, x, y, z);
@@ -850,15 +851,15 @@ fn lerpInterpolated(s: *const Sampler.Interpolated, out: []f32, out_volume: Volu
     var z = z0;
     while (z <= z1) : (z += 1) {
         const alpha_z = @as(f32, @floatFromInt(z)) * s.cell_size_xz_inv;
-        const v00 = java.lerp(f32, alpha_z, v[0], v[4]);
-        const v01 = java.lerp(f32, alpha_z, v[2], v[6]);
-        const v10 = java.lerp(f32, alpha_z, v[1], v[5]);
-        const v11 = java.lerp(f32, alpha_z, v[3], v[7]);
+        const v00 = math.lm.lerp(f32, v[0], v[4], alpha_z);
+        const v01 = math.lm.lerp(f32, v[2], v[6], alpha_z);
+        const v10 = math.lm.lerp(f32, v[1], v[5], alpha_z);
+        const v11 = math.lm.lerp(f32, v[3], v[7], alpha_z);
         var x = x0;
         while (x <= x1) : (x += 1) {
             const alpha_x = @as(f32, @floatFromInt(x)) * s.cell_size_xz_inv;
-            const bottom = java.lerp(f32, alpha_x, v00, v10);
-            const top = java.lerp(f32, alpha_x, v01, v11);
+            const bottom = math.lm.lerp(f32, v00, v10, alpha_x);
+            const top = math.lm.lerp(f32, v01, v11, alpha_x);
             // Not a lerp along y: the step gets added block after block, the error with it
             const step = (top - bottom) * s.cell_size_y_inv;
             var value = bottom + step * @as(f32, @floatFromInt(y0));

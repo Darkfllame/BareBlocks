@@ -23,7 +23,7 @@ pub const Keybind = @import("keybinds.zig").Keybind;
 pub const Selector = @import("Selector.zig");
 pub const TextComponent = @import("TextComponent.zig");
 pub const UUID = @import("uuid.zig").UUID;
-pub const Xoroshiro128PlusPLus = @import("Xoroshiro128PlusPlus.zig");
+pub const Xoroshiro128PlusPlus = @import("Xoroshiro128PlusPlus.zig");
 
 pub fn Range(comptime T: type) type {
     const minT, const maxT, const epsilon = switch (@typeInfo(T)) {

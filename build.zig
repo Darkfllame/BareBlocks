@@ -253,7 +253,7 @@ pub fn build(b: *Build) !void {
         .imports = &.{
             .{ .name = "worldgen_data", .module = worldgen_data_mod },
         },
-        .local_imports = &.{"block_states"},
+        .local_imports = &.{ "block_states", "math", "utils" },
     });
     _ = worldgen_mod;
     const serial_mod = proj.createModule(b, .{

@@ -327,8 +327,8 @@ pub const Parameters = struct {
 
     /// `NormalNoise.create`, two perlin noises per octave.
     pub fn create(self: Parameters, arena: Allocator, rand: *random.Xoroshiro) Allocator.Error!Noise {
-        const first_random = rand.forkPositional();
-        const second_random = rand.forkPositional();
+        const first_random = random.forkPositional(rand);
+        const second_random = random.forkPositional(rand);
 
         var buf: [max_octaves]Octave = undefined;
         const octs = self.octaves(&buf);
@@ -359,7 +359,7 @@ test "same as vanilla" {
     defer arena.deinit();
 
     var seed: random.Xoroshiro = .init(12345);
-    const positional = seed.forkPositional();
+    const positional = random.forkPositional(&seed);
 
     const points = [_][3]f64{
         .{ 0, 0, 0 },
