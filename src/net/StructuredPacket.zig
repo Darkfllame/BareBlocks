@@ -417,7 +417,7 @@ pub const Type = union(enum) {
             .optional => |o| ?o.sub.getZigType(),
             .array => |a| switch (a.size) {
                 .fixed => |n| [n]a.sub.getZigType(),
-                else => []a.sub.getZigType(),
+                else => []const a.sub.getZigType(),
             },
             .@"enum" => |ib| if (@typeInfo(ib.base) != .@"enum")
                 @compileError("enum base-type must be an enum")
