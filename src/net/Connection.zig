@@ -361,15 +361,9 @@ fn writeEntry(self: *Connection, allocator: Allocator, start_event: *zio.Event) 
 
     logger.debug("[{f}] Started writing", .{self});
 
-    const io: std.Io = self.runtime.io();
-
-    const old_prot = io.swapCancelProtection(.blocked);
-    defer _ = io.swapCancelProtection(old_prot);
-
     while (true) {
         self.writeConnection(allocator) catch |e| {
             const err = switch (e) {
-                error.Canceled => unreachable,
                 error.WriteFailed => switch (self.writer_state.@"error".?) {
                     error.AddressFamilyUnsupported, error.Unexpected, error.FastOpenAlreadyInProgress, error.Canceled => unreachable,
                     error.SocketUnconnected => |err| switch (self.writer_state.state.load(.monotonic)) {
@@ -387,7 +381,7 @@ fn writeEntry(self: *Connection, allocator: Allocator, start_event: *zio.Event) 
                     error.EncryptionFailed,
                     => |err| err,
                 },
-                error.Disconnected => |err| err,
+                error.Canceled, error.Disconnected => error.Disconnected,
             };
             if (err == error.Disconnected) break;
             return err;
@@ -445,15 +439,18 @@ fn connectionHandlerInner(self: *Connection, allocator: Allocator) !void {
 
     start_ev.set();
 
-    var res: ?HandlerSelectResult = select.await() catch select.cancel();
+    var res: ?HandlerSelectResult = select.await() catch blk: {
+        self.send_state.channel.close(.graceful);
+        self.writer_state.state.store(.closing, .monotonic);
+        self.reader_state.state.store(.closing, .monotonic);
+        // We need to retrieve all returned values.
+        select.group.cancel(select.io);
+        break :blk select.queue.getOneUncancelable(select.io) catch unreachable;
+    };
 
     if (res.? == .read and res.?.read == error.LegacyHandshake) {
         self.disconnect(.{ .static = comptime &.text("LegacyHandshake", .{}) });
     }
-
-    self.send_state.channel.close(.graceful);
-    self.writer_state.state.store(.closing, .monotonic);
-    self.reader_state.state.store(.closing, .monotonic);
 
     while (res) |result| : (res = select.cancel()) {
         switch (result) {
@@ -602,6 +599,9 @@ fn writeConnection(self: *Connection, allocator: Allocator) !void {
         self.addWritePacket();
     }
 
+    zio.beginShield();
+    defer zio.endShield();
+
     try writer.flush();
 }
 
@@ -742,10 +742,11 @@ pub const StreamReadError = Io.net.Stream.Reader.Error || error{DecryptionFailed
 pub const StreamWriteError = Io.net.Stream.Writer.Error || error{EncryptionFailed};
 pub const InitError = Io.ConcurrentError || Allocator.Error || error{ SocketUnconnected, ConnectionTimedOut, Unexpected };
 
-pub const ReadCallbackError = PacketType.ReadError || WritePacketError || Io.net.ShutdownError || error{CallbackHandlerFailed};
+pub const ReadCallbackError = PacketType.ReadError || WritePacketError || Io.net.ShutdownError || Io.ConcurrentError || error{CallbackHandlerFailed};
 pub const WritePacketError = Io.Cancelable || Allocator.Error || PacketType.WriteError || error{
     PacketIDNotFound,
     PacketTooLarge,
+    ConnectionClosed,
 };
 pub const TickError = Io.Cancelable || Allocator.Error || Io.net.ShutdownError || WritePacketError;
 pub const SetEncryptionError = error{SetupFailed};
@@ -1194,14 +1195,13 @@ pub fn sendPacket(
 ) WritePacketError!void {
     switch (self.writer_state.state.load(.monotonic)) {
         .waiting, .alive => {},
-        .closing, .closed => {
-            logger.err("[{f}] Couldn't send packet", .{self});
-            return;
-        },
+        .closing, .closed => return error.ConnectionClosed,
     }
 
     try self.lock();
     defer self.unlock();
+
+    logger.debug("[{f}] Sending packet {s}", .{ self, resource });
 
     const pack_id = self.packet_registry.packedIDFromResource(self.target_side, self.out_phase, resource) orelse
         return error.PacketIDNotFound;
@@ -1272,8 +1272,8 @@ pub fn sendPacket(
     self.send_state.channel.send(pnode) catch |e| switch (e) {
         error.Canceled => return error.Canceled,
         error.Closed => {
-            logger.err("[{f}] Couldn't send packet", .{self});
             apair.gpa.free(bytes_result);
+            return error.ConnectionClosed;
         },
     };
 }
