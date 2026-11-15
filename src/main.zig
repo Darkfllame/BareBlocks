@@ -25,11 +25,13 @@ pub const std_options = std.Options{
 };
 
 pub const zio_options = zio.Options{
-    .scheduling = .work_stealing,
+    .scheduling = .pinned,
     .backend = .epoll,
     .resolve_beneath_mode = .best_effort,
     .no_hacks = true,
     .scheduler_metrics = true,
+    // Without this set to `false`, it'll crash when you don't do `runtime.io().recancel()` or `zio.recancel()`.
+    .debug_cancel = false,
 };
 
 pub const std_options_debug_io = zio.debug_io;
@@ -73,6 +75,8 @@ pub fn main(init: std.process.Init.Minimal) !@typeInfo(@typeInfo(@TypeOf(asyncMa
 
     zio_runtime.initStatic(gpa, .{
         .executors = .auto,
+        .enable_main_executor = false,
+        .metrics_log_interval = .fromSeconds(10),
     }) catch |err| {
         std.log.err("Failed to initialize ZIO runtime", .{});
         return err;

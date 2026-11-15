@@ -86,6 +86,7 @@ fn coro_acceptConnection(self: *Server, which: enum { v4, v6 }) CoroAccpetError!
             .options = self.accept_options,
         },
     };
+    defer sock.deinit(io);
 
     logger.info("Listening for connections on ip{t} interface: {f}", .{ which, sock.socket.address });
 
@@ -205,6 +206,41 @@ fn deinitBroadcast(self: *Server) void {
     };
 }
 
+fn pregenChunks(self: *Server) !void {
+    const center = overworld.spawn_chunk;
+    const world = &self.world;
+
+    const io = self.runtime.io();
+    const start = Io.Timestamp.now(io, .boot);
+
+    var count: i32 = 0;
+    var ring: i32 = 0;
+    while (ring <= overworld.view_distance) : (ring += 1) {
+        var dz: i32 = -ring;
+        while (dz <= ring) : (dz += 1) {
+            var dx: i32 = -ring;
+            while (dx <= ring) : (dx += 1) {
+                if (@max(@abs(dx), @abs(dz)) != ring) continue;
+                const pos: World.Position = .{ .x = center.x + dx, .z = center.z + dz };
+                logger.debug("Chunk ring {d}, count: {d} ({d}, {d})", .{ ring, count, pos.x, pos.z });
+                _ = world.encodedChunk(pos) catch |e| switch (e) {
+                    error.Canceled => return error.Canceled,
+                    error.OutOfMemory => {
+                        logger.err("Chunkgen error: {t}", .{e});
+                        return;
+                    },
+                };
+
+                count += 1;
+                // Generating takes a while, the other tasks still have to run
+                try zio.maybeYield();
+            }
+        }
+    }
+    const end = Io.Timestamp.now(io, .boot);
+    logger.info("Finished pregenerating {d} chunks in {f}", .{ count, start.durationTo(end) });
+}
+
 packet_registry: *const net.PacketRegistry,
 allocator: Allocator,
 runtime: *zio.Runtime,
@@ -223,7 +259,7 @@ broadcast: struct {
 },
 
 /// Connections in the play phase.
-players_mutex: zio.Mutex,
+players_mutex: zio.RwLock,
 players: std.ArrayList(*Connection),
 player_count: std.atomic.Value(u32),
 next_entity_id: std.atomic.Value(i32),
@@ -424,7 +460,7 @@ pub const ConfigPlayCommon = struct {
     fn handleCommonPing(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
         const ping = net.packets.ping_pong;
         const pack = try ping.readRoot(params, reader);
-        logger.debug("[{f}] Ping: {f}", .{ conn, ping.formatted(pack, params.toAllocPair()) });
+        // logger.debug("[{f}] Ping: {f}", .{ conn, ping.formatted(pack, params.toAllocPair()) });
 
         try conn.sendPacket(params.toAllocPair(), "pong", ping, pack);
     }
@@ -493,29 +529,53 @@ pub const PlayConnection = struct {
     fn deinitImpl(conn: *Connection, allocator: Allocator) void {
         const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
         const owner = owned.owner;
+        const playing = owned.data.play;
         {
-            owner.players_mutex.lockUncancelable();
-            defer owner.players_mutex.unlock();
-            _ = owner.player_count.fetchSub(1, .monotonic);
-
-            for (owner.players.items, 0..) |player, i| {
-                if (player == conn) {
-                    _ = owner.players.swapRemove(i);
-                    break;
-                }
-            }
             var arena: std.heap.ArenaAllocator = .init(allocator);
             defer arena.deinit();
 
-            var uuids = [_]utils.UUID{owned.data.play.profile.uuid};
-            for (owner.players.items) |player| {
-                player.sendPacket(.newWithArena(allocator, &arena), "player_info_remove", net.packets.player_info_remove_s2c, &uuids) catch |e|
-                    logger.warn("[{f}] Couldn't send player info: {t}", .{ player, e });
-            }
+            const apair = net.PacketType.AllocPair.newWithArena(allocator, &arena);
+
             const message: utils.TextComponent = .translate("multiplayer.player.left", .{
                 .args = &.{.text(owned.data.play.profile.username(), .{})},
                 .common = .{ .color = .yellow },
             });
+
+            {
+                owner.players_mutex.lockUncancelable();
+                defer owner.players_mutex.unlock();
+                _ = owner.player_count.fetchSub(1, .monotonic);
+
+                var remove_index: ?usize = null;
+                for (owner.players.items, 0..) |player, i| {
+                    if (player == conn) {
+                        if (remove_index != null) {
+                            const plr_owned: *OwnedConnection = @fieldParentPtr("connection", player);
+                            logger.err("Duplicate player entry: {f}", .{plr_owned.data.play.profile});
+                            _ = owner.players.swapRemove(i);
+                        } else {
+                            remove_index = i;
+                        }
+                        continue;
+                    }
+
+                    player.sendPacket(
+                        apair,
+                        "player_info_remove",
+                        net.packets.player_info_remove_s2c,
+                        (&playing.profile.uuid)[0..1],
+                    ) catch |e|
+                        logger.warn("[{f}] Couldn't send player info: {t}", .{ player, e });
+                }
+                if (remove_index) |i| {
+                    _ = owner.players.swapRemove(i);
+                } else {
+                    logger.warn("Missing player entry: {f}", .{playing.profile});
+                }
+            }
+
+            owner.players_mutex.lockSharedUncancelable();
+            defer owner.players_mutex.unlockShared();
             owner.broadcastSystemChatLocked(.newWithArena(allocator, &arena), message);
         }
         LoginConnection.deinitImpl(conn, allocator);
@@ -626,11 +686,11 @@ pub fn init(self: *Server, options: InitOptions) InitError!void {
     { // server id generation
         var id_writer = Io.Writer.fixed(&self.server_id);
         id_writer.writeAll(server_id_header) catch {};
+
         var hex_buffer: [@divFloor(self.server_id.len - server_id_header.len + 1, 2)]u8 = undefined;
         io.random(&hex_buffer);
-        for (hex_buffer) |b| {
-            id_writer.writeAll(&std.fmt.hex(b)) catch {};
-        }
+
+        id_writer.printHex(&hex_buffer, .lower) catch {};
     }
 
     if (options.broadcast) {
@@ -649,23 +709,31 @@ pub fn init(self: *Server, options: InitOptions) InitError!void {
     if (self.v6_enabled) {
         self.acceptv6_coro = try io.concurrent(coro_acceptConnection, .{ self, .v6 });
     }
+
+    self.group.concurrent(io, pregenChunks, .{self}) catch {
+        logger.warn("Failed to run chunk pregen", .{});
+    };
 }
 
 pub fn deinit(self: *Server) void {
     const io = self.runtime.io();
 
-    if (false) { // somehow this causes Connection's writeEntry to hang ? i'm lowk fried tho, might investigate next
-        self.players_mutex.lockUncancelable();
-        defer self.players_mutex.unlock();
+    if (true) { // somehow this causes Connection's writeEntry to hang ? i'm lowk fried tho, might investigate next
+        self.players_mutex.lockSharedUncancelable();
+        defer self.players_mutex.unlockShared();
 
         for (self.players.items) |conn| {
             conn.disconnect(.{ .static = &.server_shutdown });
         }
+
+        logger.info("Disconnected all clients", .{});
     }
 
     self.deinitBroadcast();
 
     self.group.cancel(io);
+
+    logger.info("Canceled all tasks", .{});
 
     self.accept_coro.cancel(io) catch |e| {
         logger.err("Caught error while closing server: {t}", .{e});
@@ -673,17 +741,7 @@ pub fn deinit(self: *Server) void {
     self.acceptv6_coro.cancel(io) catch |e| {
         logger.err("Caught error while closing server: {t}", .{e});
     };
-
-    Io.net.Socket.close(&.{
-        .handle = self.sockv4_handle,
-        .address = .{ .ip4 = self.ipv4 },
-    }, io);
-    if (self.v6_enabled) {
-        Io.net.Socket.close(&.{
-            .handle = self.sockv6_handle,
-            .address = .{ .ip6 = self.ipv6 },
-        }, io);
-    }
+    logger.info("Canceled all tasks (part 2)", .{});
 
     self.players.deinit(self.allocator);
     self.world.deinit();
@@ -702,7 +760,7 @@ pub fn addressAlt(self: *const Server) AddressAlt {
 pub fn @"serverbound/handshake/intention"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
     const hs = net.packets.handshake_c2s;
     const pack = try hs.readRoot(params, reader);
-    logger.debug("[{f}] Hanshake: {f}", .{ conn, hs.formatted(pack, params.toAllocPair()) });
+    // logger.debug("[{f}] Hanshake: {f}", .{ conn, hs.formatted(pack, params.toAllocPair()) });
 
     try conn.lock();
     defer conn.unlock();
@@ -740,7 +798,8 @@ pub fn @"serverbound/handshake/intention"(conn: *Connection, reader: *Io.Reader,
 pub fn @"serverbound/status/status_request"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
     const status = net.packets.status_request_c2s;
     const pack = try status.readRoot(params, reader);
-    logger.debug("[{f}] Status: {f}", .{ conn, status.formatted(pack, params.toAllocPair()) });
+    _ = pack;
+    // logger.debug("[{f}] Status: {f}", .{ conn, status.formatted(pack, params.toAllocPair()) });
     try conn.lock();
     defer conn.unlock();
 
@@ -766,7 +825,7 @@ pub fn @"serverbound/status/status_request"(conn: *Connection, reader: *Io.Reade
 pub fn @"serverbound/status/ping_request"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
     const ping = net.packets.ping_pong;
     const pack = try ping.readRoot(params, reader);
-    logger.debug("[{f}] Ping: {f}", .{ conn, ping.formatted(pack, params.toAllocPair()) });
+    // logger.debug("[{f}] Ping: {f}", .{ conn, ping.formatted(pack, params.toAllocPair()) });
 
     try conn.sendPacket(
         params.toAllocPair(),
@@ -779,7 +838,7 @@ pub fn @"serverbound/status/ping_request"(conn: *Connection, reader: *Io.Reader,
 pub fn @"serverbound/login/hello"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
     const hello = net.packets.login_start_c2s;
     const pack = try hello.readRoot(params, reader);
-    logger.debug("[{f}] Login Start: {f}", .{ conn, hello.formatted(pack, params.toAllocPair()) });
+    // logger.debug("[{f}] Login Start: {f}", .{ conn, hello.formatted(pack, params.toAllocPair()) });
 
     const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
     if (owned.data != .none) {
@@ -842,7 +901,7 @@ pub fn @"serverbound/login/key"(conn: *Connection, reader: *Io.Reader, params: n
     const login_success = net.packets.login_success_s2c;
 
     const pack = try key.readRoot(params, reader);
-    logger.debug("[{f}] Login Key: {f}", .{ conn, key.formatted(pack, params.toAllocPair()) });
+    // logger.debug("[{f}] Login Key: {f}", .{ conn, key.formatted(pack, params.toAllocPair()) });
 
     const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
     const owner = owned.owner;
@@ -898,7 +957,8 @@ pub fn @"serverbound/login/key"(conn: *Connection, reader: *Io.Reader, params: n
 pub fn @"serverbound/login/login_acknowledged"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
     const ack = net.packets.login_acknowledged_c2s;
     const pack = try ack.readRoot(params, reader);
-    logger.debug("[{f}] Login Ack: {f}", .{ conn, ack.formatted(pack, params.toAllocPair()) });
+    _ = pack;
+    // logger.debug("[{f}] Login Ack: {f}", .{ conn, ack.formatted(pack, params.toAllocPair()) });
 
     const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
     const owner = owned.owner;
@@ -971,7 +1031,7 @@ fn startConfiguration(conn: *Connection, apair: net.PacketType.AllocPair) Connec
 pub fn @"serverbound/configuration/select_known_packs"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
     const known_packs = net.packets.known_packs;
     const pack = try known_packs.readRoot(params, reader);
-    logger.debug("[{f}] Known Packs: {f}", .{ conn, known_packs.formatted(pack, params.toAllocPair()) });
+    // logger.debug("[{f}] Known Packs: {f}", .{ conn, known_packs.formatted(pack, params.toAllocPair()) });
 
     // Registry entries are only sent by name, the client must have vanilla's data for them
     const vanilla = registries.known_pack;
@@ -1039,7 +1099,8 @@ pub const @"serverbound/configuration/keep_alive" = ConfigPlayCommon.handleCommo
 pub fn @"serverbound/configuration/finish_configuration"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
     const ack = net.packets.ack_finish_configuration_c2s;
     const pack = try ack.readRoot(params, reader);
-    logger.debug("[{f}] Finish Configuration Ack: {f}", .{ conn, ack.formatted(pack, params.toAllocPair()) });
+    _ = pack;
+    // logger.debug("[{f}] Finish Configuration Ack: {f}", .{ conn, ack.formatted(pack, params.toAllocPair()) });
     logger.info("[{f}] Configuration done", .{conn});
 
     const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
@@ -1068,7 +1129,7 @@ pub fn @"serverbound/configuration/finish_configuration"(conn: *Connection, read
     }
 
     try joinWorld(conn, params.toAllocPair());
-    try sendChunks(conn, params.toAllocPair());
+    try owner.group.concurrent(owner.runtime.io(), sendChunks, .{conn.acquire()});
 }
 
 //=====================play===========================//
@@ -1145,50 +1206,56 @@ fn joinWorld(conn: *Connection, apair: net.PacketType.AllocPair) Connection.Read
         .value = 0,
     });
 
-    owner.players_mutex.lockUncancelable();
-    defer owner.players_mutex.unlock();
-    try owner.players.append(owner.allocator, conn);
-    _ = owner.player_count.fetchAdd(1, .monotonic);
+    {
+        owner.players_mutex.lockUncancelable();
+        defer owner.players_mutex.unlock();
+        try owner.players.append(owner.allocator, conn);
+        _ = owner.player_count.fetchAdd(1, .monotonic);
 
-    // Same as vanilla's `PlayerList.placeNewPlayer`: everyone gets the new player, the new player
-    // gets everyone. The client also needs its own entry, it's where it gets its game mode from.
-    const player_info = net.packets.player_info_initialize_s2c;
-    const PlayerEntry = net.packets.player_info_entry.getZigType();
-    const all_actions: std.EnumSet(net.packets.PlayerInfoAction) = .full;
+        // Same as vanilla's `PlayerList.placeNewPlayer`: everyone gets the new player, the new player
+        // gets everyone. The client also needs its own entry, it's where it gets its game mode from.
+        const player_info = net.packets.player_info_initialize_s2c;
+        const PlayerEntry = net.packets.player_info_entry.getZigType();
+        const all_actions: std.EnumSet(net.packets.PlayerInfoAction) = .full;
 
-    var new_entry = [_]PlayerEntry{playerInfoEntry(playing)};
-    for (owner.players.items) |player| {
-        player.sendPacket(apair, "player_info_update", player_info, .{ .actions = all_actions, .players = &new_entry }) catch |e|
-            logger.warn("[{f}] Couldn't send player info: {t}", .{ player, e });
-    }
-    const others = try apair.arena.alloc(PlayerEntry, owner.players.items.len - 1);
-    var i: usize = 0;
-    for (owner.players.items) |player| {
-        if (player == conn) continue;
-        const other: *OwnedConnection = @fieldParentPtr("connection", player);
-        others[i] = playerInfoEntry(other.data.play);
-        i += 1;
-    }
-    if (others.len != 0) {
-        try conn.sendPacket(apair, "player_info_update", player_info, .{ .actions = all_actions, .players = others });
+        var new_entry = [_]PlayerEntry{playerInfoEntry(playing)};
+        const others = try apair.arena.alloc(PlayerEntry, owner.players.items.len - 1);
+        var i: usize = 0;
+        for (owner.players.items) |player| {
+            player.sendPacket(apair, "player_info_update", player_info, .{ .actions = all_actions, .players = &new_entry }) catch |e|
+                logger.warn("[{f}] Couldn't send player info: {t}", .{ player, e });
+            if (player == conn) continue;
+            const other: *OwnedConnection = @fieldParentPtr("connection", player);
+            others[i] = playerInfoEntry(other.data.play);
+            i += 1;
+        }
+        if (others.len != 0) {
+            try conn.sendPacket(apair, "player_info_update", player_info, .{ .actions = all_actions, .players = others });
+        }
     }
 
-    logger.info("{s} joined the game", .{playing.profile.username()});
     const message: utils.TextComponent = .translate("multiplayer.player.joined", .{
         .args = &.{.text(playing.profile.username(), .{})},
         .common = .{ .color = .yellow },
     });
+
+    owner.players_mutex.lockSharedUncancelable();
+    defer owner.players_mutex.unlockShared();
     owner.broadcastSystemChatLocked(apair, message);
 }
 
-/// Every chunk in view of the spawn, the closest ones first.
-fn sendChunks(conn: *Connection, apair: net.PacketType.AllocPair) Connection.ReadCallbackError!void {
-    const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
-    const world = &owned.owner.world;
+fn sendChunksInner(conn: *Connection, apair: net.PacketType.AllocPair, world: *World) !void {
     const center = overworld.spawn_chunk;
 
     try conn.sendPacket(apair, "set_chunk_cache_center", net.packets.set_chunk_cache_center_s2c, .{ .x = center.x, .z = center.z });
+    logger.debug("[{f}] cache center", .{conn});
     try conn.sendPacket(apair, "chunk_batch_start", net.packets.chunk_batch_start_s2c, .{});
+    logger.debug("[{f}] batch start", .{conn});
+
+    const owner: *Server = @fieldParentPtr("world", world);
+    const io = owner.runtime.io();
+    const start = Io.Timestamp.now(io, .boot);
+
     var count: i32 = 0;
     var ring: i32 = 0;
     while (ring <= overworld.view_distance) : (ring += 1) {
@@ -1198,18 +1265,51 @@ fn sendChunks(conn: *Connection, apair: net.PacketType.AllocPair) Connection.Rea
             while (dx <= ring) : (dx += 1) {
                 if (@max(@abs(dx), @abs(dz)) != ring) continue;
                 const pos: World.Position = .{ .x = center.x + dx, .z = center.z + dz };
-                try conn.sendPacket(apair, "level_chunk_with_light", net.packets.level_chunk_with_light_s2c, .{
-                    .x = pos.x,
-                    .z = pos.z,
-                    .data = try world.encodedChunk(pos),
-                });
+                {
+                    // try conn.lock();
+                    // defer conn.unlock();
+
+                    // logger.debug("[{f}] chunk ring {d}, count: {d} ({d}, {d})", .{ conn, ring, count, pos.x, pos.z });
+                    const encoded = try world.encodedChunk(pos);
+                    // logger.debug("[{f}]  - ENCODED", .{conn});
+                    try conn.sendPacket(apair, "level_chunk_with_light", net.packets.level_chunk_with_light_s2c, .{
+                        .x = pos.x,
+                        .z = pos.z,
+                        .data = encoded,
+                    });
+                    // logger.debug("[{f}]  - SENT", .{conn});
+                }
                 count += 1;
                 // Generating takes a while, the other connections still have to run
-                try zio.maybeYield();
+                // try zio.maybeYield();
+                // well technically, it already gives chances for others to run with all the locking and other IO occurring.
+                // I reckon it is only for tasks only doing pure computation.
+                // Could put zio.maybeYield() inside .encodedChunk(). But we should focus on actual world gen stuff.
             }
         }
     }
+    const time_taken = start.untilNow(io, .boot);
+    logger.debug("[{f}] batch finished: {d} chunks in {f} ({d}/s avg)", .{ conn, count, time_taken, @divCeil(count, time_taken.toSeconds()) });
     try conn.sendPacket(apair, "chunk_batch_finished", net.packets.chunk_batch_finished_s2c, count);
+}
+
+/// Every chunk in view of the spawn, the closest ones first.
+fn sendChunks(conn: *Connection) Io.Cancelable!void {
+    const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
+    const owner = owned.owner;
+    const allocator = owner.allocator;
+    const world = &owner.world;
+    defer conn.release(allocator);
+
+    var arena: std.heap.ArenaAllocator = undefined;
+    const apair = net.PacketType.AllocPair.newFromGpa(allocator, &arena);
+    defer arena.deinit();
+
+    sendChunksInner(conn, apair, world) catch |err| {
+        logger.err("Error sending chunks: {t}", .{err});
+        if (@errorReturnTrace()) |ert| std.debug.dumpErrorReturnTrace(ert);
+        if (err == error.Canceled) return error.Canceled;
+    };
 }
 
 fn playerInfoEntry(playing: *const PlayConnection) net.packets.player_info_entry.getZigType() {
@@ -1225,8 +1325,9 @@ fn playerInfoEntry(playing: *const PlayConnection) net.packets.player_info_entry
     };
 }
 
-/// `players_mutex` must be locked.
+/// `players_mutex` must be locked for reading or writing.
 fn broadcastSystemChatLocked(self: *Server, apair: net.PacketType.AllocPair, message: utils.TextComponent) void {
+    chat_logger.info("{f}", .{message});
     for (self.players.items) |player| {
         player.sendPacket(apair, "system_chat", net.packets.system_chat_s2c, .{
             .content = message,
@@ -1301,7 +1402,7 @@ pub const @"serverbound/play/move_player_rot" = ignorePacket;
 pub const @"serverbound/play/move_player_status_only" = ignorePacket;
 pub const @"serverbound/play/pick_item_from_block" = ignorePacket;
 pub const @"serverbound/play/pick_item_from_entity" = ignorePacket;
-pub const @"serverbound/play/ping_request" = ignorePacket;
+pub const @"serverbound/play/ping_request" = @"serverbound/status/ping_request";
 pub const @"serverbound/play/player_abilities" = ignorePacket;
 pub const @"serverbound/play/player_action" = ignorePacket;
 pub const @"serverbound/play/player_command" = ignorePacket;

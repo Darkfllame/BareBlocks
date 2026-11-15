@@ -158,8 +158,8 @@ pub const Section = struct {
     pub const RawData = if (utils.is_safe) []BlockIndex else [*]BlockIndex;
     pub const SectionBlockPosition = packed struct {
         x: Unit,
-        y: Unit,
         z: Unit,
+        y: Unit,
 
         pub const Unit = @Int(.unsigned, max_octree_depth);
         pub const Shift = std.math.Log2Int(SectionBlockPosition.Unit);
@@ -174,6 +174,62 @@ pub const Section = struct {
     /// memory efficient and faster to read and write is better. Especially if it changes
     /// a lot (i.e: near a player)
     pub const OctreeBranch = union(enum) {
+        const Alt = struct {
+            depth: u8,
+            palette: *const BlockPalette,
+            branch: *const OctreeBranch,
+
+            pub fn format(self: Alt, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+                var space = [_][]const u8{"    "};
+                try writer.writeSplatAll(&space, self.depth);
+
+                switch (self.branch.*) {
+                    .branches => |branches| {
+                        try writer.writeAll("{ .branches = .{\n");
+                        for (branches, 0..) |*br, i| {
+                            try writer.print(".({d}, {d}, {d}) = {f}\n", .{
+                                i & 1, // x
+                                (i >> 2) & 1, // y
+                                (i >> 1) & 1, // z
+                                Alt{
+                                    .depth = self.depth + 1,
+                                    .palette = self.palette,
+                                    .branch = br,
+                                },
+                            });
+                        }
+                        try writer.writeAll("}}");
+                    },
+                    .leaf => |leaf| {
+                        const state_id = self.palette.getAt(leaf);
+                        try writer.print("{{ .leaf = {d}({qf}) }}", .{
+                            state_id,
+                            utils.Identifier.alt(utils.Identifier.validate(block_states.blockOf(state_id).name) catch unreachable, .full),
+                        });
+                    },
+                    .raw => |r| {
+                        _ = r; // autofix
+                        const raw_side_len = @as(PaletteSize, side_length) >> @intCast(self.depth);
+                        const raw_len = raw_side_len * raw_side_len * raw_side_len;
+
+                        try writer.print("{{ .raw = ({d} entries) }}", .{raw_len});
+
+                        // const ptr = if (utils.is_safe) blk: {
+                        //     assert(r.len == raw_len); // bad length
+                        //     break :blk r;
+                        // } else r[0..raw_len];
+
+                        // for (0..raw_len) |i| {
+                        //     const x = i % raw_side_len;
+                        //     const z = (i % (raw_side_len * raw_side_len)) / raw_side_len;
+                        //     const y = i / (raw_side_len * raw_side_len);
+
+                        // }
+                    },
+                }
+            }
+        };
+
         branches: *[8]OctreeBranch,
         /// A value of `null` means this leaf node is empty.
         leaf: BlockIndex,
@@ -186,6 +242,37 @@ pub const Section = struct {
     };
 
     pub const BlockPalette = struct {
+        fn newIdNoDupe(self: *BlockPalette, gpa: Allocator, state: BlockStateId) Allocator.Error!BlockIndex {
+            var it = self.mask.iterator(.{ .kind = .unset });
+            if (it.next()) |idx| blk: {
+                if (idx >= self.states_len) break :blk;
+
+                self.mask.set(idx);
+                self.states[idx] = state;
+                return @intCast(idx);
+            }
+
+            if (self.states_cap <= self.states_len) {
+                const new_cap = self.states_cap + max_unused_states;
+
+                if (gpa.resize(self.states[0..self.states_cap], new_cap)) {
+                    self.states_cap = new_cap;
+                } else {
+                    const new_sl = try gpa.alloc(BlockStateId, new_cap);
+                    @memmove(new_sl[0..self.states_len], self.states[0..self.states_len]);
+                    gpa.free(self.states[0..self.states_cap]);
+                    self.states = new_sl.ptr;
+                    self.states_cap = new_cap;
+                }
+            }
+
+            const idx: BlockIndex = @intCast(self.states_len);
+            self.mask.set(idx);
+            self.states[idx] = state;
+            self.states_len += 1;
+            return idx;
+        }
+
         mask: std.bit_set.Array(usize, total_blocks),
         states: [*]BlockStateId,
         states_cap: PaletteSize,
@@ -244,46 +331,16 @@ pub const Section = struct {
                 if (self.states[idx] == state) return .{ @as(BlockIndex, @intCast(idx)), false };
             }
 
-            return .{ try self.newId(gpa, state), true };
+            return .{ try self.newIdNoDupe(gpa, state), true };
         }
 
         pub fn newId(self: *BlockPalette, gpa: Allocator, state: BlockStateId) Allocator.Error!BlockIndex {
-            var free_space: ?BlockIndex = null;
             var it = self.mask.iterator(.{});
             while (it.next()) |idx| {
-                const st_p = &self.states[idx];
-                if (st_p.* == state) @panic("Invalid call to newId");
-                if (free_space == null) free_space = @intCast(idx);
+                if (self.states[idx] == state) @panic("Invalid call to newId");
             }
 
-            if (free_space) |idx| {
-                self.mask.set(idx);
-                self.states[idx] = state;
-                return idx;
-            }
-
-            blk: {
-                if (self.states_cap > self.states_len) break :blk;
-
-                const new_cap = self.states_cap + max_unused_states;
-
-                if (gpa.resize(self.states[0..self.states_cap], new_cap)) {
-                    self.states_cap = new_cap;
-                    break :blk;
-                }
-
-                const new_sl = try gpa.alloc(BlockStateId, new_cap);
-                @memmove(new_sl[0..self.states_len], self.states[0..self.states_len]);
-                gpa.free(self.states[0..self.states_cap]);
-                self.states = new_sl.ptr;
-                self.states_cap = new_cap;
-            }
-
-            const idx: BlockIndex = @intCast(self.states_len);
-            self.mask.set(idx);
-            self.states[idx] = state;
-            self.states_len += 1;
-            return idx;
+            return self.newIdNoDupe(gpa, state);
         }
 
         pub fn removeId(self: *BlockPalette, id: BlockIndex) void {
@@ -372,6 +429,17 @@ pub const Section = struct {
                 ptr[rawIndex(raw_side_len, x, y, z)] = state_id;
             },
         }
+    }
+
+    // TODO: .optimize() functions. Should calculate the needed memory for each variants depending on
+    // TODO: the current variant.
+
+    pub fn format(self: *const Section, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writer.print("(Palette: {d} entries, Data: {f})", .{ self.palette.countUsedStates(), OctreeBranch.Alt{
+            .depth = 0,
+            .palette = &self.palette,
+            .branch = &self.data,
+        } });
     }
 };
 
@@ -489,6 +557,7 @@ test Section {
 
     var sec = try Section.initFill(gpa, air.default_state);
     defer sec.deinit(gpa);
+    errdefer std.testing.failPrint("{f}\n", .{sec});
 
     try sec.setBlock(.{
         .x = 0,
