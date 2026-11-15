@@ -470,15 +470,9 @@ fn compile(self: *Compiler, node: *const Node) Error!*const Sampler {
         .unary => |f| blk: {
             const input = try self.compile(f.input);
             break :blk switch (f.op) {
-                .abs => .{ .abs = input },
-                .square => .{ .square = input },
-                .cube => .{ .cube = input },
+                inline .abs, .square, .cube, .reciprocal, .negate, .squeeze, .sign => |tag| @unionInit(Sampler, @tagName(tag), input),
                 .half_negative => .{ .leaky_relu = .{ .input = input, .factor = 0.5 } },
                 .quarter_negative => .{ .leaky_relu = .{ .input = input, .factor = 0.25 } },
-                .reciprocal => .{ .reciprocal = input },
-                .negate => .{ .negate = input },
-                .squeeze => .{ .squeeze = input },
-                .sign => .{ .sign = input },
                 .sqrt, .log => return error.UnsupportedDensityFunction,
             };
         },
