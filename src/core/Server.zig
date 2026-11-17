@@ -50,20 +50,6 @@ const TickError = Io.UnexpectedError || Allocator.Error || error{
     SystemResources,
 };
 
-const PolledInfo = union(enum) {
-    server,
-    serverv6,
-    broadcast,
-    client: *Connection,
-
-    pub fn format(self: PolledInfo, writer: *Io.Writer) Io.Writer.Error!void {
-        switch (self) {
-            .server => try writer.writeAll(".server"),
-            .client => |conn| try writer.print("({f})", .{conn}),
-        }
-    }
-};
-
 fn coro_acceptConnection(self: *Server, which: enum { v4, v6 }) CoroAccpetError!void {
     self.start.wait() catch return;
     defer logger.info("Stopped listening for connections on ip{t} interface", .{which});
@@ -151,11 +137,11 @@ fn coro_acceptConnection(self: *Server, which: enum { v4, v6 }) CoroAccpetError!
         };
         defer conn.release(.failing);
         stream = null;
-        logger.debug("[{f}] Initalized", .{conn});
+        logger.debug("[{f}] Initalized", .{conn.alt()});
 
         conn.start.set();
 
-        logger.debug("[{f}] Accept finish", .{conn});
+        logger.debug("[{f}] Accept finish", .{conn.alt()});
     }
 }
 
@@ -233,7 +219,7 @@ fn pregenChunks(self: *Server) !void {
 
                 count += 1;
                 // Generating takes a while, the other tasks still have to run
-                try zio.maybeYield();
+                try zio.yield();
             }
         }
     }
@@ -460,7 +446,7 @@ pub const ConfigPlayCommon = struct {
     fn handleCommonPing(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
         const ping = net.packets.ping_pong;
         const pack = try ping.readRoot(params, reader);
-        // logger.debug("[{f}] Ping: {f}", .{ conn, ping.formatted(pack, params.toAllocPair()) });
+        // logger.debug("[{f}] Ping: {f}", .{ conn.alt(), ping.formatted(pack, params.toAllocPair()) });
 
         try conn.sendPacket(params.toAllocPair(), "pong", ping, pack);
     }
@@ -468,7 +454,7 @@ pub const ConfigPlayCommon = struct {
     fn handleCommonKeepAlive(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
         const keep_alive = net.packets.keep_alive;
         const pack = try keep_alive.readRoot(params, reader);
-        logger.debug("[{f}] Keep Alive: {f}", .{ conn, keep_alive.formatted(pack, params.toAllocPair()) });
+        logger.debug("[{f}] Keep Alive: {f}", .{ conn.alt(), keep_alive.formatted(pack, params.toAllocPair()) });
 
         const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
         const common = switch (owned.data) {
@@ -531,51 +517,50 @@ pub const PlayConnection = struct {
         const owner = owned.owner;
         const playing = owned.data.play;
         {
+            // TODO: Yep deadlocks pissing me off
             var arena: std.heap.ArenaAllocator = .init(allocator);
             defer arena.deinit();
 
             const apair = net.PacketType.AllocPair.newWithArena(allocator, &arena);
 
+            logger.debug("Locking player mutex", .{});
+            owner.players_mutex.lockUncancelable();
+            defer owner.players_mutex.unlock();
+            _ = owner.player_count.fetchSub(1, .monotonic);
+            logger.debug("Player count: {d}", .{owner.players.items.len});
+
+            var remove_index: ?usize = null;
+            for (owner.players.items, 0..) |player, i| {
+                if (player == conn) {
+                    if (remove_index != null) {
+                        logger.err("Duplicate player entry: {f}", .{playing.profile});
+                        _ = owner.players.swapRemove(i);
+                    } else {
+                        remove_index = i;
+                    }
+                    continue;
+                }
+
+                player.sendPacket(
+                    apair,
+                    "player_info_remove",
+                    net.packets.player_info_remove_s2c,
+                    (&playing.profile.uuid)[0..1],
+                ) catch |e|
+                    logger.warn("[{f}] Couldn't send player info: {t}", .{ player.alt(), e });
+            }
+            logger.debug("Removing player index: {?d}", .{remove_index});
+            if (remove_index) |i| {
+                _ = owner.players.swapRemove(i);
+            } else {
+                logger.warn("Missing player entry: {f}", .{playing.profile});
+            }
+
             const message: utils.TextComponent = .translate("multiplayer.player.left", .{
                 .args = &.{.text(owned.data.play.profile.username(), .{})},
                 .common = .{ .color = .yellow },
             });
-
-            {
-                owner.players_mutex.lockUncancelable();
-                defer owner.players_mutex.unlock();
-                _ = owner.player_count.fetchSub(1, .monotonic);
-
-                var remove_index: ?usize = null;
-                for (owner.players.items, 0..) |player, i| {
-                    if (player == conn) {
-                        if (remove_index != null) {
-                            const plr_owned: *OwnedConnection = @fieldParentPtr("connection", player);
-                            logger.err("Duplicate player entry: {f}", .{plr_owned.data.play.profile});
-                            _ = owner.players.swapRemove(i);
-                        } else {
-                            remove_index = i;
-                        }
-                        continue;
-                    }
-
-                    player.sendPacket(
-                        apair,
-                        "player_info_remove",
-                        net.packets.player_info_remove_s2c,
-                        (&playing.profile.uuid)[0..1],
-                    ) catch |e|
-                        logger.warn("[{f}] Couldn't send player info: {t}", .{ player, e });
-                }
-                if (remove_index) |i| {
-                    _ = owner.players.swapRemove(i);
-                } else {
-                    logger.warn("Missing player entry: {f}", .{playing.profile});
-                }
-            }
-
-            owner.players_mutex.lockSharedUncancelable();
-            defer owner.players_mutex.unlockShared();
+            logger.debug("Broadcasting leaving message", .{});
             owner.broadcastSystemChatLocked(.newWithArena(allocator, &arena), message);
         }
         LoginConnection.deinitImpl(conn, allocator);
@@ -731,17 +716,16 @@ pub fn deinit(self: *Server) void {
 
     self.deinitBroadcast();
 
-    self.group.cancel(io);
-
-    logger.info("Canceled all tasks", .{});
-
     self.accept_coro.cancel(io) catch |e| {
         logger.err("Caught error while closing server: {t}", .{e});
     };
     self.acceptv6_coro.cancel(io) catch |e| {
         logger.err("Caught error while closing server: {t}", .{e});
     };
-    logger.info("Canceled all tasks (part 2)", .{});
+
+    self.group.cancel(io);
+
+    logger.info("Canceled all pending tasks", .{});
 
     self.players.deinit(self.allocator);
     self.world.deinit();
@@ -760,7 +744,7 @@ pub fn addressAlt(self: *const Server) AddressAlt {
 pub fn @"serverbound/handshake/intention"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
     const hs = net.packets.handshake_c2s;
     const pack = try hs.readRoot(params, reader);
-    // logger.debug("[{f}] Hanshake: {f}", .{ conn, hs.formatted(pack, params.toAllocPair()) });
+    // logger.debug("[{f}] Hanshake: {f}", .{ conn.alt(), hs.formatted(pack, params.toAllocPair()) });
 
     try conn.lock();
     defer conn.unlock();
@@ -799,13 +783,11 @@ pub fn @"serverbound/status/status_request"(conn: *Connection, reader: *Io.Reade
     const status = net.packets.status_request_c2s;
     const pack = try status.readRoot(params, reader);
     _ = pack;
-    // logger.debug("[{f}] Status: {f}", .{ conn, status.formatted(pack, params.toAllocPair()) });
-    try conn.lock();
-    defer conn.unlock();
+    // logger.debug("[{f}] Status: {f}", .{ conn.alt(), status.formatted(pack, params.toAllocPair()) });
 
     const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
 
-    const count = @atomicLoad(u32, &owned.owner.player_count.load(.monotonic), .monotonic);
+    const count = owned.owner.player_count.load(.monotonic);
 
     try conn.sendPacket(
         params.toAllocPair(),
@@ -825,7 +807,7 @@ pub fn @"serverbound/status/status_request"(conn: *Connection, reader: *Io.Reade
 pub fn @"serverbound/status/ping_request"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
     const ping = net.packets.ping_pong;
     const pack = try ping.readRoot(params, reader);
-    // logger.debug("[{f}] Ping: {f}", .{ conn, ping.formatted(pack, params.toAllocPair()) });
+    // logger.debug("[{f}] Ping: {f}", .{ conn.alt(), ping.formatted(pack, params.toAllocPair()) });
 
     try conn.sendPacket(
         params.toAllocPair(),
@@ -838,7 +820,7 @@ pub fn @"serverbound/status/ping_request"(conn: *Connection, reader: *Io.Reader,
 pub fn @"serverbound/login/hello"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
     const hello = net.packets.login_start_c2s;
     const pack = try hello.readRoot(params, reader);
-    // logger.debug("[{f}] Login Start: {f}", .{ conn, hello.formatted(pack, params.toAllocPair()) });
+    // logger.debug("[{f}] Login Start: {f}", .{ conn.alt(), hello.formatted(pack, params.toAllocPair()) });
 
     const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
     if (owned.data != .none) {
@@ -872,10 +854,15 @@ pub fn @"serverbound/login/hello"(conn: *Connection, reader: *Io.Reader, params:
         .profile = gp,
         .verify_token = undefined,
     };
+
+    conn.lockUncancelable();
+    defer conn.unlock();
+
     conn.reconfigure(.{
         .name = name_copy,
         .vtable = &LoginConnection.vtable,
     });
+
     io.random(&loginging.verify_token);
 
     try conn.sendPacket(
@@ -901,7 +888,7 @@ pub fn @"serverbound/login/key"(conn: *Connection, reader: *Io.Reader, params: n
     const login_success = net.packets.login_success_s2c;
 
     const pack = try key.readRoot(params, reader);
-    // logger.debug("[{f}] Login Key: {f}", .{ conn, key.formatted(pack, params.toAllocPair()) });
+    // logger.debug("[{f}] Login Key: {f}", .{ conn.alt(), key.formatted(pack, params.toAllocPair()) });
 
     const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
     const owner = owned.owner;
@@ -935,6 +922,9 @@ pub fn @"serverbound/login/key"(conn: *Connection, reader: *Io.Reader, params: n
     try logingin.compression.?.init(owner.allocator, owner.compression_threshold, 16);
     errdefer logingin.compression.?.deinit(owner.allocator);
 
+    conn.lockUncancelable();
+    defer conn.unlock();
+
     conn.reconfigure(.{ .encryption = logingin.encryption.? });
 
     try conn.sendPacket(
@@ -958,7 +948,7 @@ pub fn @"serverbound/login/login_acknowledged"(conn: *Connection, reader: *Io.Re
     const ack = net.packets.login_acknowledged_c2s;
     const pack = try ack.readRoot(params, reader);
     _ = pack;
-    // logger.debug("[{f}] Login Ack: {f}", .{ conn, ack.formatted(pack, params.toAllocPair()) });
+    // logger.debug("[{f}] Login Ack: {f}", .{ conn.alt(), ack.formatted(pack, params.toAllocPair()) });
 
     const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
     const owner = owned.owner;
@@ -974,6 +964,9 @@ pub fn @"serverbound/login/login_acknowledged"(conn: *Connection, reader: *Io.Re
         loginging.@"error" = error.HelloMissing;
         return error.CallbackHandlerFailed;
     }
+
+    conn.lockUncancelable();
+    defer conn.unlock();
 
     {
         const configing = try owner.allocator.create(ConfigConnection);
@@ -1031,7 +1024,7 @@ fn startConfiguration(conn: *Connection, apair: net.PacketType.AllocPair) Connec
 pub fn @"serverbound/configuration/select_known_packs"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
     const known_packs = net.packets.known_packs;
     const pack = try known_packs.readRoot(params, reader);
-    // logger.debug("[{f}] Known Packs: {f}", .{ conn, known_packs.formatted(pack, params.toAllocPair()) });
+    // logger.debug("[{f}] Known Packs: {f}", .{ conn.alt(), known_packs.formatted(pack, params.toAllocPair()) });
 
     // Registry entries are only sent by name, the client must have vanilla's data for them
     const vanilla = registries.known_pack;
@@ -1085,13 +1078,13 @@ pub fn @"serverbound/configuration/select_known_packs"(conn: *Connection, reader
 pub fn @"serverbound/configuration/client_information"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
     const info = net.packets.client_information_c2s;
     const pack = try info.readRoot(params, reader);
-    logger.debug("[{f}] Client Information: {f}", .{ conn, info.formatted(pack, params.toAllocPair()) });
+    logger.debug("[{f}] Client Information: {f}", .{ conn.alt(), info.formatted(pack, params.toAllocPair()) });
 }
 
 pub fn @"serverbound/configuration/custom_payload"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
     const message = net.packets.plugin_message;
     const pack = try message.readRoot(params, reader);
-    logger.debug("[{f}] Plugin Message: {f} ({d} bytes)", .{ conn, pack.channel, pack.data.len });
+    logger.debug("[{f}] Plugin Message: {f} ({d} bytes)", .{ conn.alt(), pack.channel, pack.data.len });
 }
 
 pub const @"serverbound/configuration/keep_alive" = ConfigPlayCommon.handleCommonKeepAlive;
@@ -1100,8 +1093,12 @@ pub fn @"serverbound/configuration/finish_configuration"(conn: *Connection, read
     const ack = net.packets.ack_finish_configuration_c2s;
     const pack = try ack.readRoot(params, reader);
     _ = pack;
-    // logger.debug("[{f}] Finish Configuration Ack: {f}", .{ conn, ack.formatted(pack, params.toAllocPair()) });
-    logger.info("[{f}] Configuration done", .{conn});
+    // logger.debug("[{f}] Finish Configuration Ack: {f}", .{ conn.alt(), ack.formatted(pack, params.toAllocPair()) });
+
+    conn.lockUncancelable();
+    defer conn.unlock();
+
+    logger.info("[{f}] Configuration done", .{conn.altLocked()});
 
     const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
     const owner = owned.owner;
@@ -1223,7 +1220,7 @@ fn joinWorld(conn: *Connection, apair: net.PacketType.AllocPair) Connection.Read
         var i: usize = 0;
         for (owner.players.items) |player| {
             player.sendPacket(apair, "player_info_update", player_info, .{ .actions = all_actions, .players = &new_entry }) catch |e|
-                logger.warn("[{f}] Couldn't send player info: {t}", .{ player, e });
+                logger.warn("[{f}] Couldn't send player info: {t}", .{ player.alt(), e });
             if (player == conn) continue;
             const other: *OwnedConnection = @fieldParentPtr("connection", player);
             others[i] = playerInfoEntry(other.data.play);
@@ -1248,9 +1245,9 @@ fn sendChunksInner(conn: *Connection, apair: net.PacketType.AllocPair, world: *W
     const center = overworld.spawn_chunk;
 
     try conn.sendPacket(apair, "set_chunk_cache_center", net.packets.set_chunk_cache_center_s2c, .{ .x = center.x, .z = center.z });
-    logger.debug("[{f}] cache center", .{conn});
+    logger.debug("[{f}] cache center", .{conn.alt()});
     try conn.sendPacket(apair, "chunk_batch_start", net.packets.chunk_batch_start_s2c, .{});
-    logger.debug("[{f}] batch start", .{conn});
+    logger.debug("[{f}] batch start", .{conn.alt()});
 
     const owner: *Server = @fieldParentPtr("world", world);
     const io = owner.runtime.io();
@@ -1265,20 +1262,19 @@ fn sendChunksInner(conn: *Connection, apair: net.PacketType.AllocPair, world: *W
             while (dx <= ring) : (dx += 1) {
                 if (@max(@abs(dx), @abs(dz)) != ring) continue;
                 const pos: World.Position = .{ .x = center.x + dx, .z = center.z + dz };
-                {
-                    // try conn.lock();
-                    // defer conn.unlock();
+                // NOTE: DO NOT HOLD LOCK too long, or like in a way that would cause a deadlock (task A depending on
+                // NOTE: task B to finish but for task B to finish, task A needs to finish first; aka: A deadlock)
 
-                    // logger.debug("[{f}] chunk ring {d}, count: {d} ({d}, {d})", .{ conn, ring, count, pos.x, pos.z });
-                    const encoded = try world.encodedChunk(pos);
-                    // logger.debug("[{f}]  - ENCODED", .{conn});
-                    try conn.sendPacket(apair, "level_chunk_with_light", net.packets.level_chunk_with_light_s2c, .{
-                        .x = pos.x,
-                        .z = pos.z,
-                        .data = encoded,
-                    });
-                    // logger.debug("[{f}]  - SENT", .{conn});
-                }
+                // logger.debug("chunk ring {d}, count: {d} ({d}, {d})", .{ ring, count, pos.x, pos.z });
+                const encoded = try world.encodedChunk(pos);
+                // logger.debug(" - ENCODED", .{});
+                try conn.sendPacket(apair, "level_chunk_with_light", net.packets.level_chunk_with_light_s2c, .{
+                    .x = pos.x,
+                    .z = pos.z,
+                    .data = encoded,
+                });
+                // logger.debug("[{f}]  - SENT", .{conn.altLocked()});
+
                 count += 1;
                 // Generating takes a while, the other connections still have to run
                 // try zio.maybeYield();
@@ -1289,8 +1285,8 @@ fn sendChunksInner(conn: *Connection, apair: net.PacketType.AllocPair, world: *W
         }
     }
     const time_taken = start.untilNow(io, .boot);
-    logger.debug("[{f}] batch finished: {d} chunks in {f} ({d}/s avg)", .{ conn, count, time_taken, @divCeil(count, time_taken.toSeconds()) });
     try conn.sendPacket(apair, "chunk_batch_finished", net.packets.chunk_batch_finished_s2c, count);
+    logger.debug("[{f}] batch finished: {d} chunks in {f} ({d}/s avg)", .{ conn.alt(), count, time_taken, @divCeil(count, @as(i64, @max(1, time_taken.toSeconds()))) });
 }
 
 /// Every chunk in view of the spawn, the closest ones first.
@@ -1332,7 +1328,7 @@ fn broadcastSystemChatLocked(self: *Server, apair: net.PacketType.AllocPair, mes
         player.sendPacket(apair, "system_chat", net.packets.system_chat_s2c, .{
             .content = message,
             .overlay = false,
-        }) catch |e| logger.warn("[{f}] Couldn't send chat message: {t}", .{ player, e });
+        }) catch |e| logger.warn("[{f}] Couldn't send chat message: {t}", .{ player.alt(), e });
     }
 }
 
@@ -1348,12 +1344,12 @@ pub const @"serverbound/play/keep_alive" = ConfigPlayCommon.handleCommonKeepAliv
 pub fn @"serverbound/play/accept_teleportation"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
     const accept = net.packets.accept_teleportation_c2s;
     const pack = try accept.readRoot(params, reader);
-    logger.debug("[{f}] Accept Teleportation: {f}", .{ conn, accept.formatted(pack, params.toAllocPair()) });
+    logger.debug("[{f}] Accept Teleportation: {f}", .{ conn.alt(), accept.formatted(pack, params.toAllocPair()) });
 }
 
 pub fn @"serverbound/play/player_loaded"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
     _ = try net.packets.player_loaded_c2s.readRoot(params, reader);
-    logger.debug("[{f}] Player loaded", .{conn});
+    logger.debug("[{f}] Player loaded", .{conn.alt()});
 }
 
 pub fn @"serverbound/play/chat"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
@@ -1377,7 +1373,7 @@ pub fn @"serverbound/play/chat"(conn: *Connection, reader: *Io.Reader, params: n
 pub fn @"serverbound/play/chat_command"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
     const command = net.packets.chat_command_c2s;
     const pack = try command.readRoot(params, reader);
-    logger.info("[{f}] Command: /{s}", .{ conn, pack });
+    logger.info("[{f}] Command: /{s}", .{ conn.alt(), pack });
 
     try conn.sendPacket(params.toAllocPair(), "system_chat", net.packets.system_chat_s2c, .{
         .content = .text("Commands aren't implemented yet", .{}),

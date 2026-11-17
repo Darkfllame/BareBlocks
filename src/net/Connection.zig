@@ -273,34 +273,33 @@ fn drain(io_w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Err
 }
 
 fn connectionHandler(self: *Connection, allocator: Allocator) Io.Cancelable!void {
-    defer self.release(allocator);
+    defer {
+        self.release(allocator);
+        logger.info("Connection handler out", .{});
+    }
 
     self.connectionHandlerInner(allocator) catch |e| switch (e) {
         error.Canceled => {},
         error.ConcurrencyUnavailable => {
-            logger.err("[{f}] TODO: Handle concurrency unavailable on connection handler startup", .{self});
+            logger.err("[{f}] TODO: Handle concurrency unavailable on connection handler startup", .{self.alt()});
         },
     };
 }
 
 fn readEntry(self: *Connection, allocator: Allocator, start_event: *zio.Event) CoroReadError!void {
     defer {
-        logger.debug("[{f}] Ended reading", .{self});
+        logger.debug("[{f}] Ended reading", .{self.alt()});
         self.reader_state.state.store(.closed, .monotonic);
         self.shutdown(.recv) catch {}; // tells the os to not accept data in anymore
     }
+
     start_event.wait() catch return;
     if (self.reader_state.state.cmpxchgStrong(.waiting, .alive, .acquire, .monotonic)) |old| switch (old) {
         else => unreachable, // Dude you can only set to .closing
         .closing => return,
     };
 
-    logger.debug("[{f}] Started reading", .{self});
-
-    const io: std.Io = self.runtime.io();
-
-    const old_prot = io.swapCancelProtection(.blocked);
-    defer _ = io.swapCancelProtection(old_prot);
+    logger.debug("[{f}] Started reading", .{self.alt()});
 
     var read_arena = std.heap.ArenaAllocator.init(allocator);
     defer read_arena.deinit();
@@ -308,14 +307,14 @@ fn readEntry(self: *Connection, allocator: Allocator, start_event: *zio.Event) C
     while (true) : ({
         if (!read_arena.reset(.{ .retain_with_limit = max_packet_length })) {
             @branchHint(.unlikely);
-            logger.warn("[{f}] Failed to reset arena allocator", .{self});
+            logger.warn("[{f}] Failed to reset arena allocator", .{self.alt()});
         }
     }) {
         self.readConnection(allocator, &read_arena) catch |e| {
-            const err = switch (e) {
-                error.Canceled => unreachable,
+            const err = megaswitch: switch (e) {
                 error.ReadFailed => if (self.reader_state.read_error) |rerr| switch (rerr) {
-                    error.AccessDenied, error.Unexpected, error.Canceled => unreachable,
+                    error.AccessDenied, error.Unexpected => unreachable,
+                    error.Canceled => continue :megaswitch error.Canceled,
                     error.SocketUnconnected,
                     error.NetworkDown,
                     error.SystemResources,
@@ -324,8 +323,8 @@ fn readEntry(self: *Connection, allocator: Allocator, start_event: *zio.Event) C
                     error.DecryptionFailed,
                     => |err| err,
                 } else error.CallbackHandlerFailed,
-                error.EndOfStream => |err| switch (self.reader_state.state.load(.monotonic)) {
-                    .waiting, .alive => err,
+                error.Canceled, error.EndOfStream => switch (self.reader_state.state.load(.monotonic)) {
+                    .waiting, .alive => error.EndOfStream,
                     .closing, .closed => error.Disconnected,
                 },
                 error.Disconnected,
@@ -340,7 +339,7 @@ fn readEntry(self: *Connection, allocator: Allocator, start_event: *zio.Event) C
                 => |err| err,
             };
             if (err == error.Disconnected) break;
-            logger.debug("[{f}] Error while reading: {t}", .{ self, err });
+            logger.debug("[{f}] Error while reading: {t}", .{ self.alt(), err });
             return err;
         };
     }
@@ -348,18 +347,19 @@ fn readEntry(self: *Connection, allocator: Allocator, start_event: *zio.Event) C
 
 fn writeEntry(self: *Connection, allocator: Allocator, start_event: *zio.Event) CoroWriteError!void {
     defer {
-        logger.debug("[{f}] Ended writing", .{self});
+        logger.debug("[{f}] Ended writing", .{self.alt()});
         self.send_state.channel.close(.graceful);
         self.writer_state.state.store(.closed, .monotonic);
         self.shutdown(.send) catch {};
     }
+
     start_event.wait() catch return;
     if (self.writer_state.state.cmpxchgStrong(.waiting, .alive, .acquire, .monotonic)) |old| switch (old) {
         else => unreachable, // Dude you can only set to .closing
         .closing => return,
     };
 
-    logger.debug("[{f}] Started writing", .{self});
+    logger.debug("[{f}] Started writing", .{self.alt()});
 
     while (true) {
         self.writeConnection(allocator) catch |e| {
@@ -391,13 +391,13 @@ fn writeEntry(self: *Connection, allocator: Allocator, start_event: *zio.Event) 
 
 fn tickEntry(self: *Connection, allocator: Allocator, start_event: *zio.Event) TickError!void {
     defer {
-        logger.debug("[{f}] Ended ticking", .{self});
+        logger.debug("[{f}] Ended ticking", .{self.alt()});
         self.disconnect(.{ .static = &.disconnect_generic });
     }
 
     try start_event.wait();
 
-    logger.debug("[{f}] Started ticking", .{self});
+    logger.debug("[{f}] Started ticking", .{self.alt()});
 
     const io = self.runtime.io();
     // TODO: Tick synchronization
@@ -439,14 +439,7 @@ fn connectionHandlerInner(self: *Connection, allocator: Allocator) !void {
 
     start_ev.set();
 
-    var res: ?HandlerSelectResult = select.await() catch blk: {
-        self.send_state.channel.close(.graceful);
-        self.writer_state.state.store(.closing, .monotonic);
-        self.reader_state.state.store(.closing, .monotonic);
-        // We need to retrieve all returned values.
-        select.group.cancel(select.io);
-        break :blk select.queue.getOneUncancelable(select.io) catch unreachable;
-    };
+    var res: ?HandlerSelectResult = select.await() catch select.cancel().?;
 
     if (res.? == .read and res.?.read == error.LegacyHandshake) {
         self.disconnect(.{ .static = comptime &.text("LegacyHandshake", .{}) });
@@ -454,7 +447,7 @@ fn connectionHandlerInner(self: *Connection, allocator: Allocator) !void {
 
     while (res) |result| : (res = select.cancel()) {
         switch (result) {
-            inline else => |value, tag| logger.debug("[{f}] Result on {t}: {!}", .{ self, tag, value }),
+            inline else => |value, tag| logger.debug("[{f}] Result on {t}: {!}", .{ self.alt(), tag, value }),
         }
     }
 }
@@ -490,7 +483,7 @@ fn readConnection(self: *Connection, gpa: Allocator, arena_alloc: *std.heap.Aren
         error.EndOfStream, error.ReadFailed => |err| return err,
         else => unreachable,
     };
-    // std.log.debug("[{f}] Got packet length: {d}", .{ self, packet_length });
+    // std.log.debug("[{f}] Got packet length: {d}", .{ self.alt(), packet_length });
     if (packet_length <= 0) return error.PacketTooSmall;
     if (packet_length > max_packet_length) return error.PacketTooLarge;
     const length: usize = @intCast(packet_length);
@@ -531,6 +524,9 @@ fn readConnection(self: *Connection, gpa: Allocator, arena_alloc: *std.heap.Aren
         },
         else => unreachable,
     };
+    self.lockUncancelable();
+    defer self.unlock();
+
     self.addReadPacket();
 
     const curr_side = self.target_side.opposite();
@@ -588,7 +584,7 @@ fn writeConnection(self: *Connection, allocator: Allocator) !void {
 
         assert(bytes.len <= max_packet_length);
 
-        // logger.debug("[{f}] Sending packet: {Bi}", .{ self, bytes.len });
+        // logger.debug("[{f}] Sending packet: {Bi}", .{ self.alt(), bytes.len });
         // std.debug.dumpHex(bytes);
 
         PacketType.writerNoAlloc(.var_int, writer, @intCast(bytes.len)) catch |e| switch (e) {
@@ -642,7 +638,7 @@ fn noTick(self: *Connection, delta: u8) TickError!void {
 }
 
 fn deinit(self: *Connection, allocator: Allocator) void {
-    logger.debug("Destroying {f}", .{self});
+    logger.debug("Destroying {f}", .{self.altLocked()});
     const io = self.runtime.io();
 
     io.vtable.netClose(io.userdata, (&self.getSocket())[0..1]);
@@ -651,10 +647,10 @@ fn deinit(self: *Connection, allocator: Allocator) void {
         allocator.free(packet.getBytes());
     } else |_| {}
     switch (self.disconnection_reason) {
-        .none => logger.err("[{f}] Disconnected", .{self}),
-        .normal => logger.info("[{f}] Disconnected", .{self}),
+        .none => logger.err("[{f}] Disconnected", .{self.altLocked()}),
+        .normal => logger.info("[{f}] Disconnected", .{self.altLocked()}),
         .reason => |tc| {
-            logger.err("[{f}] Disconnected: {f}", .{ self, tc });
+            logger.err("[{f}] Disconnected: {f}", .{ self.altLocked(), tc });
             tc.deinit(allocator);
         },
     }
@@ -665,6 +661,13 @@ fn deinit(self: *Connection, allocator: Allocator) void {
 // TODO: Read timeout
 // TODO: Bandwidth monitor ?
 
+// NOTE: Big fat note which I don't know were to place:
+// NOTE: - Read/Write/Tick can all lock the connection.
+// NOTE: - Both Read and Write need it for rate limiting. Might need to use atomics instead.
+// TODO: Make so that write doesn't need connection lock. So sendPacket() doesn't require the `conn` to be
+// TODO: unlocked.
+
+packet_registry: *const PacketRegistry,
 stream_handle: Io.net.Socket.Handle,
 ip_address: Io.net.IpAddress,
 runtime: *zio.Runtime,
@@ -675,7 +678,6 @@ start: zio.Event,
 
 //#region Shared members
 /// Will replace the ip when this connection gets formatted to the console.
-packet_registry: *const PacketRegistry,
 name: ?[]const u8 = null,
 vtable: *const VTable,
 
@@ -780,10 +782,8 @@ pub const RateLimited = struct {
 };
 
 pub const Compression = struct {
+    /// Data is always locked by the parent `Connection`.
     fn getCompressionBuffer(self: *Compression, allocator: Allocator) Allocator.Error!*[flate.max_window_len]u8 {
-        self.compression.mutex.lockUncancelable();
-        defer self.compression.mutex.unlock();
-
         var it = self.compression.mask.iterator(.{ .kind = .unset });
         if (it.next()) |idx| {
             // Mark it as used, `redeemCompressionBuffer` only looks at used buffers
@@ -809,10 +809,8 @@ pub const Compression = struct {
         return new_buffer;
     }
 
+    /// Data is always locked by the parent `Connection`.
     fn redeemCompressionBuffer(self: *Compression, buf: *[flate.max_window_len]u8) void {
-        self.compression.mutex.lockUncancelable();
-        defer self.compression.mutex.unlock();
-
         var it = self.compression.mask.iterator(.{});
         while (it.next()) |idx| {
             const current = self.compression.buffers[idx];
@@ -831,8 +829,9 @@ pub const Compression = struct {
         @"error": ?flate.Decompress.Error,
         buffer: [flate.max_window_len]u8,
     },
+    /// Data is always locked by the parent `Connection`.
     compression: struct {
-        mutex: zio.Mutex,
+        _: void align(std.atomic.cache_line) = {},
         mask: std.bit_set.Dynamic,
         state: std.heap.ArenaAllocator.State,
         buffers: []*[flate.max_window_len]u8,
@@ -846,7 +845,6 @@ pub const Compression = struct {
                 .buffer = undefined,
             },
             .compression = .{
-                .mutex = .init,
                 .mask = .{},
                 .state = .init,
                 .buffers = &.{},
@@ -1002,6 +1000,26 @@ pub const VTable = struct {
     deinit: *const DeinitCallbackFn = noDeinit,
     /// Called every ~50ms.
     tick: *const TickCallbackFn = noTick,
+};
+
+pub const Alt = struct {
+    ptr: *Connection,
+    do_unlock: bool = true,
+
+    pub fn format(_alt: Alt, writer: *Io.Writer) Io.Writer.Error!void {
+        const self = _alt.ptr;
+        defer if (_alt.do_unlock) self.unlock();
+
+        try if (self.name) |nm|
+            writer.writeAll(nm)
+        else
+            self.ip_address.format(writer);
+        if (self.in_phase == self.out_phase) {
+            try writer.print("({t})->{t}", .{ self.in_phase, self.target_side });
+        } else {
+            try writer.print("({t})->{t}({t})", .{ self.in_phase, self.target_side, self.out_phase });
+        }
+    }
 };
 
 pub const DisconnectReason = union(enum) {
@@ -1169,23 +1187,49 @@ pub fn reconfigure(self: *Connection, options: ReconfigureOptions) void {
     }
 }
 
-/// Allows this connection to be printed to `std.Io.Writer`s as: `[ip-or-name]<[phase]>->[target-side]`
-/// (excluding `[]`s)
-pub fn format(self: *Connection, writer: *Io.Writer) Io.Writer.Error!void {
-    self.lockUncancelable();
-    defer self.unlock();
-
-    try if (self.name) |nm|
-        writer.writeAll(nm)
-    else
-        self.ip_address.format(writer);
-    if (self.in_phase == self.out_phase) {
-        try writer.print("({t})->{t}", .{ self.in_phase, self.target_side });
-    } else {
-        try writer.print("({t})->{t}({t})", .{ self.in_phase, self.target_side, self.out_phase });
-    }
+/// Directly calling `format()` on a `Connection` is now deprecated in favor of `.alt()`
+/// or `.altLocked()`
+pub fn format(self: *Connection, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    _ = self;
+    _ = writer;
+    @compileError("Directly calling 'format()' on a Connection is now deprecated in favor of 'alt()'" ++
+        " or 'altLocked()'");
 }
 
+/// Allows this connection to be printed to `std.Io.Writer`s as: `[ip-or-name]<[phase]>->[target-side]`
+/// (excluding `[]`s).
+///
+/// The function all will also call `.lock()` and once the value is printed, `.unlock()` will be called.
+///
+/// If you wish to reuse the format argument, consider using `.altReusable(n)` instead.
+///
+/// Or lock the connection yourself and use `.altLocked()` once.
+pub fn alt(self: *Connection) Alt {
+    return self.altReusable(1);
+}
+
+/// Allows this connection to be printed to `std.Io.Writer`s as: `[ip-or-name]<[phase]>->[target-side]`
+/// (excluding `[]`s).
+///
+/// The function all will also call `.lock()` `lock_count` tules and once a value is printed, `.unlock()` will be called once.
+///
+/// Use this if you wish to reuse the format argument.
+pub fn altReusable(self: *Connection, lock_count: usize) Alt {
+    for (0..lock_count) |_| self.lockUncancelable();
+    return .{ .ptr = self };
+}
+
+/// Allows this connection to be printed to `std.Io.Writer`s as: `[ip-or-name]<[phase]>->[target-side]`
+/// (excluding `[]`s).
+///
+/// The function assumes `self` to be already locked.
+pub fn altLocked(self: *Connection) Alt {
+    return .{ .ptr = self, .do_unlock = false };
+}
+
+/// Needs `self` to be unlocked, otherwise may cause a deadlock when a lot of packets get sent at once.
+/// TODO: Remove the lock requirement in writeConnection() in favor of atomics.
+/// TODO: Batched packet sending to optimize the use of locking and stuff idk
 pub fn sendPacket(
     self: *Connection,
     apair: AllocPair,
@@ -1198,19 +1242,24 @@ pub fn sendPacket(
         .closing, .closed => return error.ConnectionClosed,
     }
 
-    try self.lock();
-    defer self.unlock();
+    const pack_id, const entry = blk: {
+        try self.lock();
+        defer self.unlock();
 
-    logger.debug("[{f}] Sending packet {s}", .{ self, resource });
+        const pack_id = self.packet_registry.packedIDFromResource(self.target_side, self.out_phase, resource) orelse
+            return error.PacketIDNotFound;
+        const entry = self.packet_registry.getEntry(self.target_side, self.out_phase, pack_id);
 
-    const pack_id = self.packet_registry.packedIDFromResource(self.target_side, self.out_phase, resource) orelse
-        return error.PacketIDNotFound;
-    const entry = self.packet_registry.getEntry(self.target_side, self.out_phase, pack_id);
+        break :blk .{ pack_id, entry };
+    };
 
+    // logger.debug("Sending packet {s} (id: {x})", .{ resource, pack_id });
     var aw = Io.Writer.Allocating.initAligned(apair.gpa, .of(Packet));
     defer aw.deinit();
-    try aw.ensureTotalCapacity(1 + entry.write_cushion);
+    // logger.debug("Sending packet {s} (id: {x}) (aw init)", .{ resource, pack_id });
+    try aw.ensureTotalCapacity(@sizeOf(Packet) + 1 + entry.write_cushion);
     aw.writer.advance(@sizeOf(Packet));
+    // logger.debug("Sending packet {s} (id: {x}) (aw prealloc)", .{ resource, pack_id });
 
     PacketType.writerNoAlloc(.var_int, &aw.writer, @backingInt(pack_id)) catch return error.OutOfMemory;
 
@@ -1218,20 +1267,29 @@ pub fn sendPacket(
         error.WriteFailed => error.OutOfMemory,
         else => |err| err,
     };
+    // logger.debug("Sending packet {s} (id: {x}) (serialized packet)", .{ resource, pack_id });
 
+    var compressed = false;
     const bytes_result: []align(@alignOf(Packet)) u8 = res: {
         const content = aw.written()[@sizeOf(Packet)..];
+
+        self.lockUncancelable();
         if (self.compression) |comp| {
+            @branchHint(.likely);
+            self.unlock();
+
             var out_w = Io.Writer.Allocating.initAligned(apair.gpa, .of(Packet));
             defer out_w.deinit();
-            try out_w.ensureTotalCapacity(1 + content.len);
+            try out_w.ensureTotalCapacity(@sizeOf(Packet) + 1 + content.len);
             out_w.writer.advance(@sizeOf(Packet));
 
             if (content.len < comp.threshold) {
+                // logger.debug("Sending packet {s} (id: {x}) (uncompressed header)", .{ resource, pack_id });
                 PacketType.writerNoAlloc(.var_int, &out_w.writer, 0) catch unreachable;
                 out_w.writer.writeAll(content) catch unreachable;
             } else {
                 @branchHint(.likely);
+                // logger.debug("Sending packet {s} (id: {x}) (compressed header)", .{ resource, pack_id });
 
                 if (content.len > max_uncompressed_packet_length) return error.PacketTooLarge;
 
@@ -1242,26 +1300,32 @@ pub fn sendPacket(
                 var compress = flate.Compress.init(&out_w.writer, buffer, .zlib, .default) catch
                     return error.OutOfMemory;
 
-                // Split compression into chunks of 512 bytes to potentially allow other
+                // Split compression into chunks of X bytes to potentially allow other
                 // tasks to run.
+                const chunk_size = 1024;
                 var offset: usize = 0;
                 while (offset < content.len) {
                     const remaining = content.len - offset;
-                    const size = @min(512, remaining);
+                    const size = @min(chunk_size, remaining);
                     const n = compress.writer.write(content[offset .. offset + size]) catch return error.OutOfMemory;
                     offset += n;
                     try zio.maybeYield();
                 }
 
                 compress.finish() catch return error.OutOfMemory;
+                compressed = true;
             }
 
             break :res @alignCast(try out_w.toOwnedSlice());
-        }
+        } else self.unlock();
 
         break :res @alignCast(try aw.toOwnedSlice());
     };
     errdefer apair.gpa.free(bytes_result);
+    // logger.debug("Sending packet {s} (id: {x}) ({d} bytes{s})", .{
+    //     resource,         pack_id,
+    //     bytes_result.len, if (compressed) ", compressed" else "",
+    // });
 
     const payload_len = bytes_result.len - @sizeOf(Packet);
     if (payload_len > max_packet_length) return error.PacketTooLarge;
@@ -1291,14 +1355,12 @@ pub fn shutdown(self: *Connection, how: Io.net.ShutdownHow) Io.net.ShutdownError
     try io.vtable.netShutdown(io.userdata, self.stream_handle, how);
 }
 
+/// Assumes `self` to be locked.
 pub fn tick(self: *Connection) TickError!void {
-    self.lockUncancelable();
-    defer self.unlock();
-
-    // logger.debug("[{f}] Ticking", .{self});
+    logger.debug("[{f}] Ticking", .{self.altLocked()});
 
     const delta = self.tick_count;
-    self.tick_count = (self.tick_count + 1) % 1;
+    self.tick_count = (self.tick_count + 1) % 20;
 
     if (delta == 0) {
         if (self.rate_limited) |rl| {
@@ -1307,7 +1369,7 @@ pub fn tick(self: *Connection) TickError!void {
             rl.sent = 0;
             rl.received = 0;
             if (@as(RateLimited.Count, @trunc(rl.average_received)) >= rl.limit) {
-                logger.warn("[{f}] Exceeded rate-limit (sent {d} packets per seconds)", .{ self, rl.average_received });
+                logger.warn("[{f}] Exceeded rate-limit (sent {d} packets per seconds)", .{ self.altLocked(), rl.average_received });
                 self.disconnect(.{ .static = &.exceeded_packet_rate });
             }
         }

@@ -25,7 +25,7 @@ pub const std_options = std.Options{
 };
 
 pub const zio_options = zio.Options{
-    .scheduling = .pinned,
+    .scheduling = .work_stealing,
     .backend = .epoll,
     .resolve_beneath_mode = .best_effort,
     .no_hacks = true,
@@ -47,9 +47,9 @@ pub fn main(init: std.process.Init.Minimal) !@typeInfo(@typeInfo(@TypeOf(asyncMa
     var sa = if (use_safe_allocator) std.heap.SafeAllocator.init(std.heap.page_allocator, .{});
     defer _ = if (use_safe_allocator) sa.deinit();
 
-    const gpa = if (use_safe_allocator)
+    const gpa = if (use_safe_allocator and false)
         sa.allocator()
-    else if (builtin.link_libc)
+    else if (builtin.link_libc or true)
         std.heap.c_allocator
     else if (builtin.cpu.arch.isWasm())
         std.heap.wasm_allocator
