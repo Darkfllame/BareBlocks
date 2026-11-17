@@ -29,4 +29,4 @@ jobs:
           key: mccache-${{ hashFiles('build.zig') }}
           restore-keys: mccache-
 
-      - run: zig build test --summary all
+      - run: zig build test -freference-trace --summary all
