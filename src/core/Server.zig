@@ -507,27 +507,28 @@ pub const ConfigConnection = struct {
 
 pub const PlayConnection = struct {
     const vtable = Connection.VTable{
-        .deinit = deinitImpl,
+        .deinit = LoginConnection.deinitImpl,
         .disconnect = disconnectImpl,
         .tick = tickImpl,
     };
 
-    fn deinitImpl(conn: *Connection, allocator: Allocator) void {
+    fn disconnectImpl(conn: *Connection, reason: *const utils.TextComponent) Connection.WritePacketError!void {
         const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
         const owner = owned.owner;
         const playing = owned.data.play;
+
+        var arena: std.heap.ArenaAllocator = undefined;
+        const apair = net.PacketType.AllocPair.newFromGpa(owner.allocator, &arena);
+        defer arena.deinit();
+
+        try conn.sendPacket(apair, "disconnect", net.packets.disconnect_s2c, reason.*);
+
         {
             // TODO: Yep deadlocks pissing me off
-            var arena: std.heap.ArenaAllocator = .init(allocator);
-            defer arena.deinit();
 
-            const apair = net.PacketType.AllocPair.newWithArena(allocator, &arena);
-
-            logger.debug("Locking player mutex", .{});
             owner.players_mutex.lockUncancelable();
             defer owner.players_mutex.unlock();
             _ = owner.player_count.fetchSub(1, .monotonic);
-            logger.debug("Player count: {d}", .{owner.players.items.len});
 
             var remove_index: ?usize = null;
             for (owner.players.items, 0..) |player, i| {
@@ -549,7 +550,6 @@ pub const PlayConnection = struct {
                 ) catch |e|
                     logger.warn("[{f}] Couldn't send player info: {t}", .{ player.alt(), e });
             }
-            logger.debug("Removing player index: {?d}", .{remove_index});
             if (remove_index) |i| {
                 _ = owner.players.swapRemove(i);
             } else {
@@ -560,20 +560,8 @@ pub const PlayConnection = struct {
                 .args = &.{.text(owned.data.play.profile.username(), .{})},
                 .common = .{ .color = .yellow },
             });
-            logger.debug("Broadcasting leaving message", .{});
-            owner.broadcastSystemChatLocked(.newWithArena(allocator, &arena), message);
+            owner.broadcastSystemChatLocked(apair, message);
         }
-        LoginConnection.deinitImpl(conn, allocator);
-    }
-
-    fn disconnectImpl(conn: *Connection, reason: *const utils.TextComponent) Connection.WritePacketError!void {
-        const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
-        assert(owned.data == .play);
-
-        const gpa = owned.owner.allocator;
-        var arena: std.heap.ArenaAllocator = .init(gpa);
-        defer arena.deinit();
-        try conn.sendPacket(.newWithArena(gpa, &arena), "disconnect", net.packets.disconnect_s2c, reason.*);
     }
 
     fn tickImpl(conn: *Connection, delta: u8) Connection.TickError!void {
