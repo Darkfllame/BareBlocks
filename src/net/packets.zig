@@ -523,13 +523,13 @@ pub const PlayerInfoAction = enum {
     update_list_order,
     update_hat,
 };
-pub const ChatSession = StructuredPacket.getType(.{
+pub const chat_session = StructuredPacket.getType(.{
     .name = "ChatSession",
     .fields = &.{
         .{ .name = "session_id", .type = .uuid },
         .{ .name = "expires_at", .type = .long },
-        .{ .name = "public_key", .type = .byte_array },
-        .{ .name = "key_signature", .type = .byte_array },
+        .{ .name = "public_key", .type = .prefixedMaxArray(.ubyte, 512) },
+        .{ .name = "key_signature", .type = .prefixedMaxArray(.ubyte, 4096) },
     },
 });
 /// A player in `player_info_initialize_s2c`, with every action's data in the actions' order.
@@ -539,7 +539,7 @@ pub const player_info_entry = StructuredPacket.getType(.{
         // The uuid, then add_player's name and properties, same bytes as a game profile
         .{ .name = "profile", .type = .game_profile },
         // initialize_chat
-        .{ .name = "chat_session", .type = .prefixedOptional(ChatSession) },
+        .{ .name = "chat_session", .type = .prefixedOptional(chat_session) },
         // update_game_mode
         .{ .name = "game_mode", .type = .{ .@"enum" = .of(GameMode, .var_int) } },
         // update_listed

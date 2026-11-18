@@ -47,9 +47,9 @@ pub fn main(init: std.process.Init.Minimal) !@typeInfo(@typeInfo(@TypeOf(asyncMa
     var sa = if (use_safe_allocator) std.heap.SafeAllocator.init(std.heap.page_allocator, .{});
     defer _ = if (use_safe_allocator) sa.deinit();
 
-    const gpa = if (use_safe_allocator and false)
+    const gpa = if (use_safe_allocator)
         sa.allocator()
-    else if (builtin.link_libc or true)
+    else if (builtin.link_libc)
         std.heap.c_allocator
     else if (builtin.cpu.arch.isWasm())
         std.heap.wasm_allocator

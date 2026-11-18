@@ -275,10 +275,7 @@ fn drain(io_w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Err
 }
 
 fn connectionHandler(self: *Connection, allocator: Allocator) Io.Cancelable!void {
-    defer {
-        self.release(allocator);
-        logger.info("Connection handler out", .{});
-    }
+    defer self.release(allocator);
 
     self.connectionHandlerInner(allocator) catch |e| switch (e) {
         error.Canceled => {},
@@ -740,7 +737,7 @@ pub const StreamReadError = Io.net.Stream.Reader.Error || error{DecryptionFailed
 pub const StreamWriteError = Io.net.Stream.Writer.Error || error{EncryptionFailed};
 pub const InitError = Io.ConcurrentError || Allocator.Error || error{ SocketUnconnected, ConnectionTimedOut, Unexpected };
 
-pub const ReadCallbackError = PacketType.ReadError || WritePacketError || Io.net.ShutdownError || Io.ConcurrentError || error{CallbackHandlerFailed};
+pub const ReadCallbackError = PacketType.ReadError || WritePacketError || Io.net.ShutdownError || Io.ConcurrentError || error{ CallbackHandlerFailed };
 pub const WritePacketError = Io.Cancelable || Allocator.Error || PacketType.WriteError || error{
     PacketIDNotFound,
     PacketTooLarge,
@@ -994,7 +991,7 @@ pub const HashContext = struct {
 
 pub const VTable = struct {
     /// Called when the server needs to inform the client why they're getting disconnected.
-    /// 
+    ///
     /// Only called once.
     disconnect: *const DisconnectCallbackFn = noDisconnectMessage,
     /// Called once work with the `Connection` is done, so that the implementation can free its data.
@@ -1365,12 +1362,12 @@ pub fn tick(self: *Connection) TickError!void {
 
     if (delta == 0) {
         if (self.rate_limited.load(.monotonic)) |rl| {
-            const sent: RateLimited.Average =  @floatFromInt(rl.sent.swap(0, .monotonic));
-            const received: RateLimited.Average =  @floatFromInt(rl.received.swap(0, .monotonic));
+            const sent: RateLimited.Average = @floatFromInt(rl.sent.swap(0, .monotonic));
+            const received: RateLimited.Average = @floatFromInt(rl.received.swap(0, .monotonic));
 
             rl.average_sent = lm.lerp(RateLimited.Average, sent, rl.average_sent, 0.75);
             rl.average_received = lm.lerp(RateLimited.Average, received, rl.average_received, 0.75);
-            
+
             if (@as(RateLimited.Count, @trunc(rl.average_received)) >= rl.limit) {
                 logger.warn("[{f}] Exceeded rate-limit (sent {d} packets per seconds)", .{ self.altLocked(), rl.average_received });
                 self.disconnect(.{ .static = &.exceeded_packet_rate });

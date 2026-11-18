@@ -303,7 +303,7 @@ pub const OwnedConnection = struct {
         none,
         login: *LoginConnection,
         config: *ConfigConnection,
-        play: *PlayConnection,
+        play: *core.Player,
     },
 
     fn deinitImpl(conn: *Connection, allocator: Allocator) void {
@@ -323,7 +323,7 @@ pub const LoginConnection = struct {
         .disconnect = disconnectImpl,
     };
 
-    fn deinitImpl(conn: *Connection, allocator: Allocator) void {
+    pub fn deinitImpl(conn: *Connection, allocator: Allocator) void {
         allocator.free(conn.name.?);
         if (conn.encryption) |enc| {
             enc.deinit();
@@ -425,7 +425,7 @@ pub const ConfigPlayCommon = struct {
     latency: u64,
 
     /// Same as vanilla: every 15s, send a keep alive, or disconnect if the last one wasn't answered.
-    fn keepAlive(self: *ConfigPlayCommon, conn: *Connection) Connection.WritePacketError!void {
+    pub fn keepAlive(self: *ConfigPlayCommon, conn: *Connection) Connection.WritePacketError!void {
         const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
 
         const now = getKeepAliveValue();
@@ -460,7 +460,7 @@ pub const ConfigPlayCommon = struct {
         const common = switch (owned.data) {
             .none, .login => unreachable,
             .config => |c| &c.common,
-            .play => |p| &p.common,
+            .play => |p| &p.connection.common,
         };
 
         if (common.keep_alive) |ka| {
@@ -501,79 +501,6 @@ pub const ConfigConnection = struct {
     owned: *OwnedConnection,
     common: ConfigPlayCommon,
     profile: utils.GameProfile,
-    encryption: *Connection.Encryption,
-    compression: *Connection.Compression,
-};
-
-pub const PlayConnection = struct {
-    const vtable = Connection.VTable{
-        .deinit = LoginConnection.deinitImpl,
-        .disconnect = disconnectImpl,
-        .tick = tickImpl,
-    };
-
-    fn disconnectImpl(conn: *Connection, reason: *const utils.TextComponent) Connection.WritePacketError!void {
-        const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
-        const owner = owned.owner;
-        const playing = owned.data.play;
-
-        var arena: std.heap.ArenaAllocator = undefined;
-        const apair = net.PacketType.AllocPair.newFromGpa(owner.allocator, &arena);
-        defer arena.deinit();
-
-        try conn.sendPacket(apair, "disconnect", net.packets.disconnect_s2c, reason.*);
-
-        {
-            // TODO: Yep deadlocks pissing me off
-
-            owner.players_mutex.lockUncancelable();
-            defer owner.players_mutex.unlock();
-            _ = owner.player_count.fetchSub(1, .monotonic);
-
-            var remove_index: ?usize = null;
-            for (owner.players.items, 0..) |player, i| {
-                if (player == conn) {
-                    if (remove_index != null) {
-                        logger.err("Duplicate player entry: {f}", .{playing.profile});
-                        _ = owner.players.swapRemove(i);
-                    } else {
-                        remove_index = i;
-                    }
-                    continue;
-                }
-
-                player.sendPacket(
-                    apair,
-                    "player_info_remove",
-                    net.packets.player_info_remove_s2c,
-                    (&playing.profile.uuid)[0..1],
-                ) catch |e|
-                    logger.warn("[{f}] Couldn't send player info: {t}", .{ player.alt(), e });
-            }
-            if (remove_index) |i| {
-                _ = owner.players.swapRemove(i);
-            } else {
-                logger.warn("Missing player entry: {f}", .{playing.profile});
-            }
-
-            const message: utils.TextComponent = .translate("multiplayer.player.left", .{
-                .args = &.{.text(owned.data.play.profile.username(), .{})},
-                .common = .{ .color = .yellow },
-            });
-            owner.broadcastSystemChatLocked(apair, message);
-        }
-    }
-
-    fn tickImpl(conn: *Connection, delta: u8) Connection.TickError!void {
-        _ = delta;
-        const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
-        try owned.data.play.common.keepAlive(conn);
-    }
-
-    owned: *OwnedConnection,
-    common: ConfigPlayCommon,
-    profile: utils.GameProfile,
-    entity_id: i32,
     encryption: *Connection.Encryption,
     compression: *Connection.Compression,
 };
@@ -728,6 +655,12 @@ pub fn addressAlt(self: *const Server) AddressAlt {
         .v6 = if (self.v6_enabled) self.ipv6 else null,
     };
 }
+
+pub fn nextEntityId(self: *Server) i32 {
+    return self.next_entity_id.fetchAdd(1, .monotonic);
+}
+
+//==============handshake/status/login=================//
 
 pub fn @"serverbound/handshake/intention"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
     const hs = net.packets.handshake_c2s;
@@ -1092,25 +1025,18 @@ pub fn @"serverbound/configuration/finish_configuration"(conn: *Connection, read
     const owner = owned.owner;
     const configing = owned.data.config;
     {
-        const playing = try owner.allocator.create(PlayConnection);
+        const player = try owner.allocator.create(core.Player);
         errdefer comptime unreachable;
 
-        playing.* = .{
+        player.init(.{
             .owned = owned,
-            .common = configing.common,
             .profile = configing.profile,
-            .entity_id = owner.next_entity_id.fetchAdd(1, .monotonic),
-            .encryption = configing.encryption,
-            .compression = configing.compression,
-        };
-        owned.data = .{ .play = playing };
+            .common = configing.common,
+        });
+        owned.data = .{ .play = player };
         owner.allocator.destroy(configing);
         // Same as vanilla's `handleConfigurationFinished`, the client is in play from now on
-        conn.reconfigure(.{
-            .in_phase = .play,
-            .out_phase = .play,
-            .vtable = &PlayConnection.vtable,
-        });
+        core.Player.reconfigureForPlay(conn);
     }
 
     try joinWorld(conn, params.toAllocPair());
@@ -1296,13 +1222,13 @@ fn sendChunks(conn: *Connection) Io.Cancelable!void {
     };
 }
 
-fn playerInfoEntry(playing: *const PlayConnection) net.packets.player_info_entry.getZigType() {
+fn playerInfoEntry(player: *const core.Player) net.packets.player_info_entry.getZigType() {
     return .{
-        .profile = playing.profile,
+        .profile = player.profile,
         .chat_session = null,
         .game_mode = overworld.game_mode,
         .listed = true,
-        .latency = @intCast(@min(playing.common.latency, std.math.maxInt(i32))),
+        .latency = @intCast(@min(player.getLatency(), std.math.maxInt(i32))),
         .display_name = null,
         .list_order = 0,
         .show_hat = true,
@@ -1310,7 +1236,7 @@ fn playerInfoEntry(playing: *const PlayConnection) net.packets.player_info_entry
 }
 
 /// `players_mutex` must be locked for reading or writing.
-fn broadcastSystemChatLocked(self: *Server, apair: net.PacketType.AllocPair, message: utils.TextComponent) void {
+pub fn broadcastSystemChatLocked(self: *Server, apair: net.PacketType.AllocPair, message: utils.TextComponent) void {
     chat_logger.info("{f}", .{message});
     for (self.players.items) |player| {
         player.sendPacket(apair, "system_chat", net.packets.system_chat_s2c, .{
