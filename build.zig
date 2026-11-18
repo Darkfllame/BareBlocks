@@ -259,6 +259,7 @@ pub fn build(b: *Build) !void {
             "core",
             "utils",
             "serial",
+            "math",
         },
     });
     const core_mod = proj.createModule(b, .{

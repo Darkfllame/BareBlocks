@@ -9,6 +9,7 @@ const core = @import("core");
 const zio = @import("zio");
 const utils = @import("utils");
 const crypto = @import("crypto");
+const lm = @import("math");
 const net = @import("net.zig");
 
 const posix = std.posix;
@@ -23,8 +24,9 @@ const TextComponent = utils.TextComponent;
 const NetworkingPhase = net.NetworkingPhase;
 const NetworkingSide = net.NetworkingSide;
 const PacketRegistry = net.PacketRegistry;
-const math = std.math;
+const Atomic = std.atomic.Value;
 
+const cache_line_size = std.atomic.cache_line;
 const assert = std.debug.assert;
 
 const reader_vtable = Io.Reader.VTable{
@@ -61,9 +63,9 @@ const Packet = struct {
 };
 
 const ReaderState = struct {
-    _: void align(std.atomic.cache_line) = {},
+    _: void align(cache_line_size) = {},
 
-    state: std.atomic.Value(CoroState),
+    state: Atomic(CoroState),
     buffer: [reader_buffer_size]u8,
     reader: Io.Reader,
     decrypt_reader: Io.Reader,
@@ -73,9 +75,9 @@ const ReaderState = struct {
 };
 
 const WriterState = struct {
-    _: void align(std.atomic.cache_line) = {},
+    _: void align(cache_line_size) = {},
 
-    state: std.atomic.Value(CoroState),
+    state: Atomic(CoroState),
     buffer: [writer_buffer_size]u8,
     writer: Io.Writer,
     @"error": ?StreamWriteError,
@@ -602,22 +604,16 @@ fn writeConnection(self: *Connection, allocator: Allocator) !void {
 }
 
 fn addReadPacket(self: *Connection) void {
-    self.lockUncancelable();
-    defer self.unlock();
-
     self.reader_state.last_packet_timestamp = Io.Timestamp.now(std.Options.debug_io, .boot);
 
-    if (self.rate_limited) |rl| {
-        rl.received +|= 1; // Realistically these shouldn't overflow but just in case
+    if (self.rate_limited.load(.monotonic)) |rl| {
+        _ = rl.received.fetchAdd(1, .monotonic);
     }
 }
 
 fn addWritePacket(self: *Connection) void {
-    self.lockUncancelable();
-    defer self.unlock();
-
-    if (self.rate_limited) |rl| {
-        rl.sent +|= 1; // Realistically these shouldn't overflow but just in case
+    if (self.rate_limited.load(.monotonic)) |rl| {
+        _ = rl.sent.fetchAdd(1, .monotonic);
     }
 }
 
@@ -685,7 +681,7 @@ in_phase: NetworkingPhase,
 out_phase: NetworkingPhase,
 target_side: NetworkingSide,
 
-rate_limited: ?*RateLimited,
+rate_limited: Atomic(?*RateLimited),
 compression: ?*Compression,
 encryption: ?*Encryption,
 timeout: Io.Duration,
@@ -698,7 +694,7 @@ reader_state: ReaderState,
 writer_state: WriterState,
 
 send_state: struct {
-    _: void align(std.atomic.cache_line) = {},
+    _: void align(cache_line_size) = {},
 
     buffer: [128]*Packet,
     channel: zio.Channel(*Packet),
@@ -763,11 +759,14 @@ pub const DeinitCallbackFn = fn (conn: *Connection, allocator: Allocator) void;
 pub const TickCallbackFn = fn (conn: *Connection, delta: u8) TickError!void;
 
 pub const RateLimited = struct {
+    received: Atomic(Count) align(cache_line_size) = .init(0),
+    sent: Atomic(Count) align(cache_line_size) = .init(0),
+
+    /// Constant value.
     limit: Count,
+
     average_received: Average = 0,
     average_sent: Average = 0,
-    received: Count = 0,
-    sent: Count = 0,
 
     pub const Average = f32;
     pub const Count = usize;
@@ -825,13 +824,13 @@ pub const Compression = struct {
 
     threshold: usize,
     decompression: struct {
-        _: void align(std.atomic.cache_line) = {},
+        _: void align(cache_line_size) = {},
         @"error": ?flate.Decompress.Error,
         buffer: [flate.max_window_len]u8,
     },
     /// Data is always locked by the parent `Connection`.
     compression: struct {
-        _: void align(std.atomic.cache_line) = {},
+        _: void align(cache_line_size) = {},
         mask: std.bit_set.Dynamic,
         state: std.heap.ArenaAllocator.State,
         buffers: []*[flate.max_window_len]u8,
@@ -879,12 +878,12 @@ pub const Encryption = struct {
     shared_secret: [16]u8,
 
     encrypt: struct {
-        _: void align(std.atomic.cache_line) = {},
+        _: void align(cache_line_size) = {},
         ctx: *crypto.EVP_CIPHER_CTX,
         buffer: [reader_buffer_size]u8,
     },
     decrypt: struct {
-        _: void align(std.atomic.cache_line) = {},
+        _: void align(cache_line_size) = {},
         ctx: *crypto.EVP_CIPHER_CTX,
         // Should have more bytes, but AES128/CFB8 doesn't buffer, so encryption and decryption is
         // N bytes for N bytes
@@ -995,8 +994,10 @@ pub const HashContext = struct {
 
 pub const VTable = struct {
     /// Called when the server needs to inform the client why they're getting disconnected.
+    /// 
+    /// Only called once.
     disconnect: *const DisconnectCallbackFn = noDisconnectMessage,
-    /// Called when the interface needs to inform clients why they're getting disconnected.
+    /// Called once work with the `Connection` is done, so that the implementation can free its data.
     deinit: *const DeinitCallbackFn = noDeinit,
     /// Called every ~50ms.
     tick: *const TickCallbackFn = noTick,
@@ -1047,7 +1048,7 @@ pub fn init(self: *Connection, allocator: Allocator, group: *Io.Group, options: 
         .out_phase = options.out_phase,
         .target_side = options.target_side,
 
-        .rate_limited = options.rate_limited,
+        .rate_limited = .init(options.rate_limited),
         .encryption = options.encryption,
         .compression = options.compression,
         .timeout = options.timeout,
@@ -1173,7 +1174,7 @@ pub fn reconfigure(self: *Connection, options: ReconfigureOptions) void {
     if (options.in_phase) |p| self.in_phase = p;
     if (options.out_phase) |p| self.out_phase = p;
     if (options.timeout) |to| self.timeout = to;
-    if (options.rate_limited) |rl| self.rate_limited = rl;
+    if (options.rate_limited) |rl| self.rate_limited.store(rl, .monotonic);
     if (options.vtable) |cb| self.vtable = cb;
     if (options.compression) |c| self.compression = c;
     if (options.encryption) |c| {
@@ -1357,17 +1358,19 @@ pub fn shutdown(self: *Connection, how: Io.net.ShutdownHow) Io.net.ShutdownError
 
 /// Assumes `self` to be locked.
 pub fn tick(self: *Connection) TickError!void {
-    logger.debug("[{f}] Ticking", .{self.altLocked()});
+    // logger.debug("[{f}] Ticking", .{self.altLocked()});
 
     const delta = self.tick_count;
     self.tick_count = (self.tick_count + 1) % 20;
 
     if (delta == 0) {
-        if (self.rate_limited) |rl| {
-            rl.average_sent = math.lerp(@as(RateLimited.Average, @floatFromInt(rl.sent)), rl.average_sent, 0.75);
-            rl.average_received = math.lerp(@as(RateLimited.Average, @floatFromInt(rl.received)), rl.average_received, 0.75);
-            rl.sent = 0;
-            rl.received = 0;
+        if (self.rate_limited.load(.monotonic)) |rl| {
+            const sent: RateLimited.Average =  @floatFromInt(rl.sent.swap(0, .monotonic));
+            const received: RateLimited.Average =  @floatFromInt(rl.received.swap(0, .monotonic));
+
+            rl.average_sent = lm.lerp(RateLimited.Average, sent, rl.average_sent, 0.75);
+            rl.average_received = lm.lerp(RateLimited.Average, received, rl.average_received, 0.75);
+            
             if (@as(RateLimited.Count, @trunc(rl.average_received)) >= rl.limit) {
                 logger.warn("[{f}] Exceeded rate-limit (sent {d} packets per seconds)", .{ self.altLocked(), rl.average_received });
                 self.disconnect(.{ .static = &.exceeded_packet_rate });
