@@ -225,6 +225,7 @@ pub const Type = union(enum) {
         InvalidUTF8,
         InvalidLength,
         InvalidEnumTag,
+        InvalidValue,
     };
 
     pub const TCSerialType = enum { nbt, json };
@@ -273,9 +274,9 @@ pub const Type = union(enum) {
                 op: std.math.CompareOperator,
                 value: *const anyopaque,
             },
-            field_mask: struct {
+            enum_set: struct {
                 name: []const u8,
-                value: comptime_int,
+                value: @EnumLiteral(),
             },
         } = .prefixed,
 
@@ -638,7 +639,7 @@ pub const Type = union(enum) {
         return self.readRoot(.no_alloc, reader);
     }
 
-    pub inline fn writerNoAlloc(comptime self: Type, writer: *Writer, val: self.getZigType()) WriteError!void {
+    pub inline fn writeNoAlloc(comptime self: Type, writer: *Writer, val: self.getZigType()) WriteError!void {
         return self.write(.no_alloc, writer, val);
     }
 
@@ -827,7 +828,7 @@ pub const Type = union(enum) {
                     .bool_field => |name| @as(bool, @field(parent, name)),
                     .field_cmp => |cmp| {
                         const field = @field(parent, cmp.name);
-                        const value_ptr = @as(*const @TypeOf(field), @ptrCast(@alignCast(cmp.value)));
+                        const value_ptr = comptime @as(*const @TypeOf(field), @ptrCast(@alignCast(cmp.value)));
                         if (std.meta.hasMethod(@TypeOf(field), "compare")) {
                             break :cond field.compare(cmp.op, value_ptr.*);
                         }
@@ -844,7 +845,7 @@ pub const Type = union(enum) {
                             else => @compileError(ct_err_message),
                         };
                     },
-                    .field_mask => |fm| (@field(parent, fm.name) & fm.value) == fm.value,
+                    .enum_set => |fm| @field(parent, fm.name).contains(fm.value),
                 };
                 if (!has_value) break :sw null;
                 var val: opt.sub.getZigType() = undefined;
@@ -1328,7 +1329,7 @@ pub const Type = union(enum) {
                         },
                         cmp.value,
                     }),
-                    .field_mask => |msk| try writer.print(" (.{s} & {b})", .{ msk.name, msk.value }),
+                    .enum_set => |es| try writer.print(" (.{s}.{t})", .{ es.name, es.value }),
                 }
             },
             .array => |arr| {

@@ -1126,14 +1126,16 @@ fn joinWorld(conn: *Connection, apair: net.PacketType.AllocPair) Connection.Read
         // Same as vanilla's `PlayerList.placeNewPlayer`: everyone gets the new player, the new player
         // gets everyone. The client also needs its own entry, it's where it gets its game mode from.
         const player_info = net.packets.player_info_initialize_s2c;
-        const PlayerEntry = net.packets.player_info_entry.getZigType();
-        const all_actions: std.EnumSet(net.packets.PlayerInfoAction) = .full;
+        const PlayerEntry = net.packets.PlayerInfoEntry;
 
         var new_entry = [_]PlayerEntry{playerInfoEntry(playing)};
         const others = try apair.arena.alloc(PlayerEntry, owner.players.items.len - 1);
         var i: usize = 0;
         for (owner.players.items) |player| {
-            player.sendPacket(apair, "player_info_update", player_info, .{ .actions = all_actions, .players = &new_entry }) catch |e|
+            player.sendPacket(apair, "player_info_update", player_info, .{
+                .actions = .full,
+                .players = &new_entry,
+            }) catch |e|
                 logger.warn("[{f}] Couldn't send player info: {t}", .{ player.alt(), e });
             if (player == conn) continue;
             const other: *OwnedConnection = @fieldParentPtr("connection", player);
@@ -1141,7 +1143,10 @@ fn joinWorld(conn: *Connection, apair: net.PacketType.AllocPair) Connection.Read
             i += 1;
         }
         if (others.len != 0) {
-            try conn.sendPacket(apair, "player_info_update", player_info, .{ .actions = all_actions, .players = others });
+            try conn.sendPacket(apair, "player_info_update", player_info, .{
+                .actions = .full,
+                .players = others,
+            });
         }
     }
 
@@ -1222,16 +1227,16 @@ fn sendChunks(conn: *Connection) Io.Cancelable!void {
     };
 }
 
-fn playerInfoEntry(player: *const core.Player) net.packets.player_info_entry.getZigType() {
+fn playerInfoEntry(player: *const core.Player) net.packets.PlayerInfoEntry {
     return .{
         .profile = player.profile,
-        .chat_session = null,
+        .chat_session = @as(?net.packets.ChatSession, null),
         .game_mode = overworld.game_mode,
         .listed = true,
-        .latency = @intCast(@min(player.getLatency(), std.math.maxInt(i32))),
-        .display_name = null,
-        .list_order = 0,
-        .show_hat = true,
+        .ping = @intCast(@min(player.getLatency(), std.math.maxInt(i32))),
+        .display_name = @as(?utils.TextComponent, null),
+        .priority = 0,
+        .hat_visible = true,
     };
 }
 

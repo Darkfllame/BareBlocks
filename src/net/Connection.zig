@@ -586,7 +586,7 @@ fn writeConnection(self: *Connection, allocator: Allocator) !void {
         // logger.debug("[{f}] Sending packet: {Bi}", .{ self.alt(), bytes.len });
         // std.debug.dumpHex(bytes);
 
-        PacketType.writerNoAlloc(.var_int, writer, @intCast(bytes.len)) catch |e| switch (e) {
+        PacketType.writeNoAlloc(.var_int, writer, @intCast(bytes.len)) catch |e| switch (e) {
             error.WriteFailed => |err| return err,
             else => unreachable,
         };
@@ -737,7 +737,7 @@ pub const StreamReadError = Io.net.Stream.Reader.Error || error{DecryptionFailed
 pub const StreamWriteError = Io.net.Stream.Writer.Error || error{EncryptionFailed};
 pub const InitError = Io.ConcurrentError || Allocator.Error || error{ SocketUnconnected, ConnectionTimedOut, Unexpected };
 
-pub const ReadCallbackError = PacketType.ReadError || WritePacketError || Io.net.ShutdownError || Io.ConcurrentError || error{ CallbackHandlerFailed };
+pub const ReadCallbackError = PacketType.ReadError || WritePacketError || Io.net.ShutdownError || Io.ConcurrentError || error{CallbackHandlerFailed};
 pub const WritePacketError = Io.Cancelable || Allocator.Error || PacketType.WriteError || error{
     PacketIDNotFound,
     PacketTooLarge,
@@ -1259,7 +1259,7 @@ pub fn sendPacket(
     aw.writer.advance(@sizeOf(Packet));
     // logger.debug("Sending packet {s} (id: {x}) (aw prealloc)", .{ resource, pack_id });
 
-    PacketType.writerNoAlloc(.var_int, &aw.writer, @backingInt(pack_id)) catch return error.OutOfMemory;
+    PacketType.writeNoAlloc(.var_int, &aw.writer, @backingInt(pack_id)) catch return error.OutOfMemory;
 
     @"type".write(apair, &aw.writer, value) catch |e| return switch (e) {
         error.WriteFailed => error.OutOfMemory,
@@ -1283,7 +1283,7 @@ pub fn sendPacket(
 
             if (content.len < comp.threshold) {
                 // logger.debug("Sending packet {s} (id: {x}) (uncompressed header)", .{ resource, pack_id });
-                PacketType.writerNoAlloc(.var_int, &out_w.writer, 0) catch unreachable;
+                PacketType.writeNoAlloc(.var_int, &out_w.writer, 0) catch unreachable;
                 out_w.writer.writeAll(content) catch unreachable;
             } else {
                 @branchHint(.likely);
@@ -1294,7 +1294,7 @@ pub fn sendPacket(
                 const buffer = try comp.getCompressionBuffer(apair.gpa);
                 defer comp.redeemCompressionBuffer(buffer);
 
-                PacketType.writerNoAlloc(.var_int, &out_w.writer, @intCast(content.len)) catch unreachable;
+                PacketType.writeNoAlloc(.var_int, &out_w.writer, @intCast(content.len)) catch unreachable;
                 var compress = flate.Compress.init(&out_w.writer, buffer, .zlib, .default) catch
                     return error.OutOfMemory;
 

@@ -454,6 +454,52 @@ pub const accept_code_of_conduct_c2s = StructuredPacket.named("AcceptCodeOfCondu
 //=====================play===========================//
 
 pub const GameMode = enum { survival, creative, adventure, spectator };
+pub const PlayerInfoAction = enum {
+    // DO NOT REORDER THESE
+    add_player,
+    initialize_chat,
+    update_game_mode,
+    update_listed,
+    update_latency,
+    update_display_name,
+    update_list_order,
+    update_hat,
+};
+pub const PlayerInfoEntry = struct {
+    /// Require at least `uuid` set.
+    profile: utils.GameProfile = .null,
+    /// meta field, tells whether `profile` only has `uuid` valid (`false`)
+    /// or the other fields too (`true`).
+    full_profile: bool = false,
+    /// Use `@as(?net.packets.ChatSession, null)` to make it valid.
+    chat_session: ??ChatSession = null,
+    game_mode: ?GameMode = null,
+    listed: ?bool = null,
+    ping: ?i32 = null,
+    /// Use `@as(?utils.TextComponent, null)` to make it valid.
+    display_name: ??utils.TextComponent = null,
+    priority: ?i32 = null,
+    hat_visible: ?bool = null,
+};
+/// ```
+/// struct {
+///     session_id: UUID,
+///     expires_at: i64,
+///     public_key: [0..512]const u8,
+///     key_signature: [0..4096]const u8,
+/// }
+/// ```
+pub const ChatSession = chat_session.getZigType();
+
+pub const chat_session = StructuredPacket.getType(.{
+    .name = "ChatSession",
+    .fields = &.{
+        .{ .name = "session_id", .type = .uuid },
+        .{ .name = "expires_at", .type = .long },
+        .{ .name = "public_key", .type = .prefixedMaxArray(.ubyte, 512) },
+        .{ .name = "key_signature", .type = .prefixedMaxArray(.ubyte, 4096) },
+    },
+});
 
 pub const login_s2c = StructuredPacket.getType(.{
     .name = "LoginS2C",
@@ -513,56 +559,79 @@ pub const player_position_s2c = StructuredPacket.getType(.{
         .{ .name = "flags", .type = .teleport_flags },
     },
 });
-pub const PlayerInfoAction = enum {
-    add_player,
-    initialize_chat,
-    update_game_mode,
-    update_listed,
-    update_latency,
-    update_display_name,
-    update_list_order,
-    update_hat,
+pub const PlayerInfoUpdateS2C = struct {
+    const actions_ptype = PacketType{ .enum_set = .of(PlayerInfoAction, .u8) };
+
+    fn packetRead(params: PacketType.ReadParams, reader: *std.Io.Reader, parent: anytype, out: anytype) PacketType.ReadError!void {
+        const ptr: *PlayerInfoUpdateS2C = out;
+        try actions_ptype.read(params, reader, parent, &ptr.actions);
+        const players_count = try PacketType.readNoAlloc(.var_int, reader);
+        if (players_count < 0) return error.InvalidLength;
+        const slice = try params.arena.allocator().alloc(PlayerInfoEntry, @intCast(players_count));
+        for (slice) |*entry| {
+            entry.* = .{};
+            if (!ptr.actions.contains(.add_player)) {
+                entry.profile.uuid = try PacketType.readNoAlloc(.uuid, reader);
+            }
+            var it = ptr.actions.iterator();
+            while (it.next()) |which| switch (which) {
+                .add_player => {
+                    try PacketType.read(.game_profile, params, reader, parent, &entry.profile);
+                    entry.full_profile = true;
+                },
+                .initialize_chat => {
+                    entry.chat_session = @as(?ChatSession, null);
+                    try PacketType.read(.prefixedOptional(chat_session), params, reader, parent, &entry.chat_session.?);
+                },
+                .update_game_mode => entry.game_mode = try PacketType.readNoAlloc(.{ .@"enum" = .of(GameMode, .var_int) }, reader),
+                .update_listed => entry.listed = try PacketType.readNoAlloc(.bool, reader),
+                .update_latency => entry.ping = try PacketType.readNoAlloc(.var_int, reader),
+                .update_display_name => {
+                    entry.display_name = @as(?utils.TextComponent, null);
+                    try PacketType.read(.prefixedOptional(.nbt_text_component), params, reader, parent, &entry.display_name.?);
+                },
+                .update_list_order => entry.priority = try PacketType.readNoAlloc(.var_int, reader),
+                .update_hat => entry.hat_visible = try PacketType.readNoAlloc(.bool, reader),
+            };
+        }
+    }
+
+    fn packetWrite(apair: PacketType.AllocPair, writer: *std.Io.Writer, out: anytype) PacketType.WriteError!void {
+        const value: PlayerInfoUpdateS2C = out;
+        try actions_ptype.write(apair, writer, value.actions);
+        try PacketType.writeNoAlloc(.var_int, writer, std.math.cast(i32, value.players.len) orelse return error.InvalidLength);
+        for (value.players) |entry| {
+            if (!value.actions.contains(.add_player)) {
+                try PacketType.writeNoAlloc(.uuid, writer, entry.profile.uuid);
+                if (entry.full_profile) return error.InvalidValue;
+            }
+            var it = value.actions.iterator();
+            while (it.next()) |which| switch (which) {
+                .add_player => try PacketType.writeNoAlloc(.game_profile, writer, entry.profile),
+                .initialize_chat => {
+                    const may_sesh = entry.chat_session orelse return error.InvalidValue;
+                    try PacketType.write(.prefixedOptional(chat_session), apair, writer, may_sesh);
+                },
+                .update_game_mode => try PacketType.writeNoAlloc(.{ .@"enum" = .of(GameMode, .var_int) }, writer, entry.game_mode orelse return error.InvalidValue),
+                .update_listed => try PacketType.writeNoAlloc(.bool, writer, entry.listed orelse return error.InvalidValue),
+                .update_latency => try PacketType.writeNoAlloc(.var_int, writer, entry.ping orelse return error.InvalidValue),
+                .update_display_name => try PacketType.writeNoAlloc(.prefixedOptional(.nbt_text_component), writer, entry.display_name orelse return error.InvalidValue),
+                .update_list_order => try PacketType.writeNoAlloc(.var_int, writer, entry.priority orelse return error.InvalidValue),
+                .update_hat => try PacketType.writeNoAlloc(.bool, writer, entry.hat_visible orelse return error.InvalidValue),
+            };
+        }
+    }
+
+    actions: std.EnumSet(PlayerInfoAction) = .empty,
+    players: []const PlayerInfoEntry = &.{},
 };
-pub const chat_session = StructuredPacket.getType(.{
-    .name = "ChatSession",
-    .fields = &.{
-        .{ .name = "session_id", .type = .uuid },
-        .{ .name = "expires_at", .type = .long },
-        .{ .name = "public_key", .type = .prefixedMaxArray(.ubyte, 512) },
-        .{ .name = "key_signature", .type = .prefixedMaxArray(.ubyte, 4096) },
-    },
-});
-/// A player in `player_info_initialize_s2c`, with every action's data in the actions' order.
-pub const player_info_entry = StructuredPacket.getType(.{
-    .name = "PlayerInfoEntry",
-    .fields = &.{
-        // The uuid, then add_player's name and properties, same bytes as a game profile
-        .{ .name = "profile", .type = .game_profile },
-        // initialize_chat
-        .{ .name = "chat_session", .type = .prefixedOptional(chat_session) },
-        // update_game_mode
-        .{ .name = "game_mode", .type = .{ .@"enum" = .of(GameMode, .var_int) } },
-        // update_listed
-        .{ .name = "listed", .type = .bool },
-        // update_latency
-        .{ .name = "latency", .type = .var_int },
-        // update_display_name
-        .{ .name = "display_name", .type = .prefixedOptional(.nbt_text_component) },
-        // update_list_order
-        .{ .name = "list_order", .type = .var_int },
-        // update_hat
-        .{ .name = "show_hat", .type = .bool },
-    },
-});
 /// Only the form vanilla sends when players join (`createPlayerInitializing`): every action.
-pub const player_info_initialize_s2c = StructuredPacket.getType(.{
-    .name = "PlayerInfoInitializeS2C",
-    .fields = &.{
-        // A fixed `java.util.BitSet` of 8 bits, all set
-        .{ .name = "actions", .type = .{ .enum_set = .of(PlayerInfoAction, .u8) } },
-        .{ .name = "players", .type = .prefixedArray(player_info_entry) },
-    },
-});
+pub const player_info_initialize_s2c = PacketType{ .custom = .{
+    .type = PlayerInfoUpdateS2C,
+    .readFn = PlayerInfoUpdateS2C.packetRead,
+    .writeFn = PlayerInfoUpdateS2C.packetWrite,
+    .default_value_ptr = &PlayerInfoUpdateS2C{},
+} };
 pub const player_info_remove_s2c = PacketType.prefixedArray(.uuid);
 pub const set_chunk_cache_center_s2c = StructuredPacket.getType(.{
     .name = "SetChunkCacheCenterS2C",
@@ -648,15 +717,15 @@ test "player_info_initialize_s2c size" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    var players = [_]player_info_entry.getZigType(){.{
+    var players = [_]PlayerInfoEntry{.{
         .profile = try .validate("sioworker", .{ .value = 0 }),
-        .chat_session = null,
+        .chat_session = @as(?ChatSession, null),
         .game_mode = .spectator,
         .listed = true,
-        .latency = 0,
-        .display_name = null,
-        .list_order = 0,
-        .show_hat = true,
+        .ping = 0,
+        .display_name = @as(?utils.TextComponent, null),
+        .priority = 0,
+        .hat_visible = true,
     }};
     try player_info_initialize_s2c.write(.newWithArena(std.testing.allocator, &arena), &aw.writer, .{
         .actions = .full,

@@ -70,6 +70,18 @@ pub const Property = struct {
     }
 };
 
+pub fn unnamed(uuid: UUID) GameProfile {
+    return .{
+        .uuid = uuid,
+        .lengths = .{
+            .username = 0,
+            .properties = 0,
+        },
+        .username_ptr = undefined,
+        .properties_ptr = undefined,
+    };
+}
+
 pub fn validate(_username: []const u8, uuid: UUID) error{ InvalidCharacter, InvalidLength }!GameProfile {
     for (_username) |c| {
         if (c <= 32 or c >= 127) return error.InvalidCharacter;
