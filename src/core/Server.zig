@@ -245,7 +245,7 @@ broadcast: struct {
 },
 
 /// Connections in the play phase.
-players_mutex: zio.RwLock,
+players_mutex: zio.Mutex.Recursive,
 players: std.ArrayList(*Connection),
 player_count: std.atomic.Value(u32),
 next_entity_id: std.atomic.Value(i32),
@@ -618,12 +618,12 @@ pub fn init(self: *Server, options: InitOptions) InitError!void {
 pub fn deinit(self: *Server) void {
     const io = self.runtime.io();
 
-    if (true) { // somehow this causes Connection's writeEntry to hang ? i'm lowk fried tho, might investigate next
-        self.players_mutex.lockSharedUncancelable();
-        defer self.players_mutex.unlockShared();
+    if (true) {
+        self.players_mutex.lockUncancelable();
+        defer self.players_mutex.unlock();
 
-        for (self.players.items) |conn| {
-            conn.disconnect(.{ .static = &.server_shutdown });
+        while (self.players.last()) |player| {
+            player.disconnect(.{ .static = &.server_shutdown });
         }
 
         logger.info("Disconnected all clients", .{});
@@ -1155,8 +1155,8 @@ fn joinWorld(conn: *Connection, apair: net.PacketType.AllocPair) Connection.Read
         .common = .{ .color = .yellow },
     });
 
-    owner.players_mutex.lockSharedUncancelable();
-    defer owner.players_mutex.unlockShared();
+    owner.players_mutex.lockUncancelable();
+    defer owner.players_mutex.unlock();
     owner.broadcastSystemChatLocked(apair, message);
 }
 
@@ -1221,9 +1221,9 @@ fn sendChunks(conn: *Connection) Io.Cancelable!void {
     defer arena.deinit();
 
     sendChunksInner(conn, apair, world) catch |err| {
-        logger.err("Error sending chunks: {t}", .{err});
-        if (@errorReturnTrace()) |ert| std.debug.dumpErrorReturnTrace(ert);
+        logger.err("[{f}] Error sending chunks: {t}", .{conn.alt(), err});
         if (err == error.Canceled) return error.Canceled;
+        if (@errorReturnTrace()) |ert| std.debug.dumpErrorReturnTrace(ert);
     };
 }
 

@@ -37,14 +37,12 @@ const ConnectionImpl = struct {
 
         try conn.sendPacket(apair, "disconnect", net.packets.disconnect_s2c, reason.*);
 
+        var remove_index: ?usize = null;
         {
-            // TODO: Yep deadlocks pissing me off
-
             owner.players_mutex.lockUncancelable();
             defer owner.players_mutex.unlock();
             _ = owner.player_count.fetchSub(1, .monotonic);
 
-            var remove_index: ?usize = null;
             for (owner.players.items, 0..) |player, i| {
                 if (player == conn) {
                     if (remove_index != null) {
@@ -64,6 +62,7 @@ const ConnectionImpl = struct {
                 ) catch |e|
                     logger.warn("[{f}] Couldn't send player info: {t}", .{ player.alt(), e });
             }
+        
             if (remove_index) |i| {
                 _ = owner.players.swapRemove(i);
             } else {
@@ -98,6 +97,7 @@ fn fromConnectionPtr(conn: *Connection) *Player {
 connection: ConnectionImpl,
 profile: utils.GameProfile,
 entity_id: i32, // TODO: Entity management
+
 
 pub const InitOptions = struct {
     owned: *Server.OwnedConnection,
