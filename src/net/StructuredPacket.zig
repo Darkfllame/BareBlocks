@@ -802,12 +802,12 @@ pub const Type = union(enum) {
                 comptime assert(@bitSizeOf(usize) == 64);
                 if (may_bits) |bits| {
                     const BitSet = @TypeOf(ret.*);
-                    ret.* = .initEmpty();
+                    ret.* = .empty;
                     if (@hasField(BitSet, "masks")) {
-                        const num_bytes = @divFloor(bits - 1, 8) + 1;
+                        const num_bytes = @divCeil(bits, 8);
                         try reader.readSliceAll(@as([*]u8, @ptrCast(&ret.masks))[0..num_bytes]);
                     } else {
-                        ret.mask = @truncate(try reader.takeInt(std.math.ByteAlignedInt(BitSet.MaskInt), .big));
+                        ret.mask = @truncate(try reader.takeInt(std.math.ByteAlignedInt(BitSet.MaskInt), .little));
                     }
                     break :sw ret.*;
                 } else {
@@ -818,8 +818,9 @@ pub const Type = union(enum) {
                     }
                     if (num_longs == 0) break :sw .{};
                     const bits = @as(u32, @bitCast(num_longs)) * 64;
-                    const bs = try std.DynamicBitSetUnmanaged.initEmpty(params.getArena(), bits);
-                    try reader.readSliceAll(@ptrCast(bs.masks[0 .. num_longs / 64]));
+                    ret.* = try std.DynamicBitSetUnmanaged.initEmpty(params.getArena(), bits);
+                    try reader.readSliceAll(@ptrCast(ret.masks[0 .. bits / 64]));
+                    break :sw ret.*;
                 }
             },
             .optional => |opt| {

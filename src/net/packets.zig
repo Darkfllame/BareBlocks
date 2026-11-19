@@ -472,13 +472,13 @@ pub const GameEvent = enum(u8) {
     /// Actually stops rain.
     ///
     /// Equivalent to `change_rain_level` with value `0.0`. Though obselete in favor of `change_rain_level`.
-    /// 
+    ///
     /// The java name is inverted with `begin_raining` because mojang's dumb or idk.
     end_raining = 1,
     /// Actually starts rain.
     ///
     /// Equivalent to `change_rain_level` with value `1.0`. Though obselete in favor of `change_rain_level`.
-    /// 
+    ///
     /// The java name is inverted with `end_raining` because mojang's dumb or idk.
     begin_raining = 2,
     /// Use `GameMode` for values. (0: Survival, 1: Creative, 2: Adventure, 3: Spectator)
@@ -789,4 +789,62 @@ test "player_info_initialize_s2c size" {
     try std.testing.expectEqual(0xFF, written[0]);
     // update_game_mode comes right after the empty properties and the absent chat session
     try std.testing.expectEqual(3, written[1 + 1 + 16 + 10 + 1 + 1]);
+}
+
+test "bitset remains equal" {
+    const gpa = std.testing.allocator;
+
+    var buf: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+
+    var arena: std.heap.ArenaAllocator = undefined;
+    const apair = PacketType.AllocPair.newFromGpa(gpa, &arena);
+    defer arena.deinit();
+
+    var el_bitset = std.bit_set.Dynamic{};
+    defer el_bitset.deinit(gpa);
+
+    try el_bitset.resize(gpa, 1024, false);
+    el_bitset.set(10);
+    el_bitset.set(20);
+    el_bitset.set(30);
+    el_bitset.set(40);
+    el_bitset.set(60);
+    el_bitset.set(70);
+    el_bitset.set(80);
+
+    try PacketType.write(.{ .bitset = null }, apair, &w, el_bitset);
+
+    var r = std.Io.Reader.fixed(w.buffered());
+
+    const out: std.bit_set.Dynamic = try PacketType.readRoot(.{ .bitset = null }, .fullInput(gpa, &arena), &r);
+
+    try std.testing.expect(el_bitset.eql(out));
+}
+
+test "static bitset remains equal" {
+    const gpa = std.testing.allocator;
+
+    var buf: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+
+    var arena: std.heap.ArenaAllocator = undefined;
+    const apair = PacketType.AllocPair.newFromGpa(gpa, &arena);
+    defer arena.deinit();
+
+    var el_bitset = std.bit_set.Integer(64).empty;
+
+    el_bitset.set(10);
+    el_bitset.set(20);
+    el_bitset.set(30);
+    el_bitset.set(40);
+    el_bitset.set(60);
+
+    try PacketType.write(.{ .bitset = 64 }, apair, &w, el_bitset);
+
+    var r = std.Io.Reader.fixed(w.buffered());
+
+    const out: std.bit_set.Integer(64) = try PacketType.readRoot(.{ .bitset = 64 }, .fullInput(gpa, &arena), &r);
+
+    try std.testing.expect(el_bitset.eql(out));
 }
