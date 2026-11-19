@@ -453,7 +453,7 @@ pub const accept_code_of_conduct_c2s = StructuredPacket.named("AcceptCodeOfCondu
 
 //=====================play===========================//
 
-pub const GameMode = enum { survival, creative, adventure, spectator };
+pub const GameMode = enum(u8) { survival = 0, creative = 1, adventure = 2, spectator = 3 };
 pub const PlayerInfoAction = enum {
     // DO NOT REORDER THESE
     add_player,
@@ -464,6 +464,58 @@ pub const PlayerInfoAction = enum {
     update_display_name,
     update_list_order,
     update_hat,
+};
+pub const GameEvent = enum(u8) {
+    /// Displays message 'block.minecraft.spawn.not_valid' (You have no home bed or charged respawn anchor, or it was obstructed)
+    /// to the player.
+    no_respawn_block = 0,
+    /// Actually stops rain.
+    ///
+    /// Equivalent to `change_rain_level` with value `0.0`. Though obselete in favor of `change_rain_level`.
+    /// 
+    /// The java name is inverted with `begin_raining` because mojang's dumb or idk.
+    end_raining = 1,
+    /// Actually starts rain.
+    ///
+    /// Equivalent to `change_rain_level` with value `1.0`. Though obselete in favor of `change_rain_level`.
+    /// 
+    /// The java name is inverted with `end_raining` because mojang's dumb or idk.
+    begin_raining = 2,
+    /// Use `GameMode` for values. (0: Survival, 1: Creative, 2: Adventure, 3: Spectator)
+    change_game_mode = 3,
+    /// End Fight credit scene. A `client_command` packet is sent to servers, with the `perform_respawn` action.
+    win_game = 4,
+    /// - 0: Show welcome to demo screen.
+    /// - 101: Tell movement controls.
+    /// - 102: Tell jump control.
+    /// - 103: Tell inventory control.
+    /// - 104: Tell that the demo is over and print a message about how to take a screenshot.
+    demo_event = 5,
+    /// Sent when an arrow show by the client hits another player. (the \*DING\* sfx)
+    arrow_hit_sound = 6,
+    /// Seems to change both sky color and lighting.
+    ///
+    /// Rain level ranging from 0 to 1.
+    change_rain_level = 7,
+    /// Seems to change both sky color and lighting (same as `change_rain_level`, but doesn't start rain). It also requires rain to render by vanilla client.
+    ///
+    /// Thunder level ranging from 0 to 1.
+    change_thunder_level = 8,
+    pufferfish_sting = 9,
+    /// 0: Visual effect only
+    /// 1: Sound and visual effect
+    elder_guardian_jumpscare = 10,
+    /// 0: Enable respawn screen
+    /// 1: Immediately respawn (sent when the `do_immediate_respawn` gamerule changes)
+    toggle_immediate_respawn = 11,
+    /// 0: Disable limited crafting
+    /// 1: Enable limited crafting (sent when the `do_limited_crafting` gamerule changes)
+    toggle_limited_crafting = 12,
+    /// This event is one of the prerequisites for the client to close the loading screen when spawning.
+    /// It is required following each Login (play) and Respawn packet, even when respawning to the same
+    /// dimension. The vanilla server does not send any chunks before sending this event, but it is still
+    /// valid to do so.
+    waiting_for_chunks = 13,
 };
 pub const PlayerInfoEntry = struct {
     /// Require at least `uuid` set.
@@ -540,7 +592,7 @@ pub const login_s2c = StructuredPacket.getType(.{
 pub const game_event_s2c = StructuredPacket.getType(.{
     .name = "GameEventS2C",
     .fields = &.{
-        .{ .name = "event", .type = .ubyte },
+        .{ .name = "event", .type = .{ .@"enum" = .of(GameEvent, .u8) } },
         .{ .name = "value", .type = .float },
     },
 });

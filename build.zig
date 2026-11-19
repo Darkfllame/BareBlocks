@@ -261,6 +261,7 @@ pub fn build(b: *Build) !void {
             "serial",
             "math",
         },
+        .strip = false,
     });
     const core_mod = proj.createModule(b, .{
         .name = "core",
@@ -280,6 +281,7 @@ pub fn build(b: *Build) !void {
             "block_states",
             "worldgen",
         },
+        .strip = false,
     });
     _ = core_mod;
     const block_states_mod = proj.createModule(b, .{
@@ -300,6 +302,7 @@ pub fn build(b: *Build) !void {
             .{ .name = "worldgen_data", .module = worldgen_data_mod },
         },
         .local_imports = &.{ "block_states", "math", "utils" },
+        .strip = false,
     });
     _ = worldgen_mod;
     const serial_mod = proj.createModule(b, .{

@@ -115,6 +115,7 @@ fn coro_acceptConnection(self: *Server, which: enum { v4, v6 }) CoroAccpetError!
             .target_side = .client,
             .vtable = &OwnedConnection.vtable,
             .timeout = .fromSeconds(10),
+            .tick_sync = &self.tick_sync,
         }) catch |err| {
             stream.?.close(io);
             self.allocator.destroy(owned);
@@ -192,39 +193,92 @@ fn deinitBroadcast(self: *Server) void {
     };
 }
 
-fn pregenChunks(self: *Server) !void {
+fn pregenChunkRing(world: *World, ring: i32, center: World.Position, count: *std.atomic.Value(u32)) Io.Cancelable!void {
+    var dz: i32 = -ring;
+    while (dz <= ring) : (dz += 1) {
+        var dx: i32 = -ring;
+        while (dx <= ring) : (dx += 1) {
+            if (@max(@abs(dx), @abs(dz)) != ring) continue;
+
+            const pos: World.Position = .{ .x = center.x + dx, .z = center.z + dz };
+            logger.debug("Chunk ring {d}, count: {d} ({d}, {d})", .{ ring, count.fetchAdd(1, .monotonic), pos.x, pos.z });
+            _ = world.encodedChunk(pos) catch |e| switch (e) {
+                error.Canceled => return error.Canceled,
+                error.OutOfMemory => {
+                    logger.err("Chunkgen error: {t}", .{e});
+                    return;
+                },
+            };
+
+            try zio.maybeYield();
+        }
+    }
+}
+
+fn pregenChunks(self: *Server) Io.Cancelable!void {
     const center = overworld.spawn_chunk;
     const world = &self.world;
 
     const io = self.runtime.io();
     const start = Io.Timestamp.now(io, .boot);
 
-    var count: i32 = 0;
+    // var threaded = Io.Threaded.init(self.allocator, .{ .stack_size = 2 * 1024 * 1024 });
+    // defer threaded.deinit();
+    // const tio = threaded.io();
+
+    var group: Io.Group = .init;
+    errdefer group.cancel(io);
+
+    var count: std.atomic.Value(u32) = .init(0);
     var ring: i32 = 0;
     while (ring <= overworld.view_distance) : (ring += 1) {
-        var dz: i32 = -ring;
-        while (dz <= ring) : (dz += 1) {
-            var dx: i32 = -ring;
-            while (dx <= ring) : (dx += 1) {
-                if (@max(@abs(dx), @abs(dz)) != ring) continue;
-                const pos: World.Position = .{ .x = center.x + dx, .z = center.z + dz };
-                logger.debug("Chunk ring {d}, count: {d} ({d}, {d})", .{ ring, count, pos.x, pos.z });
-                _ = world.encodedChunk(pos) catch |e| switch (e) {
-                    error.Canceled => return error.Canceled,
-                    error.OutOfMemory => {
-                        logger.err("Chunkgen error: {t}", .{e});
-                        return;
-                    },
-                };
-
-                count += 1;
-                // Generating takes a while, the other tasks still have to run
-                try zio.yield();
-            }
-        }
+        group.concurrent(io, pregenChunkRing, .{ world, ring, center, &count }) catch {
+            try pregenChunkRing(world, ring, center, &count);
+        };
     }
+
+    try group.await(io);
     const end = Io.Timestamp.now(io, .boot);
-    logger.info("Finished pregenerating {d} chunks in {f}", .{ count, start.durationTo(end) });
+    logger.info("Finished pregenerating {d} chunks in {f}", .{ count.load(.monotonic), start.durationTo(end) });
+}
+
+fn tickSynchronizer(self: *Server) Io.Cancelable!void {
+    const target_tick_time = Io.Duration.fromMilliseconds(1000 / 20);
+    const io = self.runtime.io();
+
+    self.tick_sync.register() catch {
+        self.group.cancel(io);
+        return;
+    };
+    defer self.tick_sync.unregister();
+
+    var delta_ticks: u32 = 0;
+    var last_time: Io.Timestamp = .now(io, .boot);
+    var delta: Io.Duration = .zero;
+    var avg: f32 = 0;
+    while (true) {
+        const start = Io.Timestamp.now(io, .boot);
+        try self.tick_sync.waitForTick();
+        const now = Io.Timestamp.now(io, .boot);
+        const time_taken = start.durationTo(now);
+        delta_ticks += 1;
+        delta.nanoseconds += last_time.durationTo(now).nanoseconds;
+
+        if (delta.nanoseconds >= std.time.ns_per_s) {
+            const f_dtt: f128 = @floatFromInt(delta_ticks);
+            const f_s: f128 = @as(f128, @floatFromInt(delta.nanoseconds)) / std.time.ns_per_s;
+            const taken: f128 = @as(f128, @floatFromInt(time_taken.nanoseconds)) / std.time.ns_per_s;
+            const tps = f_dtt / f_s;
+
+            avg = (avg + @as(f32, @floatCast(tps))) / 2;
+            logger.debug("TPS: {d:.0}    MSPT: {d:.2}    AVG: {d:.1}", .{ tps, taken, avg });
+            delta = .zero;
+            delta_ticks = 0;
+        }
+
+        last_time = now;
+        try io.sleep(.{ .nanoseconds = @max(0, target_tick_time.nanoseconds - time_taken.nanoseconds) }, .boot);
+    }
 }
 
 packet_registry: *const net.PacketRegistry,
@@ -248,11 +302,11 @@ broadcast: struct {
 players_mutex: zio.Mutex.Recursive,
 players: std.ArrayList(*Connection),
 player_count: std.atomic.Value(u32),
-next_entity_id: std.atomic.Value(i32),
 world: World,
 accept_coro: Io.Future(CoroAccpetError!void),
 acceptv6_coro: Io.Future(CoroAccpetError!void),
 
+tick_sync: core.TickSynchronizer,
 group: Io.Group,
 
 server_id: [20]u8,
@@ -569,11 +623,11 @@ pub fn init(self: *Server, options: InitOptions) InitError!void {
         .players_mutex = .init,
         .players = .empty,
         .player_count = .init(0),
-        .next_entity_id = .init(1),
         .world = world,
         .accept_coro = .{ .any_future = null, .result = {} },
         .acceptv6_coro = .{ .any_future = null, .result = {} },
 
+        .tick_sync = .{},
         .group = .init,
 
         .server_id = undefined,
@@ -613,6 +667,8 @@ pub fn init(self: *Server, options: InitOptions) InitError!void {
     self.group.concurrent(io, pregenChunks, .{self}) catch {
         logger.warn("Failed to run chunk pregen", .{});
     };
+
+    try self.group.concurrent(io, tickSynchronizer, .{self});
 }
 
 pub fn deinit(self: *Server) void {
@@ -654,10 +710,6 @@ pub fn addressAlt(self: *const Server) AddressAlt {
         .v4 = self.ipv4,
         .v6 = if (self.v6_enabled) self.ipv6 else null,
     };
-}
-
-pub fn nextEntityId(self: *Server) i32 {
-    return self.next_entity_id.fetchAdd(1, .monotonic);
 }
 
 //==============handshake/status/login=================//
@@ -1026,18 +1078,18 @@ pub fn @"serverbound/configuration/finish_configuration"(conn: *Connection, read
     const configing = owned.data.config;
     {
         const player = try owner.allocator.create(core.Player);
-        errdefer comptime unreachable;
+        errdefer owner.allocator.destroy(player);
 
-        player.init(.{
+        try player.init(.{
             .owned = owned,
             .profile = configing.profile,
             .common = configing.common,
         });
         owned.data = .{ .play = player };
-        owner.allocator.destroy(configing);
-        // Same as vanilla's `handleConfigurationFinished`, the client is in play from now on
-        core.Player.reconfigureForPlay(conn);
     }
+    owner.allocator.destroy(configing);
+    // Same as vanilla's `handleConfigurationFinished`, the client is in play from now on
+    core.Player.reconfigureForPlay(conn);
 
     try joinWorld(conn, params.toAllocPair());
     try owner.group.concurrent(owner.runtime.io(), sendChunks, .{conn.acquire()});
@@ -1078,7 +1130,7 @@ fn joinWorld(conn: *Connection, apair: net.PacketType.AllocPair) Connection.Read
 
     var dimensions = [_]utils.Identifier{.literal(overworld.dimension)};
     try conn.sendPacket(apair, "login", net.packets.login_s2c, .{
-        .entity_id = playing.entity_id,
+        .entity_id = @backingInt(core.Player.EntityID.player_self),
         .hardcore = false,
         .dimensions = &dimensions,
         .max_players = 20,
@@ -1113,7 +1165,7 @@ fn joinWorld(conn: *Connection, apair: net.PacketType.AllocPair) Connection.Read
         .flags = .empty,
     });
     try conn.sendPacket(apair, "game_event", net.packets.game_event_s2c, .{
-        .event = overworld.level_chunks_load_start,
+        .event = .waiting_for_chunks,
         .value = 0,
     });
 
@@ -1221,7 +1273,7 @@ fn sendChunks(conn: *Connection) Io.Cancelable!void {
     defer arena.deinit();
 
     sendChunksInner(conn, apair, world) catch |err| {
-        logger.err("[{f}] Error sending chunks: {t}", .{conn.alt(), err});
+        logger.err("[{f}] Error sending chunks: {t}", .{ conn.alt(), err });
         if (err == error.Canceled) return error.Canceled;
         if (@errorReturnTrace()) |ert| std.debug.dumpErrorReturnTrace(ert);
     };

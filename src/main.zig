@@ -12,11 +12,13 @@ const use_safe_allocator = !builtin.cpu.arch.isWasm() and switch (builtin.mode) 
     .fast, .small => !builtin.link_libc and builtin.single_threaded, // Also not ideal.
 };
 
+const magic_erase_all_line = "\x1b[H\x1b[2J\x1b[3J";
+
 var zio_runtime: zio.Runtime = undefined;
 var global_arena: std.heap.ArenaAllocator = .init(.failing);
 
 pub const std_options = std.Options{
-    // .log_level = .info,
+    .log_level = .debug,
     .log_scope_levels = &.{
         // .{ .scope = .zio, .level = .info },
         // .{ .scope = .@"core/server", .level = .info },
@@ -29,7 +31,7 @@ pub const zio_options = zio.Options{
     .backend = .epoll,
     .resolve_beneath_mode = .best_effort,
     .no_hacks = true,
-    .scheduler_metrics = true,
+    .scheduler_metrics = builtin.optimize == .debug,
     // Without this set to `false`, it'll crash when you don't do `runtime.io().recancel()` or `zio.recancel()`.
     .debug_cancel = false,
 };
@@ -109,6 +111,9 @@ pub fn main(init: std.process.Init.Minimal) !@typeInfo(@typeInfo(@TypeOf(asyncMa
 fn asyncMain(init: std.process.Init, rt: *zio.Runtime) !void {
     errdefer if (@errorReturnTrace()) |ert| std.debug.dumpErrorReturnTrace(ert);
 
+    std.debug.print(magic_erase_all_line, .{}); // magic no more line
+    try Io.File.stdout().writeStreamingAll(init.io, magic_erase_all_line);
+
     var root_reg: core.registry.RootRegistry = undefined;
     try root_reg.init(init.gpa);
     defer root_reg.deinit(init.gpa);
@@ -169,6 +174,7 @@ fn readConsole(server: *core.Server, gpa: std.mem.Allocator, evm: *const std.pro
     var file_writer = stdin.writerStreaming(io, &buf2);
     const reader = &file_reader.interface;
     var writer = StdinLogger(.@"core/server").init(&file_writer, evm) catch return;
+    writer.debug(magic_erase_all_line, .{});
 
     var w = try Io.Writer.Allocating.initCapacity(gpa, 16);
     defer w.deinit();

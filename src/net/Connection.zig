@@ -274,10 +274,10 @@ fn drain(io_w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Err
     return conn.netWrite(buffered, data, splat);
 }
 
-fn connectionHandler(self: *Connection, allocator: Allocator) Io.Cancelable!void {
+fn connectionHandler(self: *Connection, allocator: Allocator, tick_sync: *core.TickSynchronizer) Io.Cancelable!void {
     defer self.release(allocator);
 
-    self.connectionHandlerInner(allocator) catch |e| switch (e) {
+    self.connectionHandlerInner(allocator, tick_sync) catch |e| switch (e) {
         error.Canceled => {},
         error.ConcurrencyUnavailable => {
             logger.err("[{f}] TODO: Handle concurrency unavailable on connection handler startup", .{self.alt()});
@@ -364,11 +364,12 @@ fn writeEntry(self: *Connection, allocator: Allocator, start_event: *zio.Event) 
         self.writeConnection(allocator) catch |e| {
             const err = switch (e) {
                 error.WriteFailed => switch (self.writer_state.@"error".?) {
-                    error.AddressFamilyUnsupported, error.Unexpected, error.FastOpenAlreadyInProgress, error.Canceled => unreachable,
+                    error.AddressFamilyUnsupported, error.Unexpected, error.FastOpenAlreadyInProgress => unreachable,
                     error.SocketUnconnected => |err| switch (self.writer_state.state.load(.monotonic)) {
                         .waiting, .alive => err,
                         .closing, .closed => error.Disconnected,
                     },
+                    error.Canceled => error.Disconnected,
                     error.NetworkUnreachable,
                     error.NetworkDown,
                     error.ConnectionRefused,
@@ -388,7 +389,7 @@ fn writeEntry(self: *Connection, allocator: Allocator, start_event: *zio.Event) 
     }
 }
 
-fn tickEntry(self: *Connection, allocator: Allocator, start_event: *zio.Event) TickError!void {
+fn tickEntry(self: *Connection, allocator: Allocator, start_event: *zio.Event, tick_sync: *core.TickSynchronizer) TickError!void {
     defer {
         logger.debug("[{f}] Ended ticking", .{self.alt()});
         self.disconnect(.{ .static = &.disconnect_generic });
@@ -396,12 +397,15 @@ fn tickEntry(self: *Connection, allocator: Allocator, start_event: *zio.Event) T
 
     try start_event.wait();
 
+    tick_sync.register() catch return;
+    defer tick_sync.unregister();
+
     logger.debug("[{f}] Started ticking", .{self.alt()});
 
-    const io = self.runtime.io();
-    // TODO: Tick synchronization
-    while (io.sleep(.fromMilliseconds(50), .boot)) {
-        try self.lock();
+    while (true) {
+        try tick_sync.waitForTick();
+
+        self.lockUncancelable();
         defer self.unlock();
 
         self.tick() catch |e| return switch (e) {
@@ -419,10 +423,10 @@ fn tickEntry(self: *Connection, allocator: Allocator, start_event: *zio.Event) T
                 break;
             },
         };
-    } else |_| {}
+    }
 }
 
-fn connectionHandlerInner(self: *Connection, allocator: Allocator) !void {
+fn connectionHandlerInner(self: *Connection, allocator: Allocator, tick_sync: *core.TickSynchronizer) !void {
     const io = self.runtime.io();
 
     var start_ev = zio.Event.init;
@@ -432,7 +436,7 @@ fn connectionHandlerInner(self: *Connection, allocator: Allocator) !void {
 
     try select.concurrent(.read, readEntry, .{ self, allocator, &start_ev });
     try select.concurrent(.write, writeEntry, .{ self, allocator, &start_ev });
-    try select.concurrent(.tick, tickEntry, .{ self, allocator, &start_ev });
+    try select.concurrent(.tick, tickEntry, .{ self, allocator, &start_ev, tick_sync });
 
     try self.start.wait();
 
@@ -578,6 +582,9 @@ fn writeConnection(self: *Connection, allocator: Allocator) !void {
         error.Closed => return error.Disconnected,
     };
     while (pnode) |packet| : (pnode = self.send_state.channel.tryReceive() catch null) {
+        zio.beginShield();
+        defer zio.endShield();
+
         defer allocator.free(packet.getBytes());
         const bytes = packet.getData();
 
@@ -593,7 +600,6 @@ fn writeConnection(self: *Connection, allocator: Allocator) !void {
         try writer.writeAll(bytes);
         self.addWritePacket();
     }
-
     zio.beginShield();
     defer zio.endShield();
 
@@ -925,6 +931,7 @@ pub const Encryption = struct {
 };
 
 pub const InitOptions = struct {
+    tick_sync: *core.TickSynchronizer,
     /// The packet registry used to callback function to read and
     /// handle incomming packets.
     packet_registry: *const PacketRegistry,
@@ -1092,7 +1099,7 @@ pub fn init(self: *Connection, allocator: Allocator, group: *Io.Group, options: 
     try self.setNoDelay();
     const io = self.runtime.io();
 
-    try group.concurrent(io, connectionHandler, .{ self.acquire(), allocator });
+    try group.concurrent(io, connectionHandler, .{ self.acquire(), allocator, options.tick_sync });
 }
 
 pub fn acquire(self: *Connection) *Connection {
