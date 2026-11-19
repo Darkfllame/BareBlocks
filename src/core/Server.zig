@@ -247,7 +247,7 @@ fn tickSynchronizer(self: *Server) Io.Cancelable!void {
     const io = self.runtime.io();
 
     self.tick_sync.register() catch {
-        self.group.cancel(io);
+        // self.group.cancel(io); // TODO: Not deadlock here
         return;
     };
     defer self.tick_sync.unregister();
@@ -298,6 +298,8 @@ broadcast: struct {
     coro: Io.Future(BroadcastCoroError!void),
 },
 
+root_registry: *core.registry.RootRegistry,
+
 /// Connections in the play phase.
 players_mutex: zio.Mutex.Recursive,
 players: std.ArrayList(*Connection),
@@ -325,6 +327,7 @@ pub const InitOptions = struct {
     // packet_registry: *const net.PacketRegistry,
     allocator: Allocator,
     runtime: *zio.Runtime,
+    root_registry: *core.registry.RootRegistry,
     bind_port: u16 = 25565,
     bind_port_v6: ?u16 = null,
     max_connections: u31 = Io.net.default_kernel_backlog,
@@ -619,6 +622,8 @@ pub fn init(self: *Server, options: InitOptions) InitError!void {
             .socket = undefined,
             .coro = .{ .any_future = null, .result = {} },
         },
+
+        .root_registry = options.root_registry,
 
         .players_mutex = .init,
         .players = .empty,
@@ -1014,19 +1019,48 @@ pub fn @"serverbound/configuration/select_known_packs"(conn: *Connection, reader
         return error.CallbackHandlerFailed;
     }
 
+    // const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
+    // const root_registry = owned.owner.root_registry;
     const registry_data = net.packets.registry_data_s2c;
-    const Entry = @typeInfo(@FieldType(registry_data.getZigType(), "entries")).pointer.child;
     const apair = params.toAllocPair();
     // TODO: Pre-compute that when reloading datapacks and shii
     for (registries.synchronized) |registry| {
-        const entries = try apair.arena.alloc(Entry, registry.entries.len);
-        for (entries, registry.entries) |*entry, id| {
-            entry.* = .{ .entry_id = utils.Identifier.validate(id) catch unreachable, .data = null };
+        const reg_id = utils.Identifier.validate(registry.id) catch unreachable;
+
+        const reg_t = std.meta.stringToEnum(core.registry.RegistryType, reg_id.path()) orelse .root;
+        switch (reg_t) {
+            // .dimension_type => {
+            //     const dt_p = registry_data(core.world.DimensionProperties);
+            //     const Entry = @typeInfo(@FieldType(dt_p.getZigType(), "entries")).pointer.child;
+
+            //     const dim_types = root_registry.getDynamic(core.world.DimensionProperties, .dimension_type).?;
+
+            //     const entries = try apair.arena.alloc(Entry, dim_types.count());
+            //     var it = dim_types.iterator();
+            //     var idx: usize = 0;
+            //     while (it.next()) |entry| : (idx += 1) {
+            //         const id, const value = entry;
+            //         entries[idx] = .{ .entry_id = id, .data = value.* };
+            //     }
+            //     try conn.sendPacket(apair, "registry_data", dt_p, .{
+            //         .registry_id = reg_id,
+            //         .entries = entries,
+            //     });
+            // },
+            else => {
+                const dt_p = registry_data(null);
+                const Entry = @typeInfo(@FieldType(dt_p.getZigType(), "entries")).pointer.child;
+
+                const entries = try apair.arena.alloc(Entry, registry.entries.len);
+                for (entries, registry.entries) |*entry, id| {
+                    entry.* = .{ .entry_id = utils.Identifier.validate(id) catch unreachable, .data = null };
+                }
+                try conn.sendPacket(apair, "registry_data", dt_p, .{
+                    .registry_id = reg_id,
+                    .entries = entries,
+                });
+            },
         }
-        try conn.sendPacket(apair, "registry_data", registry_data, .{
-            .registry_id = utils.Identifier.validate(registry.id) catch unreachable,
-            .entries = entries,
-        });
     }
 
     // Same as vanilla's SynchronizeRegistriesTask, tags right after the registries

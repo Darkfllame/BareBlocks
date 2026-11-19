@@ -431,19 +431,21 @@ pub const known_packs = PacketType.prefixedArray(StructuredPacket.getType(.{
 
 pub const finish_configuration_s2c = StructuredPacket.named("FinishConfigurationS2C");
 pub const reset_chat_s2c = StructuredPacket.named("ResetChatS2C");
-pub const registry_data_s2c = StructuredPacket.getType(.{
-    .name = "RegistryDataS2C",
-    .fields = &.{
-        .{ .name = "registry_id", .type = .identifier },
-        .{ .name = "entries", .type = .prefixedArray(StructuredPacket.getType(.{
-            .name = "RegistryDataS2C::Entry",
-            .fields = &.{
-                .{ .name = "entry_id", .type = .identifier },
-                .{ .name = "data", .type = .prefixedOptional(.{ .nbt = null }) },
-            },
-        })) },
-    },
-});
+pub fn registry_data_s2c(comptime DataType: ?type) PacketType {
+    return StructuredPacket.getType(.{
+        .name = "RegistryDataS2C",
+        .fields = &.{
+            .{ .name = "registry_id", .type = .identifier },
+            .{ .name = "entries", .type = .prefixedArray(StructuredPacket.getType(.{
+                .name = "RegistryDataS2C::Entry",
+                .fields = &.{
+                    .{ .name = "entry_id", .type = .identifier },
+                    .{ .name = "data", .type = .prefixedOptional(.{ .nbt = DataType }) },
+                },
+            })) },
+        },
+    });
+}
 pub const feature_flags_s2c = PacketType.prefixedArray(.identifier);
 pub const configuration_show_dialog_s2c = PacketType{ .nbt = null };
 pub const code_of_conduct_s2c = PacketType.max_string;

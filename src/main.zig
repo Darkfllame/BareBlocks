@@ -118,9 +118,34 @@ fn asyncMain(init: std.process.Init, rt: *zio.Runtime) !void {
     try root_reg.init(init.gpa);
     defer root_reg.deinit(init.gpa);
 
+    {
+        const dim_types = root_reg.getDynamic(core.world.DimensionProperties, .dimension_type).?;
+        var out: [4]core.registry.RegistryEntryId = undefined;
+        try dim_types.registerMany(.{ .gpa = init.gpa }, &.{
+            .{
+                .id = .vanilla("overworld"),
+                .value = &core.world.DimensionProperties.overworld,
+            },
+            .{
+                .id = .vanilla("overworld_caves"),
+                .value = &core.world.DimensionProperties.overworld_caves,
+            },
+            .{
+                .id = .vanilla("the_nether"),
+                .value = &core.world.DimensionProperties.the_nether,
+            },
+            .{
+                .id = .vanilla("the_end"),
+                .value = &core.world.DimensionProperties.the_end,
+            },
+        }, &out);
+        dim_types.freeze();
+    }
+
     var server: core.Server = undefined;
     try server.init(.{
         .allocator = init.gpa,
+        .root_registry = &root_reg,
         .runtime = rt,
         .bind_port_v6 = 35565,
         // .broadcast = true,
@@ -174,7 +199,6 @@ fn readConsole(server: *core.Server, gpa: std.mem.Allocator, evm: *const std.pro
     var file_writer = stdin.writerStreaming(io, &buf2);
     const reader = &file_reader.interface;
     var writer = StdinLogger(.@"core/server").init(&file_writer, evm) catch return;
-    writer.debug(magic_erase_all_line, .{});
 
     var w = try Io.Writer.Allocating.initCapacity(gpa, 16);
     defer w.deinit();
