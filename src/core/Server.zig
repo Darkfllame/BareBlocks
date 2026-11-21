@@ -258,7 +258,7 @@ fn tickSynchronizer(self: *Server) Io.Cancelable!void {
     var avg: f32 = 0;
     while (true) {
         const start = Io.Timestamp.now(io, .boot);
-        try self.tick_sync.waitForTick();
+        try self.tick_sync.synchronize();
         const now = Io.Timestamp.now(io, .boot);
         const time_taken = start.durationTo(now);
         delta_ticks += 1;
@@ -308,7 +308,7 @@ world: World,
 accept_coro: Io.Future(CoroAccpetError!void),
 acceptv6_coro: Io.Future(CoroAccpetError!void),
 
-tick_sync: core.TickSynchronizer,
+tick_sync: core.Phaser,
 group: Io.Group,
 
 server_id: [20]u8,

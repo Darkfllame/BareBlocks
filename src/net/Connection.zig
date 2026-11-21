@@ -274,7 +274,7 @@ fn drain(io_w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Err
     return conn.netWrite(buffered, data, splat);
 }
 
-fn connectionHandler(self: *Connection, allocator: Allocator, tick_sync: *core.TickSynchronizer) Io.Cancelable!void {
+fn connectionHandler(self: *Connection, allocator: Allocator, tick_sync: *core.Phaser) Io.Cancelable!void {
     defer self.release(allocator);
 
     self.connectionHandlerInner(allocator, tick_sync) catch |e| switch (e) {
@@ -389,7 +389,7 @@ fn writeEntry(self: *Connection, allocator: Allocator, start_event: *zio.Event) 
     }
 }
 
-fn tickEntry(self: *Connection, allocator: Allocator, start_event: *zio.Event, tick_sync: *core.TickSynchronizer) TickError!void {
+fn tickEntry(self: *Connection, allocator: Allocator, start_event: *zio.Event, tick_sync: *core.Phaser) TickError!void {
     defer {
         logger.debug("[{f}] Ended ticking", .{self.alt()});
         self.disconnect(.{ .static = &.disconnect_generic });
@@ -403,7 +403,7 @@ fn tickEntry(self: *Connection, allocator: Allocator, start_event: *zio.Event, t
     logger.debug("[{f}] Started ticking", .{self.alt()});
 
     while (true) {
-        try tick_sync.waitForTick();
+        try tick_sync.synchronize();
 
         self.lockUncancelable();
         defer self.unlock();
@@ -426,7 +426,7 @@ fn tickEntry(self: *Connection, allocator: Allocator, start_event: *zio.Event, t
     }
 }
 
-fn connectionHandlerInner(self: *Connection, allocator: Allocator, tick_sync: *core.TickSynchronizer) !void {
+fn connectionHandlerInner(self: *Connection, allocator: Allocator, tick_sync: *core.Phaser) !void {
     const io = self.runtime.io();
 
     var start_ev = zio.Event.init;
@@ -931,7 +931,7 @@ pub const Encryption = struct {
 };
 
 pub const InitOptions = struct {
-    tick_sync: *core.TickSynchronizer,
+    tick_sync: *core.Phaser,
     /// The packet registry used to callback function to read and
     /// handle incomming packets.
     packet_registry: *const PacketRegistry,

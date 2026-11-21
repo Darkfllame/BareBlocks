@@ -14,7 +14,7 @@ pub const registry = @import("registry.zig");
 pub const Player = @import("Player.zig");
 pub const RefCount = @import("RefCount.zig");
 pub const Server = @import("Server.zig");
-pub const TickSynchronizer = @import("TickSynchronizer.zig");
+pub const Phaser = @import("Phaser.zig");
 
 pub const IntProvider = value_providers.IntProvider;
 pub const FloatProvider = value_providers.FloatProvider;
