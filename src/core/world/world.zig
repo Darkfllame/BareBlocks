@@ -33,6 +33,7 @@ pub const PackedBlockPos = packed struct(u64) {
 
 pub const Region = @import("Region.zig");
 pub const World = @import("World.zig");
+pub const World2 = @import("World2.zig");
 pub const chunk_packet = @import("chunk_packet.zig");
 pub const DimensionProperties = @import("DimensionProperties.zig");
 

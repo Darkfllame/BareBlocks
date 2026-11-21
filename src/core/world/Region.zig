@@ -2,6 +2,7 @@
 
 const Region = @This();
 const std = @import("std");
+const zio = @import("zio");
 const utils = @import("utils");
 const block_states = @import("block_states");
 const core = @import("../core.zig");
@@ -48,11 +49,11 @@ fn getSectionAtRaw(self: *Region, dim: *const DimensionProperties, pos: core.Blo
     const z: usize = @intCast(@rem(pos.z, region_side_length));
     const index = x * region_section_length + z;
 
-    assert(self.sections_mask.isSet(index));
+    assert(self.chunk_mask.isSet(index));
     assert(rel_y >= 0);
     assert(rel_y < build_height);
 
-    const section_index = self.section_indices[index] * vsc;
+    const section_index = self.chunk_meta[index].start_index * vsc;
     const offset = @rem(@as(usize, @intCast(rel_y)), vsc);
 
     return &self.sections.items[section_index + offset];
@@ -63,14 +64,66 @@ fn getSectionAtRaw(self: *Region, dim: *const DimensionProperties, pos: core.Blo
 //    that way they can be re-loaded in memory in the most optimal way.
 //  - Regions shouldn't get marked unloaded before finishing serialization
 
-sections_mask: std.StaticBitSet(max_sections_per_regions),
-section_indices: [max_sections_per_regions]SectionIndex,
+mutex: zio.Mutex,
+chunk_mask: std.StaticBitSet(max_sections_per_regions),
+/// A grid of chunk metadata. Whether an index is valid is determined by the corresponding
+/// bit in `chunk_mask`.
+chunk_meta: [max_sections_per_regions]ChunkMeta,
 /// List of concatenated lists.
 ///
 /// Size of sub-lists depend on the dimension's build height.
 sections: std.ArrayList(Section),
 /// Likely air.
 default_state: BlockStateId,
+
+pub const VanillaChunkData = struct {
+    mutex: zio.Mutex = .init,
+    /// Baked data to send to vanilla clients.
+    ///
+    /// `null` if encoding is required first.
+    baked_data: ?[]u8 = null,
+    heightmap: [vanilla_per_section * vanilla_per_section]HeightmapValue, // TODO: compact values to only take 128 bytes instead of 256
+    light_map: LightMasks,
+};
+
+/// Light map of a single section
+pub const LightMasks = struct {
+    fn masks(self: *const LightMasks, dim: *const DimensionProperties, vanilla_chunk_offset: u2, which: u1) struct { usize, [*]std.bit_set.Dynamic.MaskInt } {
+        const bit_count = verticalSectionsCount(dim);
+        const masks_per_set = @divCeil(bit_count, @bitSizeOf(std.bit_set.Dynamic.MaskInt));
+        const index = (vanilla_per_section * vanilla_per_section) * which + vanilla_chunk_offset * masks_per_set;
+        return .{ bit_count, self.masks_data[index..] };
+    }
+
+    /// [2][vanilla_per_section * vanilla_per_section][verticalSectionsCount(dim) / 64]usize
+    masks_data: [*]std.bit_set.Dynamic.MaskInt,
+
+    /// DO NOT RESIZE THE BITSET
+    pub fn skyLightMask(self: *const LightMasks, dim: *const DimensionProperties, vanilla_chunk_offset: u2) std.bit_set.Dynamic {
+        const bit_count, const _masks = self.masks(dim, vanilla_chunk_offset, 0);
+        return .{ .bit_length = bit_count, .masks = _masks };
+    }
+
+    /// DO NOT RESIZE THE BITSET
+    pub fn blockLightMask(self: *const LightMasks, dim: *const DimensionProperties, vanilla_chunk_offset: u2) std.bit_set.Dynamic {
+        const bit_count, const _masks = self.masks(dim, vanilla_chunk_offset, 1);
+        return .{ .bit_length = bit_count, .masks = _masks };
+    }
+};
+
+pub const HeightmapValue = packed struct(u3) {
+    world_surface: bool = false,
+    motion_blocking: bool = false,
+    blocking_no_leaves: bool = false,
+};
+
+pub const ChunkMeta = struct {
+    mutex: zio.Mutex,
+    /// Indices into `sections` of the start of a 32x32 vertical chunk.
+    start_index: SectionIndex,
+    flags: packed struct { generated: bool },
+    vanilla_data: [vanilla_per_section * vanilla_per_section]VanillaChunkData,
+};
 
 /// A 32x32 blocks section of the world.
 ///
@@ -133,25 +186,11 @@ pub const Section = struct {
 
     data: OctreeBranch,
     palette: BlockPalette,
+    light_data: [vanilla_per_section * vanilla_per_section * vanilla_per_section][2]?*[16 * 16 * 16 / 2]u8,
 
     pub const side_length = 32;
     pub const total_blocks = side_length * side_length * side_length;
     pub const max_octree_depth = std.math.log2(side_length);
-
-    pub fn initFill(gpa: Allocator, empty_state: BlockStateId) Allocator.Error!Section {
-        var self = Section{
-            .data = .{ .leaf = 0 },
-            .palette = .empty,
-        };
-        const id = try self.palette.newId(gpa, empty_state);
-        assert(id == 0);
-        return self;
-    }
-
-    pub fn deinit(self: *Section, gpa: Allocator) void {
-        gpa.free(self.palette.states[0..self.palette.states_cap]);
-        deinitBranch(self.data, gpa, 0);
-    }
 
     pub const PaletteSize = @Int(.unsigned, std.math.log2_int_ceil(u16, total_blocks + 1));
     pub const BlockIndex = @Int(.unsigned, std.math.log2(total_blocks));
@@ -349,6 +388,21 @@ pub const Section = struct {
         }
     };
 
+    pub fn initFill(self: *Section, gpa: Allocator, empty_state: BlockStateId) Allocator.Error!void {
+        self.* = Section{
+            .data = .{ .leaf = 0 },
+            .palette = .empty,
+            .light_data = @splat(@splat(null)),
+        };
+        const id = try self.palette.newId(gpa, empty_state);
+        assert(id == 0);
+    }
+
+    pub fn deinit(self: *Section, gpa: Allocator) void {
+        gpa.free(self.palette.states[0..self.palette.states_cap]);
+        deinitBranch(self.data, gpa, 0);
+    }
+
     pub fn getBlock(self: *Section, pos: SectionBlockPosition) BlockStateId {
         var depth: u8 = 0;
         var x, var y, var z = .{ pos.x, pos.y, pos.z };
@@ -445,8 +499,9 @@ pub const Section = struct {
 
 pub fn initEmpty(self: *Region, default: BlockStateId) void {
     self.* = .{
-        .sections_mask = .empty,
-        .section_indices = undefined,
+        .mutex = .init,
+        .chunk_mask = .empty,
+        .chunk_meta = undefined,
         .sections = .empty,
         .default_state = default,
     };
@@ -456,9 +511,9 @@ pub fn deinit(self: *Region, dim: *const DimensionProperties, gpa: Allocator) vo
     const vsc = verticalSectionsCount(dim);
 
     const sections = self.sections.items;
-    var it = self.sections_mask.iterator(.{});
+    var it = self.chunk_mask.iterator(.{});
     while (it.next()) |idx| {
-        const index = self.section_indices[idx] * vsc;
+        const index = self.chunk_meta[idx].start_index * vsc;
         for (sections[index..][0..vsc]) |*sec| {
             sec.deinit(gpa);
         }
@@ -475,7 +530,7 @@ pub fn getBlock(self: *Region, dim: *const DimensionProperties, pos: core.BlockP
 
     const index = @as(usize, @intCast(sec_pos.x)) * region_section_length + @as(usize, @intCast(sec_pos.z));
 
-    if (!self.sections_mask.isSet(index)) return self.default_state;
+    if (!self.chunk_mask.isSet(index)) return self.default_state;
 
     const block_pos = Section.SectionBlockPosition{
         // This is so ugly OH MY DAYS
@@ -511,7 +566,7 @@ pub fn setBlock(
 
     const index = @as(usize, @intCast(sec_pos.x)) * region_section_length + @as(usize, @intCast(sec_pos.z));
 
-    const section = if (!self.sections_mask.isSet(index)) blk: {
+    const section = if (!self.chunk_mask.isSet(index)) blk: {
         const build_height = dim.buildRange();
         const vsc = verticalSectionsCount(dim);
 
@@ -525,11 +580,11 @@ pub fn setBlock(
 
         for (new_sec, 0..) |*section, j| {
             errdefer i = j;
-            section.* = try Section.initFill(gpa, state);
+            try section.initFill(gpa, state);
         }
 
-        self.sections_mask.set(index);
-        self.section_indices[index] = @intCast(@divExact(old_len, vsc));
+        self.chunk_mask.set(index);
+        self.chunk_meta[index].start_index = @intCast(@divExact(old_len, vsc));
 
         const rel_y = sec_pos.y - dim.height.min;
         assert(rel_y >= 0);
@@ -555,9 +610,11 @@ test Section {
     const dirt = comptime block_states.findBlock(.vanilla("dirt")).?;
     const stone = comptime block_states.findBlock(.vanilla("stone")).?;
 
-    var sec = try Section.initFill(gpa, air.default_state);
+    var sec: Section = undefined;
+    try sec.initFill(gpa, air.default_state);
     defer sec.deinit(gpa);
-    errdefer std.testing.failPrint("{f}\n", .{sec});
+
+    errdefer std.testing.failPrint("{f}\n", .{&sec});
 
     try sec.setBlock(.{
         .x = 0,
