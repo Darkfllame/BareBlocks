@@ -1033,6 +1033,173 @@ pub const DisconnectReason = union(enum) {
     copied: struct { Allocator, *const TextComponent },
 };
 
+pub const PacketSendState = struct {
+    fn sendPacketNamed(self: *PacketSendState, named: anytype) !void {
+        const conn = self.connection;
+
+        switch (conn.writer_state.state.load(.monotonic)) {
+            .waiting, .alive => {},
+            .closing, .closed => return error.ConnectionClosed,
+        }
+
+        const ptype: PacketType = comptime named[0];
+        comptime assert(@TypeOf(named) == PacketType.Named(ptype));
+
+        const apair = PacketType.AllocPair.new(self.aw.allocator, self.arena);
+
+        const pack_id, const entry = blk: {
+            try conn.lock();
+            defer conn.unlock();
+
+            const pack_id = conn.packet_registry.packedIDFromResource(conn.target_side, conn.out_phase, named[1]) orelse
+                return error.PacketIDNotFound;
+            const entry = conn.packet_registry.getEntry(conn.target_side, conn.out_phase, pack_id);
+
+            break :blk .{ pack_id, entry };
+        };
+
+        self.aw.clearRetainingCapacity();
+        try self.aw.ensureTotalCapacity(1 + entry.write_cushion);
+
+        PacketType.writeNoAlloc(.var_int, &self.aw.writer, @backingInt(pack_id)) catch return error.OutOfMemory;
+
+        ptype.write(apair, &self.aw.writer, named[2]) catch |e| return switch (e) {
+            error.WriteFailed => error.OutOfMemory,
+            else => |err| err,
+        };
+
+        var compressed = false;
+        const bytes_result: []align(@alignOf(Packet)) u8 = res: {
+            try conn.lock();
+            defer conn.unlock();
+            const content = self.aw.written();
+
+            if (self.connection.compression) |comp| {
+                @branchHint(.likely);
+
+                self.out_w.clearRetainingCapacity();
+                try self.out_w.ensureTotalCapacity(1 + content.len);
+
+                if (content.len < comp.threshold) {
+                    PacketType.writeNoAlloc(.var_int, &self.out_w.writer, 0) catch unreachable;
+                    self.out_w.writer.writeAll(content) catch unreachable;
+                } else {
+                    @branchHint(.likely);
+
+                    if (content.len > max_uncompressed_packet_length) return error.PacketTooLarge;
+
+                    const buffer = try comp.getCompressionBuffer(apair.gpa);
+                    defer comp.redeemCompressionBuffer(buffer);
+
+                    PacketType.writeNoAlloc(.var_int, &self.out_w.writer, @intCast(content.len)) catch unreachable;
+                    var compress = flate.Compress.init(&self.out_w.writer, buffer, .zlib, .default) catch
+                        return error.OutOfMemory;
+
+                    // Split compression into chunks of X bytes to potentially allow other
+                    // tasks to run.
+                    const chunk_size = 1024;
+                    var offset: usize = 0;
+                    while (offset < content.len) {
+                        const remaining = content.len - offset;
+                        const size = @min(chunk_size, remaining);
+                        const n = compress.writer.write(content[offset .. offset + size]) catch return error.OutOfMemory;
+                        offset += n;
+                        try zio.maybeYield();
+                    }
+
+                    compress.finish() catch return error.OutOfMemory;
+                    compressed = true;
+                }
+
+                const written = self.out_w.written();
+                const duped = try apair.gpa.alignedAlloc(u8, .of(Packet), @sizeOf(Packet) + written.len);
+                @memmove(duped[@sizeOf(Packet)..], written);
+
+                break :res duped;
+            }
+            const duped = try apair.gpa.alignedAlloc(u8, .of(Packet), @sizeOf(Packet) + content.len);
+            @memmove(duped[@sizeOf(Packet)..], content);
+
+            break :res duped;
+        };
+        errdefer apair.gpa.free(bytes_result);
+
+        const payload_len = bytes_result.len - @sizeOf(Packet);
+        if (payload_len > max_packet_length) return error.PacketTooLarge;
+
+        const pnode: *Packet = @ptrCast(@alignCast(bytes_result.ptr));
+        pnode.* = .{ .length = payload_len };
+
+        conn.send_state.channel.send(pnode) catch |e| switch (e) {
+            error.Canceled => return error.Canceled,
+            error.Closed => {
+                apair.gpa.free(bytes_result);
+                return error.ConnectionClosed;
+            },
+        };
+    }
+
+    fn sendPacketsRecursive(self: *PacketSendState, packets: anytype) !void {
+        const PacketsType = @TypeOf(packets);
+        const info = @typeInfo(PacketsType);
+        switch (info) {
+            .@"struct" => |str| {
+                if (!str.is_tuple) @compileError("Invalid type for packet");
+
+                if (str.field_names.len == 3) {
+                    if (str.field_types[0] == PacketType and str.field_attrs[0].@"comptime") {
+                        assert(PacketsType == PacketType.Named(str.field_attrs[0].defaultValue(PacketType).?));
+                        return self.sendPacketNamed(packets);
+                    }
+                }
+
+                inline for (0..str.field_names.len) |i| {
+                    const named_value = packets[i];
+
+                    try self.sendPacketsRecursive(named_value);
+                }
+            },
+            .array => for (packets) |named_value| {
+                try self.sendPacketsRecursive(named_value);
+            },
+            .pointer => |ptr| switch (ptr.size) {
+                .one, .slice => for (packets) |named_value| {
+                    try self.sendPacketsRecursive(named_value);
+                },
+                else => @compileError("Invalid type for packet"),
+            },
+            else => @compileError("Invalid type for packet"),
+        }
+    }
+
+    connection: *Connection,
+    arena: Allocator,
+    aw: Io.Writer.Allocating,
+    out_w: Io.Writer.Allocating,
+
+    pub fn init(conn: *Connection, apair: AllocPair) PacketSendState {
+        return .{
+            .connection = conn,
+            .arena = apair.arena,
+            .aw = .init(apair.gpa),
+            .out_w = .init(apair.gpa),
+        };
+    }
+
+    pub fn deinit(self: *PacketSendState) void {
+        self.aw.deinit();
+        self.out_w.deinit();
+    }
+
+    pub fn sendPacket(self: *PacketSendState, resource: []const u8, comptime @"type": PacketType, value: @"type".getZigType()) WritePacketError!void {
+        return self.sendPacketsRecursive(@"type".named(resource, value));
+    }
+
+    pub fn sendPackets(self: *PacketSendState, packets: anytype) WritePacketError!void {
+        return self.sendPacketsRecursive(packets);
+    }
+};
+
 /// `allocator` must remain valid until this connection is deinitalized
 pub fn init(self: *Connection, allocator: Allocator, group: *Io.Group, options: InitOptions) InitError!void {
     self.* = .{
@@ -1232,119 +1399,32 @@ pub fn altLocked(self: *Connection) Alt {
     return .{ .ptr = self, .do_unlock = false };
 }
 
-/// Needs `self` to be unlocked, otherwise may cause a deadlock when a lot of packets get sent at once.
-/// TODO: Remove the lock requirement in writeConnection() in favor of atomics.
-/// TODO: Batched packet sending to optimize the use of locking and stuff idk
-pub fn sendPacket(
-    self: *Connection,
-    apair: AllocPair,
-    resource: []const u8,
-    comptime @"type": PacketType,
-    value: @"type".getZigType(),
-) WritePacketError!void {
+/// The much more flexible `sendPackets()` should be preferred instead.
+pub fn sendPacket(self: *Connection, apair: AllocPair, resource: []const u8, comptime @"type": PacketType, value: @"type".getZigType()) WritePacketError!void {
+    return self.sendPackets(apair, @"type".named(resource, value));
+}
+
+/// `packets` can be any form of `PacketType.Named()`, or any combination of array/slice/array/pointer-to-one of it.
+///
+/// These are checked recursively so a wild amount of nesting is entirely valid.
+///
+/// Allow multiple packets to reuse a bunch of internal buffers. Which can be more memory efficient sometimes.
+/// 
+/// Prefer using `batchSend()` if you can't have all your packets all in one call.
+pub fn sendPackets(self: *Connection, apair: AllocPair, packets: anytype) WritePacketError!void {
     switch (self.writer_state.state.load(.monotonic)) {
         .waiting, .alive => {},
         .closing, .closed => return error.ConnectionClosed,
     }
 
-    const pack_id, const entry = blk: {
-        try self.lock();
-        defer self.unlock();
+    var send_state = PacketSendState.init(self, apair);
+    defer send_state.deinit();
 
-        const pack_id = self.packet_registry.packedIDFromResource(self.target_side, self.out_phase, resource) orelse
-            return error.PacketIDNotFound;
-        const entry = self.packet_registry.getEntry(self.target_side, self.out_phase, pack_id);
+    return send_state.sendPacketsRecursive(packets);
+}
 
-        break :blk .{ pack_id, entry };
-    };
-
-    // logger.debug("Sending packet {s} (id: {x})", .{ resource, pack_id });
-    var aw = Io.Writer.Allocating.initAligned(apair.gpa, .of(Packet));
-    defer aw.deinit();
-    // logger.debug("Sending packet {s} (id: {x}) (aw init)", .{ resource, pack_id });
-    try aw.ensureTotalCapacity(@sizeOf(Packet) + 1 + entry.write_cushion);
-    aw.writer.advance(@sizeOf(Packet));
-    // logger.debug("Sending packet {s} (id: {x}) (aw prealloc)", .{ resource, pack_id });
-
-    PacketType.writeNoAlloc(.var_int, &aw.writer, @backingInt(pack_id)) catch return error.OutOfMemory;
-
-    @"type".write(apair, &aw.writer, value) catch |e| return switch (e) {
-        error.WriteFailed => error.OutOfMemory,
-        else => |err| err,
-    };
-    // logger.debug("Sending packet {s} (id: {x}) (serialized packet)", .{ resource, pack_id });
-
-    var compressed = false;
-    const bytes_result: []align(@alignOf(Packet)) u8 = res: {
-        const content = aw.written()[@sizeOf(Packet)..];
-
-        self.lockUncancelable();
-        if (self.compression) |comp| {
-            @branchHint(.likely);
-            self.unlock();
-
-            var out_w = Io.Writer.Allocating.initAligned(apair.gpa, .of(Packet));
-            defer out_w.deinit();
-            try out_w.ensureTotalCapacity(@sizeOf(Packet) + 1 + content.len);
-            out_w.writer.advance(@sizeOf(Packet));
-
-            if (content.len < comp.threshold) {
-                // logger.debug("Sending packet {s} (id: {x}) (uncompressed header)", .{ resource, pack_id });
-                PacketType.writeNoAlloc(.var_int, &out_w.writer, 0) catch unreachable;
-                out_w.writer.writeAll(content) catch unreachable;
-            } else {
-                @branchHint(.likely);
-                // logger.debug("Sending packet {s} (id: {x}) (compressed header)", .{ resource, pack_id });
-
-                if (content.len > max_uncompressed_packet_length) return error.PacketTooLarge;
-
-                const buffer = try comp.getCompressionBuffer(apair.gpa);
-                defer comp.redeemCompressionBuffer(buffer);
-
-                PacketType.writeNoAlloc(.var_int, &out_w.writer, @intCast(content.len)) catch unreachable;
-                var compress = flate.Compress.init(&out_w.writer, buffer, .zlib, .default) catch
-                    return error.OutOfMemory;
-
-                // Split compression into chunks of X bytes to potentially allow other
-                // tasks to run.
-                const chunk_size = 1024;
-                var offset: usize = 0;
-                while (offset < content.len) {
-                    const remaining = content.len - offset;
-                    const size = @min(chunk_size, remaining);
-                    const n = compress.writer.write(content[offset .. offset + size]) catch return error.OutOfMemory;
-                    offset += n;
-                    try zio.maybeYield();
-                }
-
-                compress.finish() catch return error.OutOfMemory;
-                compressed = true;
-            }
-
-            break :res @alignCast(try out_w.toOwnedSlice());
-        } else self.unlock();
-
-        break :res @alignCast(try aw.toOwnedSlice());
-    };
-    errdefer apair.gpa.free(bytes_result);
-    // logger.debug("Sending packet {s} (id: {x}) ({d} bytes{s})", .{
-    //     resource,         pack_id,
-    //     bytes_result.len, if (compressed) ", compressed" else "",
-    // });
-
-    const payload_len = bytes_result.len - @sizeOf(Packet);
-    if (payload_len > max_packet_length) return error.PacketTooLarge;
-
-    const pnode: *Packet = @ptrCast(@alignCast(bytes_result.ptr));
-    pnode.* = .{ .length = payload_len };
-
-    self.send_state.channel.send(pnode) catch |e| switch (e) {
-        error.Canceled => return error.Canceled,
-        error.Closed => {
-            apair.gpa.free(bytes_result);
-            return error.ConnectionClosed;
-        },
-    };
+pub fn batchSend(self: *Connection, apair: AllocPair) PacketSendState {
+    return .init(self, apair);
 }
 
 pub fn shutdown(self: *Connection, how: Io.net.ShutdownHow) Io.net.ShutdownError!void {

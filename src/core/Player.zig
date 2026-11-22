@@ -9,6 +9,8 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const Server = core.Server;
 const Connection = net.Connection;
+const PacketType = net.PacketType;
+const AllocPair = net.PacketType.AllocPair;
 const Atomic = std.atomic.Value;
 
 const assert = std.debug.assert;
@@ -156,14 +158,14 @@ const EIDState = struct {
     }
 
     fn removeEID(self: *EIDState, eid: EntityID) void {
-        const nm = @as(*const Player, @fieldParentPtr("eid_state", self)).getUsername();
+        const nm = @as(*const Player, @alignCast(@fieldParentPtr("eid_state", self))).getUsername();
 
         if (!self.mask.isSet(@backingInt(eid))) std.debug.panic("[{s}] Entity id '{d}' was not set", .{ nm, eid });
 
         self.mask.unset(@backingInt(eid));
         const uuid = self.id2unique.fetchRemove(eid) orelse
             std.debug.panic("[{s}] Couldn't find uuid for id '{d}'", .{ nm, eid });
-        if (!self.unique2id.remove(uuid)) std.debug.panic("[{s}] Couldn't find back id({d}) from uuid({f})", .{ nm, eid, uuid });
+        if (!self.unique2id.remove(uuid.value)) std.debug.panic("[{s}] Couldn't find back id({d}) from uuid({f})", .{ nm, eid, uuid.value });
 
         // Make sure to not soft-lock entity id's
         self.next_eid = self.next_eid orelse eid;
@@ -171,7 +173,7 @@ const EIDState = struct {
 
     fn removeUUID(self: *EIDState, uuid: utils.UUID) void {
         const eid = self.unique2id.get(uuid) orelse
-            std.debug.panic("[{s}] Attempted to remove unknown uuid: {f}", .{@as(*const Player, @fieldParentPtr("eid_state", self)).getUsername()});
+            std.debug.panic("[{s}] Attempted to remove unknown uuid: {f}", .{@as(*const Player, @alignCast(@fieldParentPtr("eid_state", self))).getUsername(),uuid});
         return self.removeEID(eid);
     }
 
@@ -246,6 +248,10 @@ pub fn getOwner(self: *const Player) *Server {
     return self.connection.owned.owner;
 }
 
+pub fn getConnection(self: *const Player) *Connection {
+    return &self.connection.owned.connection;
+}
+
 pub fn getGameProfile(self: *const Player) utils.GameProfile {
     return self.profile;
 }
@@ -258,7 +264,7 @@ pub fn getLatency(self: *const Player) u64 {
     return self.connection.common.latency;
 }
 
-pub fn getEntityId(self: *const Player, uuid: utils.UUID) ?EntityID {
+pub fn getEntityId(self: *Player, uuid: utils.UUID) ?EntityID {
     if (self.profile.uuid.eql(uuid)) return .player_self; // fast path
 
     self.eid_state.lockSharedUncancelable();
@@ -267,7 +273,7 @@ pub fn getEntityId(self: *const Player, uuid: utils.UUID) ?EntityID {
     return self.eid_state.getFromUUID(uuid);
 }
 
-pub fn getOrAddEntityId(self: *const Player, uuid: utils.UUID) GetOrAddEntityIdError!?EntityID {
+pub fn getOrAddEntityId(self: *Player, uuid: utils.UUID) GetOrAddEntityIdError!?EntityID {
     if (self.profile.uuid.eql(uuid)) return .player_self; // fast path
 
     self.eid_state.lockUncancelable();
@@ -286,7 +292,7 @@ pub fn getOrAddEntityId(self: *const Player, uuid: utils.UUID) GetOrAddEntityIdE
 }
 
 /// Panics on missing values.
-/// 
+///
 /// TODO: Figure out if panicking is a good solution or just really bad.
 pub fn removeEntityId(self: *Player, uuid: utils.UUID) void {
     if (self.profile.uuid.eql(uuid)) std.debug.panic("[{s}] Why the fuck do you wanna remove yourself idiot", .{self.getUsername()});
@@ -295,4 +301,20 @@ pub fn removeEntityId(self: *Player, uuid: utils.UUID) void {
     defer self.eid_state.unlock();
 
     self.eid_state.removeUUID(uuid);
+}
+
+pub fn sendPacket(self: *const Player, apair: AllocPair, resource: []const u8, comptime @"type": PacketType, value: @"type".getZigType()) Connection.WritePacketError!void {
+    return self.getConnection().sendPacket(apair, resource, @"type", value);
+}
+
+pub fn sendPackets(self: *const Player, apair: AllocPair, packets: anytype) Connection.WritePacketError!void {
+    return self.getConnection().sendPackets(apair, packets);
+}
+
+pub fn batchSend(self: *const Player, apair: AllocPair) Connection.PacketSendState {
+    return self.getConnection().batchSend(apair);
+}
+
+test {
+    std.testing.refAllDecls(Player);
 }

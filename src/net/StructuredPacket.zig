@@ -449,6 +449,10 @@ pub const Type = union(enum) {
         };
     }
 
+    pub fn Named(comptime self: Type) type {
+        return struct { comptime Type = self, []const u8, self.getZigType() };
+    }
+
     pub fn Formatted(comptime self: Type) type {
         return struct {
             value: self.getZigType(),
@@ -695,6 +699,10 @@ pub const Type = union(enum) {
             .game_profile => .null,
             .lpvec3 => .zero,
         };
+    }
+
+    pub fn named(comptime self: Type, resource: []const u8, value: self.getZigType()) self.Named() {
+        return .{ self, resource, value };
     }
 
     pub fn read(comptime self: Type, params: ReadParams, reader: *Reader, parent: anytype, ret: *self.getZigType()) ReadError!void {
