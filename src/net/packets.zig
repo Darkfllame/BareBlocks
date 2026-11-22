@@ -41,7 +41,7 @@ pub const HandshakeIntent = enum(u2) {
     status = 1,
     login = 2,
     transfer = 3,
-    
+
     pub const default = HandshakeIntent.status;
 };
 pub const ServerLinkLabel = enum(u4) { bug_report, community_guidelines, support, statuts, feedback, community, website, forums, news, announcements };
@@ -560,20 +560,9 @@ pub const chat_session = StructuredPacket.getType(.{
         .{ .name = "key_signature", .type = .prefixedMaxArray(.ubyte, 4096) },
     },
 });
-
-pub const login_s2c = StructuredPacket.getType(.{
-    .name = "LoginS2C",
+pub const common_respawn_info = StructuredPacket.getType(.{
+    .name = "CommonPlayerSpawnInfo",
     .fields = &.{
-        .{ .name = "entity_id", .type = .int },
-        .{ .name = "hardcore", .type = .bool },
-        .{ .name = "dimensions", .type = .prefixedArray(.identifier) },
-        .{ .name = "max_players", .type = .var_int },
-        .{ .name = "view_distance", .type = .var_int },
-        .{ .name = "simulation_distance", .type = .var_int },
-        .{ .name = "reduced_debug_info", .type = .bool },
-        .{ .name = "show_death_screen", .type = .bool },
-        .{ .name = "limited_crafting", .type = .bool },
-        // CommonPlayerSpawnInfo
         // Id in the `minecraft:dimension_type` registry, in the order it was sent.
         .{ .name = "dimension_type", .type = .var_int },
         .{ .name = "dimension", .type = .identifier },
@@ -592,7 +581,29 @@ pub const login_s2c = StructuredPacket.getType(.{
         })) },
         .{ .name = "portal_cooldown", .type = .var_int },
         .{ .name = "sea_level", .type = .var_int },
-        // end of CommonPlayerSpawnInfo
+    },
+});
+
+pub const respawn_s2c = StructuredPacket.getType(.{
+    .name = "RespawnS2C",
+    .fields = &.{
+        .{ .name = "info", .type = common_respawn_info },
+        .{ .name = "data_kep", .type = .ubyte },
+    },
+});
+pub const login_s2c = StructuredPacket.getType(.{
+    .name = "LoginS2C",
+    .fields = &.{
+        .{ .name = "entity_id", .type = .int },
+        .{ .name = "hardcore", .type = .bool },
+        .{ .name = "dimensions", .type = .prefixedArray(.identifier) },
+        .{ .name = "max_players", .type = .var_int },
+        .{ .name = "view_distance", .type = .var_int },
+        .{ .name = "simulation_distance", .type = .var_int },
+        .{ .name = "reduced_debug_info", .type = .bool },
+        .{ .name = "show_death_screen", .type = .bool },
+        .{ .name = "limited_crafting", .type = .bool },
+        .{ .name = "spawn_info", .type = common_respawn_info },
         .{ .name = "online_mode", .type = .bool },
         .{ .name = "enforces_secure_chat", .type = .bool },
     },
