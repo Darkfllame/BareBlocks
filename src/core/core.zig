@@ -12,6 +12,7 @@ pub const world = @import("world/world.zig");
 
 pub const registry = @import("registry.zig");
 pub const Player = @import("Player.zig");
+pub const PlayerManager = @import("PlayerManager.zig");
 pub const RefCount = @import("RefCount.zig");
 pub const Server = @import("Server.zig");
 pub const Phaser = @import("Phaser.zig");

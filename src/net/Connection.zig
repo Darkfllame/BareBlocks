@@ -275,7 +275,10 @@ fn drain(io_w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Err
 }
 
 fn connectionHandler(self: *Connection, allocator: Allocator, tick_sync: *core.Phaser) Io.Cancelable!void {
-    defer self.release(allocator);
+    defer {
+        self.disconnect(.{ .static = &.disconnect_generic });
+        self.release(allocator);
+    }
 
     self.connectionHandlerInner(allocator, tick_sync) catch |e| switch (e) {
         error.Canceled => {},
@@ -289,7 +292,7 @@ fn readEntry(self: *Connection, allocator: Allocator, start_event: *zio.Event) C
     defer {
         logger.debug("[{f}] Ended reading", .{self.alt()});
         self.reader_state.state.store(.closed, .monotonic);
-        self.shutdown(.recv) catch {}; // tells the os to not accept data in anymore
+        self.disconnect(.{ .static = &.disconnect_generic });
     }
 
     start_event.wait() catch return;
@@ -478,7 +481,7 @@ fn readConnection(self: *Connection, gpa: Allocator, arena_alloc: *std.heap.Aren
         error.EndOfStream, error.ReadFailed => |err| return err,
         else => unreachable,
     };
-    logger.debug("[{f}] Got packet length: {d}", .{ self.alt(), packet_length });
+    // logger.debug("[{f}] Got packet length: {d}", .{ self.alt(), packet_length });
     if (packet_length <= 0) return error.PacketTooSmall;
     if (packet_length > max_packet_length) return error.PacketTooLarge;
     const length: usize = @intCast(packet_length);
@@ -1383,7 +1386,8 @@ pub fn alt(self: *Connection) Alt {
     };
     if (self.name) |nm| {
         ret.name = .{ .bytes = @splat(0) };
-        @memcpy(&ret.name.bytes, nm[0..@min(nm.len, ret.name.bytes.len)]);
+        const len = @min(nm.len, ret.name.bytes.len);
+        @memcpy(ret.name.bytes[0..len], nm[0..len]);
     }
     return ret;
 }

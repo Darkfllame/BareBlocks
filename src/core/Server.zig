@@ -302,10 +302,7 @@ broadcast: struct {
 
 root_registry: *core.registry.RootRegistry,
 
-/// Connections in the play phase.
-players_mutex: zio.Mutex.Recursive,
-players: std.ArrayList(*Connection),
-player_count: std.atomic.Value(u32),
+player_man: core.PlayerManager,
 world: World,
 accept_coro: Io.Future(CoroAccpetError!void),
 acceptv6_coro: Io.Future(CoroAccpetError!void),
@@ -636,9 +633,7 @@ pub fn init(self: *Server, options: InitOptions) InitError!void {
 
         .root_registry = options.root_registry,
 
-        .players_mutex = .init,
-        .players = .empty,
-        .player_count = .init(0),
+        .player_man = undefined,
         .world = world,
         .accept_coro = .{ .any_future = null, .result = {} },
         .acceptv6_coro = .{ .any_future = null, .result = {} },
@@ -685,21 +680,14 @@ pub fn init(self: *Server, options: InitOptions) InitError!void {
     };
 
     try self.group.concurrent(io, tickSynchronizer, .{self});
+
+    try self.player_man.init(self, &self.group);
 }
 
 pub fn deinit(self: *Server) void {
     const io = self.runtime.io();
 
-    if (true) {
-        self.players_mutex.lockUncancelable();
-        defer self.players_mutex.unlock();
-
-        while (self.players.last()) |player| {
-            player.disconnect(.{ .static = &.server_shutdown });
-        }
-
-        logger.info("Disconnected all clients", .{});
-    }
+    self.player_man.deinit();
 
     self.deinitBroadcast();
 
@@ -714,7 +702,6 @@ pub fn deinit(self: *Server) void {
 
     logger.info("Canceled all pending tasks", .{});
 
-    self.players.deinit(self.allocator);
     self.world.deinit();
 
     crypto.EVP_PKEY_free(self.rsa_key);
@@ -773,7 +760,7 @@ pub fn @"serverbound/status/status_request"(conn: *Connection, reader: *Io.Reade
 
     const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
 
-    const count = owned.owner.player_count.load(.monotonic);
+    const count = owned.owner.player_man.playerCount();
 
     try conn.sendPackets(params.toAllocPair(), net.packets.status_response_s2c.named("status_response", net.packets.StatusResponse{
         .version = current_version,
@@ -1183,47 +1170,17 @@ fn joinWorld(conn: *Connection, apair: net.PacketType.AllocPair) Connection.Read
         }),
     });
 
-    {
-        owner.players_mutex.lockUncancelable();
-        defer owner.players_mutex.unlock();
-        try owner.players.append(owner.allocator, conn);
-        _ = owner.player_count.fetchAdd(1, .monotonic);
+    zio.beginShield();
+    defer zio.endShield();
 
-        // Same as vanilla's `PlayerList.placeNewPlayer`: everyone gets the new player, the new player
-        // gets everyone. The client also needs its own entry, it's where it gets its game mode from.
-        const player_info = net.packets.player_info_initialize_s2c;
-        const PlayerEntry = net.packets.PlayerInfoEntry;
-
-        var new_entry = [_]PlayerEntry{playerInfoEntry(playing)};
-        const others = try apair.arena.alloc(PlayerEntry, owner.players.items.len - 1);
-        var i: usize = 0;
-        for (owner.players.items) |player| {
-            player.sendPackets(apair, player_info.named("player_info_update", .{
-                .actions = .full,
-                .players = &new_entry,
-            })) catch |e|
-                logger.warn("[{f}] Couldn't send player info: {t}", .{ player.alt(), e });
-            if (player == conn) continue;
-            const other: *OwnedConnection = @fieldParentPtr("connection", player);
-            others[i] = playerInfoEntry(other.data.play);
-            i += 1;
-        }
-        if (others.len != 0) {
-            try conn.sendPackets(apair, player_info.named("player_info_update", .{
-                .actions = .full,
-                .players = others,
-            }));
-        }
-    }
-
-    const message: utils.TextComponent = .translate("multiplayer.player.joined", .{
+    owner.player_man.add(playing) catch |e| return switch (e) {
+        error.Canceled => unreachable,
+        error.Closed => {},
+    };
+    owner.player_man.broadcast(&(try utils.TextComponent.translate("multiplayer.player.joined", .{
         .args = &.{.text(playing.profile.username(), .{})},
         .common = .{ .color = .yellow },
-    });
-
-    owner.players_mutex.lockUncancelable();
-    defer owner.players_mutex.unlock();
-    owner.broadcastSystemChatLocked(apair, message);
+    }).clone(owner.allocator)), false) catch unreachable;
 }
 
 fn sendChunksInner(conn: *Connection, apair: net.PacketType.AllocPair, world: *World) !void {
@@ -1237,7 +1194,7 @@ fn sendChunksInner(conn: *Connection, apair: net.PacketType.AllocPair, world: *W
         net.packets.chunk_batch_start_s2c.named("chunk_batch_start", .{}),
     });
 
-    const owner: *Server = @fieldParentPtr("world", world);
+    const owner: *Server = @alignCast(@fieldParentPtr("world", world));
     const io = owner.runtime.io();
     const start = Io.Timestamp.now(io, .boot);
 
@@ -1348,12 +1305,7 @@ pub fn @"serverbound/play/chat"(conn: *Connection, reader: *Io.Reader, params: n
     chat_logger.info("<{s}> {s}", .{ name, pack.message });
 
     // Unsigned, so sent as a system message (the server doesn't enforce secure chat)
-    const message: utils.TextComponent = .translate("chat.type.text", .{
-        .args = &.{ .text(name, .{}), .text(pack.message, .{}) },
-    });
-    owner.players_mutex.lockUncancelable();
-    defer owner.players_mutex.unlock();
-    owner.broadcastSystemChatLocked(params.toAllocPair(), message);
+    try owner.player_man.broadcastChat(owned.data.play, &.text(pack.message, .{}));
 }
 
 pub fn @"serverbound/play/chat_command"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {

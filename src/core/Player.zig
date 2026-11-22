@@ -49,44 +49,9 @@ const ConnectionImpl = struct {
 
         try conn.sendPacket(apair, "disconnect", net.packets.disconnect_s2c, reason.*);
 
-        var remove_index: ?usize = null;
-        {
-            owner.players_mutex.lockUncancelable();
-            defer owner.players_mutex.unlock();
-            _ = owner.player_count.fetchSub(1, .monotonic);
-
-            for (owner.players.items, 0..) |player, i| {
-                if (player == conn) {
-                    if (remove_index != null) {
-                        logger.err("Duplicate player entry: {f}", .{playing.profile});
-                        _ = owner.players.swapRemove(i);
-                    } else {
-                        remove_index = i;
-                    }
-                    continue;
-                }
-
-                player.sendPacket(
-                    apair,
-                    "player_info_remove",
-                    net.packets.player_info_remove_s2c,
-                    (&playing.profile.uuid)[0..1],
-                ) catch |e|
-                    logger.warn("[{f}] Couldn't send player info: {t}", .{ player.alt(), e });
-            }
-
-            if (remove_index) |i| {
-                _ = owner.players.swapRemove(i);
-            } else {
-                logger.warn("Missing player entry: {f}", .{playing.profile});
-            }
-
-            const message: utils.TextComponent = .translate("multiplayer.player.left", .{
-                .args = &.{.text(owned.data.play.profile.username(), .{})},
-                .common = .{ .color = .yellow },
-            });
-            owner.broadcastSystemChatLocked(apair, message);
-        }
+        zio.beginShield();
+        defer zio.endShield();
+        owner.player_man.remove(playing) catch unreachable;
     }
 
     fn tickImpl(conn: *Connection, delta: u8) Connection.TickError!void {
@@ -102,6 +67,13 @@ const ConnectionImpl = struct {
 };
 
 const EIDState = struct {
+    /// Zig's hashmap implementation uses tombstones and needs rehashing ever so often
+    /// to keep optimal performances.
+    ///
+    /// This is the number of `removeEID/UUID` calls required before triggering a rehashing of both
+    /// EID -> UUID and UUID -> EID hashmaps.
+    const eid_deletes_for_rehash = 1024;
+
     fn lock(self: *EIDState) Io.Cancelable!void {
         return self.rw.lock();
     }
@@ -169,11 +141,18 @@ const EIDState = struct {
 
         // Make sure to not soft-lock entity id's
         self.next_eid = self.next_eid orelse eid;
+
+        self.deletes += 1;
+        if (self.deletes >= eid_deletes_for_rehash) {
+            self.id2unique.rehash(std.hash_map.AutoContext(EntityID){});
+            self.unique2id.rehash(utils.UUID.HashCtx{});
+            self.deletes = 0;
+        }
     }
 
     fn removeUUID(self: *EIDState, uuid: utils.UUID) void {
         const eid = self.unique2id.get(uuid) orelse
-            std.debug.panic("[{s}] Attempted to remove unknown uuid: {f}", .{@as(*const Player, @alignCast(@fieldParentPtr("eid_state", self))).getUsername(),uuid});
+            std.debug.panic("[{s}] Attempted to remove unknown uuid: {f}", .{ @as(*const Player, @alignCast(@fieldParentPtr("eid_state", self))).getUsername(), uuid });
         return self.removeEID(eid);
     }
 
@@ -186,6 +165,7 @@ const EIDState = struct {
     rw: zio.RwLock = .init,
     mask: std.bit_set.Dynamic = .{},
     next_eid: ?EntityID = @fromBackingInt(2),
+    deletes: std.math.IntFittingRange(0, eid_deletes_for_rehash) = 0,
     id2unique: std.AutoHashMapUnmanaged(EntityID, utils.UUID) = .empty,
     unique2id: std.HashMapUnmanaged(utils.UUID, EntityID, utils.UUID.HashCtx, std.hash_map.default_max_load_percentage) = .empty,
 };
@@ -202,7 +182,15 @@ eid_state: EIDState = .{},
 
 pub const GetOrAddEntityIdError = Allocator.Error || error{OutOfEId};
 
-pub const EntityID = enum(u32) { player_self = 1, _ };
+pub const EntityID = enum(u32) {
+    /// Invalid EID number.
+    ///
+    /// The UUID linked to this value is `UUID.null`, will crash clients if sent to them.
+    null = 0,
+    /// The own player's EID must always remain this.
+    player_self = 1,
+    _,
+};
 
 pub const InitOptions = struct {
     owned: *Server.OwnedConnection,
@@ -223,6 +211,11 @@ pub fn init(self: *Player, options: InitOptions) Allocator.Error!void {
     {
         self.eid_state.lockUncancelable();
         defer self.eid_state.unlock();
+
+        self.eid_state.set(gpa, .null, .null) catch |e| switch (e) {
+            error.DuplicateId, error.DuplicateUUId => unreachable,
+            error.OutOfMemory => return error.OutOfMemory,
+        };
 
         self.eid_state.set(gpa, .player_self, self.profile.uuid) catch |e| switch (e) {
             error.DuplicateId, error.DuplicateUUId => unreachable,
@@ -264,7 +257,38 @@ pub fn getLatency(self: *const Player) u64 {
     return self.connection.common.latency;
 }
 
+/// Returns `self`.
+pub fn acquire(self: *Player) *Player {
+    _ = self.getConnection().acquire();
+    return self;
+}
+
+pub fn release(self: *Player) void {
+    return self.getConnection().release(self.getOwner().allocator);
+}
+
+pub fn lock(self: *Player) Io.Cancelable!void {
+    return self.getConnection().lock();
+}
+
+pub fn lockUncancelable(self: *Player) void {
+    return self.getConnection().lockUncancelable();
+}
+
+pub fn tryLock(self: *Player) bool {
+    return self.getConnection().tryLock();
+}
+
+pub fn unlock(self: *Player) void {
+    return self.getConnection().unlock();
+}
+
+pub fn disconnect(self: *Player, reason: Connection.DisconnectReason) void {
+    return self.getConnection().disconnect(reason);
+}
+
 pub fn getEntityId(self: *Player, uuid: utils.UUID) ?EntityID {
+    if (uuid.eql(.null)) return .null; // fast path
     if (self.profile.uuid.eql(uuid)) return .player_self; // fast path
 
     self.eid_state.lockSharedUncancelable();
@@ -274,17 +298,23 @@ pub fn getEntityId(self: *Player, uuid: utils.UUID) ?EntityID {
 }
 
 pub fn getOrAddEntityId(self: *Player, uuid: utils.UUID) GetOrAddEntityIdError!?EntityID {
+    if (uuid.eql(.null)) return .null;
     if (self.profile.uuid.eql(uuid)) return .player_self; // fast path
 
-    self.eid_state.lockUncancelable();
-    defer self.eid_state.unlock();
+    self.eid_state.lockSharedUncancelable();
+    const maybe_eid = self.eid_state.getFromUUID(uuid);
+    self.eid_state.unlockShared();
 
-    const eid = self.eid_state.getFromUUID(uuid) orelse blk: {
+    const eid = maybe_eid orelse blk: {
+        self.eid_state.lockUncancelable();
+        defer self.eid_state.unlock();
+
         const eid = try self.eid_state.nextEID();
         self.eid_state.set(self.getOwner().allocator, eid, uuid) catch |e| switch (e) {
             error.DuplicateId, error.DuplicateUUId => unreachable,
             error.OutOfMemory => return error.OutOfMemory,
         };
+
         break :blk eid;
     };
 
