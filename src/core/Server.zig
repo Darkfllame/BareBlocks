@@ -222,6 +222,8 @@ fn pregenChunks(self: *Server) Io.Cancelable!void {
     const io = self.runtime.io();
     const start = Io.Timestamp.now(io, .boot);
 
+    self.start.wait() catch return;
+
     // var threaded = Io.Threaded.init(self.allocator, .{ .stack_size = 2 * 1024 * 1024 });
     // defer threaded.deinit();
     // const tio = threaded.io();
@@ -731,19 +733,13 @@ pub fn addressAlt(self: *const Server) AddressAlt {
 pub fn @"serverbound/handshake/intention"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
     const hs = net.packets.handshake_c2s;
     const pack = try hs.readRoot(params, reader);
-    // logger.debug("[{f}] Hanshake: {f}", .{ conn.alt(), hs.formatted(pack, params.toAllocPair()) });
-
-    try conn.lock();
-    defer conn.unlock();
+    // logger.debug("[{f}] Handshake: {f}", .{ conn.alt(), hs.formatted(pack, params.toAllocPair()) });
 
     switch (pack.intent) {
-        .invalid => return error.InvalidEnumTag,
-        .status => {
-            conn.reconfigure(.{
-                .in_phase = .status,
-                .out_phase = .status,
-            });
-        },
+        .status => conn.reconfigure(.{
+            .in_phase = .status,
+            .out_phase = .status,
+        }),
         .login => {
             conn.reconfigure(.{
                 .in_phase = .login,
@@ -759,7 +755,10 @@ pub fn @"serverbound/handshake/intention"(conn: *Connection, reader: *Io.Reader,
             });
         },
         .transfer => {
-            conn.reconfigure(.{ .out_phase = .login });
+            conn.reconfigure(.{
+                .in_phase = .login,
+                .out_phase = .login,
+            });
             conn.disconnect(.{ .static = &.transfers_disabled });
             return error.CallbackHandlerFailed;
         },
@@ -789,7 +788,7 @@ pub fn @"serverbound/status/status_request"(conn: *Connection, reader: *Io.Reade
 pub fn @"serverbound/status/ping_request"(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
     const ping = net.packets.ping_pong;
     const pack = try ping.readRoot(params, reader);
-    // logger.debug("[{f}] Ping: {f}", .{ conn.alt(), ping.formatted(pack, params.toAllocPair()) });
+    logger.debug("[{f}] Ping: {f}", .{ conn.alt(), ping.formatted(pack, params.toAllocPair()) });
 
     try conn.sendPackets(params.toAllocPair(), ping.named("pong_response", pack));
 }
@@ -1082,7 +1081,7 @@ pub fn @"serverbound/configuration/finish_configuration"(conn: *Connection, read
     conn.lockUncancelable();
     defer conn.unlock();
 
-    logger.info("[{f}] Configuration done", .{conn.altLocked()});
+    logger.info("[{f}] Configuration done", .{conn.alt()});
 
     const owned: *OwnedConnection = @fieldParentPtr("connection", conn);
     const owner = owned.owner;

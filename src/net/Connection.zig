@@ -293,10 +293,6 @@ fn readEntry(self: *Connection, allocator: Allocator, start_event: *zio.Event) C
     }
 
     start_event.wait() catch return;
-    if (self.reader_state.state.cmpxchgStrong(.waiting, .alive, .acquire, .monotonic)) |old| switch (old) {
-        else => unreachable, // Dude you can only set to .closing
-        .closing => return,
-    };
 
     logger.debug("[{f}] Started reading", .{self.alt()});
 
@@ -353,10 +349,6 @@ fn writeEntry(self: *Connection, allocator: Allocator, start_event: *zio.Event) 
     }
 
     start_event.wait() catch return;
-    if (self.writer_state.state.cmpxchgStrong(.waiting, .alive, .acquire, .monotonic)) |old| switch (old) {
-        else => unreachable, // Dude you can only set to .closing
-        .closing => return,
-    };
 
     logger.debug("[{f}] Started writing", .{self.alt()});
 
@@ -405,7 +397,7 @@ fn tickEntry(self: *Connection, allocator: Allocator, start_event: *zio.Event, t
     while (true) {
         try tick_sync.synchronize();
 
-        self.lockUncancelable();
+        self.lock() catch break;
         defer self.unlock();
 
         self.tick() catch |e| return switch (e) {
@@ -472,11 +464,11 @@ fn readConnection(self: *Connection, gpa: Allocator, arena_alloc: *std.heap.Aren
         },
     };
 
-    {
+    if (next_byte == 0xFE) {
         try self.lock();
         defer self.unlock();
 
-        if (self.in_phase == .handshake and next_byte == 0xFE) { // legacy handshake
+        if (self.in_phase == .handshake) { // legacy handshake
             return error.LegacyHandshake;
         }
     }
@@ -486,7 +478,7 @@ fn readConnection(self: *Connection, gpa: Allocator, arena_alloc: *std.heap.Aren
         error.EndOfStream, error.ReadFailed => |err| return err,
         else => unreachable,
     };
-    // std.log.debug("[{f}] Got packet length: {d}", .{ self.alt(), packet_length });
+    logger.debug("[{f}] Got packet length: {d}", .{ self.alt(), packet_length });
     if (packet_length <= 0) return error.PacketTooSmall;
     if (packet_length > max_packet_length) return error.PacketTooLarge;
     const length: usize = @intCast(packet_length);
@@ -581,10 +573,9 @@ fn writeConnection(self: *Connection, allocator: Allocator) !void {
         error.Canceled => |err| return err,
         error.Closed => return error.Disconnected,
     };
+    zio.beginShield();
+    defer zio.endShield();
     while (pnode) |packet| : (pnode = self.send_state.channel.tryReceive() catch null) {
-        zio.beginShield();
-        defer zio.endShield();
-
         defer allocator.free(packet.getBytes());
         const bytes = packet.getData();
 
@@ -600,8 +591,6 @@ fn writeConnection(self: *Connection, allocator: Allocator) !void {
         try writer.writeAll(bytes);
         self.addWritePacket();
     }
-    zio.beginShield();
-    defer zio.endShield();
 
     try writer.flush();
 }
@@ -637,7 +626,7 @@ fn noTick(self: *Connection, delta: u8) TickError!void {
 }
 
 fn deinit(self: *Connection, allocator: Allocator) void {
-    logger.debug("Destroying {f}", .{self.altLocked()});
+    logger.debug("Destroying {f}", .{self.alt()});
     const io = self.runtime.io();
 
     io.vtable.netClose(io.userdata, (&self.getSocket())[0..1]);
@@ -646,10 +635,10 @@ fn deinit(self: *Connection, allocator: Allocator) void {
         allocator.free(packet.getBytes());
     } else |_| {}
     switch (self.disconnection_reason) {
-        .none => logger.err("[{f}] Disconnected", .{self.altLocked()}),
-        .normal => logger.info("[{f}] Disconnected", .{self.altLocked()}),
+        .none => logger.err("[{f}] Disconnected", .{self.alt()}),
+        .normal => logger.info("[{f}] Disconnected", .{self.alt()}),
         .reason => |tc| {
-            logger.err("[{f}] Disconnected: {f}", .{ self.altLocked(), tc });
+            logger.err("[{f}] Disconnected: {f}", .{ self.alt(), tc });
             tc.deinit(allocator);
         },
     }
@@ -1008,21 +997,23 @@ pub const VTable = struct {
 };
 
 pub const Alt = struct {
-    ptr: *Connection,
-    do_unlock: bool = true,
+    name: union(enum) {
+        bytes: [@sizeOf(Io.net.IpAddress) - 1:0]u8,
+        ip: Io.net.IpAddress,
+    },
+    in_phase: NetworkingPhase,
+    out_phase: NetworkingPhase,
+    target_side: NetworkingSide,
 
-    pub fn format(_alt: Alt, writer: *Io.Writer) Io.Writer.Error!void {
-        const self = _alt.ptr;
-        defer if (_alt.do_unlock) self.unlock();
-
-        try if (self.name) |nm|
-            writer.writeAll(nm)
-        else
-            self.ip_address.format(writer);
-        if (self.in_phase == self.out_phase) {
-            try writer.print("({t})->{t}", .{ self.in_phase, self.target_side });
+    pub fn format(_alt: *const Alt, writer: *Io.Writer) Io.Writer.Error!void {
+        try switch (_alt.name) {
+            .bytes => |nm| writer.writeAll(std.mem.sliceTo(&nm, 0)),
+            .ip => |addr| addr.format(writer),
+        };
+        if (_alt.in_phase == _alt.out_phase) {
+            try writer.print("({t})->{t}", .{ _alt.in_phase, _alt.target_side });
         } else {
-            try writer.print("({t})->{t}({t})", .{ self.in_phase, self.target_side, self.out_phase });
+            try writer.print("({t})->{t}({t})", .{ _alt.in_phase, _alt.target_side, _alt.out_phase });
         }
     }
 };
@@ -1034,47 +1025,21 @@ pub const DisconnectReason = union(enum) {
 };
 
 pub const PacketSendState = struct {
-    fn sendPacketNamed(self: *PacketSendState, named: anytype) !void {
+    // Avoid heavy code duplication
+    /// Assumes packet data is in `self.aw`
+    noinline fn maybeCompressAndSend(self: *PacketSendState) !void {
         const conn = self.connection;
 
-        switch (conn.writer_state.state.load(.monotonic)) {
-            .waiting, .alive => {},
-            .closing, .closed => return error.ConnectionClosed,
-        }
-
-        const ptype: PacketType = comptime named[0];
-        comptime assert(@TypeOf(named) == PacketType.Named(ptype));
-
         const apair = PacketType.AllocPair.new(self.aw.allocator, self.arena);
-
-        const pack_id, const entry = blk: {
-            try conn.lock();
-            defer conn.unlock();
-
-            const pack_id = conn.packet_registry.packedIDFromResource(conn.target_side, conn.out_phase, named[1]) orelse
-                return error.PacketIDNotFound;
-            const entry = conn.packet_registry.getEntry(conn.target_side, conn.out_phase, pack_id);
-
-            break :blk .{ pack_id, entry };
-        };
-
-        self.aw.clearRetainingCapacity();
-        try self.aw.ensureTotalCapacity(1 + entry.write_cushion);
-
-        PacketType.writeNoAlloc(.var_int, &self.aw.writer, @backingInt(pack_id)) catch return error.OutOfMemory;
-
-        ptype.write(apair, &self.aw.writer, named[2]) catch |e| return switch (e) {
-            error.WriteFailed => error.OutOfMemory,
-            else => |err| err,
-        };
 
         var compressed = false;
         const bytes_result: []align(@alignOf(Packet)) u8 = res: {
             try conn.lock();
             defer conn.unlock();
+
             const content = self.aw.written();
 
-            if (self.connection.compression) |comp| {
+            if (conn.compression) |comp| {
                 @branchHint(.likely);
 
                 self.out_w.clearRetainingCapacity();
@@ -1139,18 +1104,56 @@ pub const PacketSendState = struct {
         };
     }
 
+    fn sendPacketNamed(self: *PacketSendState, named: anytype) !void {
+        const conn = self.connection;
+
+        switch (conn.writer_state.state.load(.monotonic)) {
+            .waiting, .alive => {},
+            .closing, .closed => return error.ConnectionClosed,
+        }
+
+        const ptype: PacketType = comptime named[0];
+        comptime assert(@TypeOf(named) == PacketType.Named(ptype));
+
+        const apair = PacketType.AllocPair.new(self.aw.allocator, self.arena);
+
+        const pack_id, const entry = blk: {
+            try conn.lock();
+            defer conn.unlock();
+
+            const pack_id = conn.packet_registry.packedIDFromResource(conn.target_side, conn.out_phase, named[1]) orelse
+                return error.PacketIDNotFound;
+            const entry = conn.packet_registry.getEntry(conn.target_side, conn.out_phase, pack_id);
+
+            break :blk .{ pack_id, entry };
+        };
+
+        self.aw.clearRetainingCapacity();
+        try self.aw.ensureTotalCapacity(1 + entry.write_cushion);
+
+        PacketType.writeNoAlloc(.var_int, &self.aw.writer, @backingInt(pack_id)) catch return error.OutOfMemory;
+
+        ptype.write(apair, &self.aw.writer, named[2]) catch |e| return switch (e) {
+            error.WriteFailed => error.OutOfMemory,
+            else => |err| err,
+        };
+
+        try self.maybeCompressAndSend();
+    }
+
+    // Guess I can't force-inline this shit, like omg
     fn sendPacketsRecursive(self: *PacketSendState, packets: anytype) !void {
         const PacketsType = @TypeOf(packets);
         const info = @typeInfo(PacketsType);
-        switch (info) {
+        switch (comptime info) {
             .@"struct" => |str| {
                 if (!str.is_tuple) @compileError("Invalid type for packet");
 
-                if (str.field_names.len == 3) {
-                    if (str.field_types[0] == PacketType and str.field_attrs[0].@"comptime") {
-                        assert(PacketsType == PacketType.Named(str.field_attrs[0].defaultValue(PacketType).?));
-                        return self.sendPacketNamed(packets);
-                    }
+                const raw_named = str.field_names.len == 3 and str.field_types[0] == PacketType and str.field_attrs[0].@"comptime";
+
+                if (comptime raw_named) {
+                    assert(PacketsType == PacketType.Named(str.field_attrs[0].defaultValue(PacketType).?));
+                    return self.sendPacketNamed(packets);
                 }
 
                 inline for (0..str.field_names.len) |i| {
@@ -1191,11 +1194,11 @@ pub const PacketSendState = struct {
         self.out_w.deinit();
     }
 
-    pub fn sendPacket(self: *PacketSendState, resource: []const u8, comptime @"type": PacketType, value: @"type".getZigType()) WritePacketError!void {
+    pub inline fn sendPacket(self: *PacketSendState, resource: []const u8, comptime @"type": PacketType, value: @"type".getZigType()) WritePacketError!void {
         return self.sendPacketsRecursive(@"type".named(resource, value));
     }
 
-    pub fn sendPackets(self: *PacketSendState, packets: anytype) WritePacketError!void {
+    pub inline fn sendPackets(self: *PacketSendState, packets: anytype) WritePacketError!void {
         return self.sendPacketsRecursive(packets);
     }
 };
@@ -1359,48 +1362,34 @@ pub fn reconfigure(self: *Connection, options: ReconfigureOptions) void {
     }
 }
 
-/// Directly calling `format()` on a `Connection` is now deprecated in favor of `.alt()`
-/// or `.altLocked()`
+/// Directly calling `format()` on a `Connection` is now deprecated in favor of `.alt()`.
 pub fn format(self: *Connection, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     _ = self;
     _ = writer;
-    @compileError("Directly calling 'format()' on a Connection is now deprecated in favor of 'alt()'" ++
-        " or 'altLocked()'");
+    @compileError("Directly calling 'format()' on a Connection is now deprecated in favor of 'alt()'");
 }
 
 /// Allows this connection to be printed to `std.Io.Writer`s as: `[ip-or-name]<[phase]>->[target-side]`
 /// (excluding `[]`s).
-///
-/// The function all will also call `.lock()` and once the value is printed, `.unlock()` will be called.
-///
-/// If you wish to reuse the format argument, consider using `.altReusable(n)` instead.
-///
-/// Or lock the connection yourself and use `.altLocked()` once.
 pub fn alt(self: *Connection) Alt {
-    return self.altReusable(1);
-}
+    self.lockUncancelable();
+    defer self.unlock();
 
-/// Allows this connection to be printed to `std.Io.Writer`s as: `[ip-or-name]<[phase]>->[target-side]`
-/// (excluding `[]`s).
-///
-/// The function all will also call `.lock()` `lock_count` tules and once a value is printed, `.unlock()` will be called once.
-///
-/// Use this if you wish to reuse the format argument.
-pub fn altReusable(self: *Connection, lock_count: usize) Alt {
-    for (0..lock_count) |_| self.lockUncancelable();
-    return .{ .ptr = self };
-}
-
-/// Allows this connection to be printed to `std.Io.Writer`s as: `[ip-or-name]<[phase]>->[target-side]`
-/// (excluding `[]`s).
-///
-/// The function assumes `self` to be already locked.
-pub fn altLocked(self: *Connection) Alt {
-    return .{ .ptr = self, .do_unlock = false };
+    var ret = Alt{
+        .name = .{ .ip = self.ip_address },
+        .in_phase = self.in_phase,
+        .out_phase = self.out_phase,
+        .target_side = self.target_side,
+    };
+    if (self.name) |nm| {
+        ret.name = .{ .bytes = @splat(0) };
+        @memcpy(&ret.name.bytes, nm[0..@min(nm.len, ret.name.bytes.len)]);
+    }
+    return ret;
 }
 
 /// The much more flexible `sendPackets()` should be preferred instead.
-pub fn sendPacket(self: *Connection, apair: AllocPair, resource: []const u8, comptime @"type": PacketType, value: @"type".getZigType()) WritePacketError!void {
+pub inline fn sendPacket(self: *Connection, apair: AllocPair, resource: []const u8, comptime @"type": PacketType, value: @"type".getZigType()) WritePacketError!void {
     return self.sendPackets(apair, @"type".named(resource, value));
 }
 
@@ -1409,21 +1398,16 @@ pub fn sendPacket(self: *Connection, apair: AllocPair, resource: []const u8, com
 /// These are checked recursively so a wild amount of nesting is entirely valid.
 ///
 /// Allow multiple packets to reuse a bunch of internal buffers. Which can be more memory efficient sometimes.
-/// 
+///
 /// Prefer using `batchSend()` if you can't have all your packets all in one call.
-pub fn sendPackets(self: *Connection, apair: AllocPair, packets: anytype) WritePacketError!void {
-    switch (self.writer_state.state.load(.monotonic)) {
-        .waiting, .alive => {},
-        .closing, .closed => return error.ConnectionClosed,
-    }
-
+pub inline fn sendPackets(self: *Connection, apair: AllocPair, packets: anytype) WritePacketError!void {
     var send_state = PacketSendState.init(self, apair);
     defer send_state.deinit();
 
-    return send_state.sendPacketsRecursive(packets);
+    return send_state.sendPackets(packets);
 }
 
-pub fn batchSend(self: *Connection, apair: AllocPair) PacketSendState {
+pub inline fn batchSend(self: *Connection, apair: AllocPair) PacketSendState {
     return .init(self, apair);
 }
 
@@ -1442,7 +1426,7 @@ pub fn shutdown(self: *Connection, how: Io.net.ShutdownHow) Io.net.ShutdownError
 
 /// Assumes `self` to be locked.
 pub fn tick(self: *Connection) TickError!void {
-    // logger.debug("[{f}] Ticking", .{self.altLocked()});
+    // logger.debug("[{f}] Ticking", .{self.alt()});
 
     const delta = self.tick_count;
     self.tick_count = (self.tick_count + 1) % 20;
@@ -1456,7 +1440,7 @@ pub fn tick(self: *Connection) TickError!void {
             rl.average_received = lm.lerp(RateLimited.Average, received, rl.average_received, 0.75);
 
             if (@as(RateLimited.Count, @trunc(rl.average_received)) >= rl.limit) {
-                logger.warn("[{f}] Exceeded rate-limit (sent {d} packets per seconds)", .{ self.altLocked(), rl.average_received });
+                logger.warn("[{f}] Exceeded rate-limit (sent {d} packets per seconds)", .{ self.alt(), rl.average_received });
                 self.disconnect(.{ .static = &.exceeded_packet_rate });
             }
         }
