@@ -690,7 +690,21 @@ pub const Type = union(enum) {
                 .remaining, .prefixed => &.{},
                 .fixed => @splat(arr.sub.default()),
             },
-            .@"enum" => @fromBackingInt(@intCast(0)),
+            .@"enum" => |en| {
+                const empty_decls = &[_][]const u8{"default"};
+                for (empty_decls) |name| {
+                    if (@hasDecl(en.base, name)) {
+                        const value = @field(en.base, name);
+                        if (@TypeOf(value) == en.base) {
+                            return value;
+                        } else if (@TypeOf(value) == fn () en.base) {
+                            return value();
+                        }
+                    }
+                }
+
+                return @fromBackingInt(@intCast(0));
+            },
             .enum_set => .empty,
             .packed_struct => |ib| @bitCast(@as(@typeInfo(ib.base).@"struct".backing_integer.?, 0)),
             .id_or_x => .{ .id = 0 },
