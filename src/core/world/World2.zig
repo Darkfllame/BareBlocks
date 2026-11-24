@@ -2,12 +2,14 @@ const World = @This();
 const std = @import("std");
 const zio = @import("zio");
 const lm = @import("math");
+const net = @import("net");
 const worldgen = @import("worldgen");
 const core = @import("../core.zig");
 const DimensionProperties = @import("DimensionProperties.zig");
 const Region = @import("Region.zig");
 
 const Io = std.Io;
+const Connection = net.Connection;
 
 fn globalGroupConnector(server: *core.Server, world: *World) Io.Cancelable!void {
     const io = server.runtime.io();
@@ -20,12 +22,17 @@ fn globalGroupConnector(server: *core.Server, world: *World) Io.Cancelable!void 
 // TODO: Per-world players
 
 owner: *core.Server,
-owner_counter: std.atomic.Value(u32) = .init(0),
+owner_ids_counter: std.atomic.Value(u32) = .init(0),
 
 /// Size determined by the `dimension_type` registry.
 dimensions: [*]Dimension,
 
+tick_synchronizer: core.Phaser = .{},
 group: Io.Group = .init,
+
+players_mutex: zio.Mutex.Recursive = .init,
+players: std.ArrayList(*core.Player) = .empty,
+player_count: std.atomic.Value(u32) = .init(0),
 
 pub const Dimension = struct {
     world: *World,
@@ -41,7 +48,7 @@ pub const Dimension = struct {
 pub const ThreadedRegion = struct {
     world: *World,
     dimension: *Dimension,
-    owner: u32,
+    owner_id: u32,
     refcount: core.RefCount,
 
     channel_buffer: [8]Request,
