@@ -1264,17 +1264,6 @@ fn playerInfoEntry(player: *const core.Player) net.packets.PlayerInfoEntry {
     };
 }
 
-/// `players_mutex` must be locked for reading or writing.
-pub fn broadcastSystemChatLocked(self: *Server, apair: net.PacketType.AllocPair, message: utils.TextComponent) void {
-    chat_logger.info("{f}", .{message});
-    for (self.players.items) |player| {
-        player.sendPackets(apair, net.packets.system_chat_s2c.named("system_chat", .{
-            .content = message,
-            .overlay = false,
-        })) catch |e| logger.warn("[{f}] Couldn't send chat message: {t}", .{ player.alt(), e });
-    }
-}
-
 /// For packets a client keeps sending while idling, they don't do anything yet.
 fn ignorePacket(conn: *Connection, reader: *Io.Reader, params: net.PacketType.ReadParams) Connection.ReadCallbackError!void {
     _ = conn;

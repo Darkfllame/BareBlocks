@@ -221,7 +221,7 @@ pub fn remove(self: *PlayerManager, plr: *const Player) Io.Cancelable!void {
 pub fn getByUUID(self: *PlayerManager, uuid: UUID) Io.Cancelable!?*Player {
     var res: PlayerGet = .{};
     self.event_queue.send(.{ .get_by_uuid = .{ .uuid = uuid, .result = &res } }) catch |e| switch (e) {
-        error.Cancelable => return error.Cancelable,
+        error.Canceled => return error.Canceled,
         error.Closed => return null,
     };
 
@@ -236,7 +236,7 @@ pub fn getByUUID(self: *PlayerManager, uuid: UUID) Io.Cancelable!?*Player {
 pub fn getByName(self: *PlayerManager, name: []const u8) Io.Cancelable!?*Player {
     var res: PlayerGet = .{};
     self.event_queue.send(.{ .get_by_name = .{ .name = name, .result = &res } }) catch |e| switch (e) {
-        error.Cancelable => return error.Cancelable,
+        error.Canceled => return error.Canceled,
         error.Closed => return null,
     };
 
