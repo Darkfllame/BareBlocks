@@ -16,13 +16,11 @@ const logger = std.log.scoped(.@"core/PlayerManager");
 const Event = union(enum) {
     player_join: *Player,
     player_remove: UUID,
-    get_by_uuid: struct { uuid: UUID, result: *PlayerGet },
-    get_by_name: struct { name: []const u8, result: *PlayerGet },
+    get_by_uuid: struct { uuid: UUID, result: *utils.Awaitable(?*Player) },
+    get_by_name: struct { name: []const u8, result: *utils.Awaitable(?*Player) },
     broadcast: struct { text: utils.TextComponent, overlay: bool },
     // chat_broadcast: struct { player: *Player, text: utils.TextComponent },
 };
-
-const PlayerGet = struct { event: zio.Event = .init, value: ?*Player = null };
 
 fn playerInfoEntry(player: *const core.Player) net.packets.PlayerInfoEntry {
     return .{
@@ -49,10 +47,10 @@ fn addPlayer(self: *PlayerManager, player: *Player, apair: net.PacketType.AllocP
     errdefer self.by_uuid.removeByPtr(gop.key_ptr);
 
     try self.players.append(gpa, player);
-    errdefer _= self.players.swapRemove(self.players.items.len - 1);
+    errdefer _ = self.players.swapRemove(self.players.items.len - 1);
 
     _ = self.player_count.fetchAdd(1, .monotonic);
-    errdefer _= self.player_count.fetchSub(1, .monotonic);
+    errdefer _ = self.player_count.fetchSub(1, .monotonic);
 
     var new_entry = [_]PlayerEntry{playerInfoEntry(player)};
     const others = try apair.arena.alloc(PlayerEntry, self.players.items.len - 1);
@@ -77,6 +75,7 @@ fn addPlayer(self: *PlayerManager, player: *Player, apair: net.PacketType.AllocP
 
 fn handler(self: *PlayerManager) Io.Cancelable!void {
     const gpa = self.owner.allocator;
+    const io = self.owner.runtime.io();
 
     defer {
         zio.beginShield();
@@ -86,7 +85,7 @@ fn handler(self: *PlayerManager) Io.Cancelable!void {
         while (self.event_queue.receive()) |ev| switch (ev) {
             .player_join => |plr| plr.release(),
             .player_remove, .broadcast => {},
-            inline .get_by_uuid, .get_by_name => |get| get.result.event.set(),
+            inline .get_by_uuid, .get_by_name => |get| get.result.set(io, null),
         } else |_| {}
 
         for (self.players.items) |plr| {
@@ -146,18 +145,17 @@ fn handler(self: *PlayerManager) Io.Cancelable!void {
             }
         },
         .get_by_uuid => |by_uuid| {
-            by_uuid.result.value = if (self.by_uuid.get(by_uuid.uuid)) |plr| plr.acquire() else null;
-            by_uuid.result.event.set();
+            by_uuid.result.set(io, if (self.by_uuid.get(by_uuid.uuid)) |plr| plr.acquire() else null);
         },
         .get_by_name => |by_name| {
-            by_name.result.value = null;
             for (self.players.items) |plr| {
                 if (std.mem.eql(u8, plr.getGameProfile().username(), by_name.name)) {
-                    by_name.result.value = plr;
+                    by_name.result.set(io, plr.acquire());
                     break;
                 }
+            } else {
+                by_name.result.set(io, null);
             }
-            by_name.result.event.set();
         },
         .broadcast => |bcast| {
             defer bcast.text.deinit(gpa);
@@ -219,32 +217,24 @@ pub fn remove(self: *PlayerManager, plr: *const Player) Io.Cancelable!void {
 
 /// Acquires the new `Player`. Should call `release` on it once done with it.
 pub fn getByUUID(self: *PlayerManager, uuid: UUID) Io.Cancelable!?*Player {
-    var res: PlayerGet = .{};
+    var res: utils.Awaitable(?*Player) = .{ .value = null };
     self.event_queue.send(.{ .get_by_uuid = .{ .uuid = uuid, .result = &res } }) catch |e| switch (e) {
         error.Canceled => return error.Canceled,
         error.Closed => return null,
     };
 
-    zio.beginShield();
-    defer zio.endShield();
-    res.event.wait() catch unreachable;
-
-    return res.value;
+    return res.waitUncancelable(self.owner.runtime.io());
 }
 
 /// Acquires the new `Player`. Should call `release` on it once done with it.
 pub fn getByName(self: *PlayerManager, name: []const u8) Io.Cancelable!?*Player {
-    var res: PlayerGet = .{};
+    var res: utils.Awaitable(?*Player) = .{ .value = null };
     self.event_queue.send(.{ .get_by_name = .{ .name = name, .result = &res } }) catch |e| switch (e) {
         error.Canceled => return error.Canceled,
         error.Closed => return null,
     };
 
-    zio.beginShield();
-    defer zio.endShield();
-    res.event.wait() catch unreachable;
-
-    return res.value;
+    return res.waitUncancelable(self.owner.runtime.io());
 }
 
 /// `text` should be cloned via `.clone()` except for static text data.

@@ -14,6 +14,7 @@ pub const is_safe = switch (builtin.mode) {
 
 pub const translation = @import("translation.zig");
 
+pub const Awaitable = @import("awaitable.zig").Awaitable;
 pub const BitStack = @import("BitStack.zig");
 pub const Color = @import("color.zig").Color;
 pub const CountingAllocator = @import("CountingAllocator.zig");
