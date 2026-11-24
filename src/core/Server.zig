@@ -194,6 +194,7 @@ fn deinitBroadcast(self: *Server) void {
 }
 
 fn pregenChunkRing(world: *World, ring: i32, center: World.Position, count: *std.atomic.Value(u32)) Io.Cancelable!void {
+    var count2: u32 = 0;
     var dz: i32 = -ring;
     while (dz <= ring) : (dz += 1) {
         var dx: i32 = -ring;
@@ -201,7 +202,8 @@ fn pregenChunkRing(world: *World, ring: i32, center: World.Position, count: *std
             if (@max(@abs(dx), @abs(dz)) != ring) continue;
 
             const pos: World.Position = .{ .x = center.x + dx, .z = center.z + dz };
-            logger.debug("Chunk ring {d}, count: {d} ({d}, {d})", .{ ring, count.fetchAdd(1, .monotonic), pos.x, pos.z });
+            count2 = count.fetchAdd(1, .monotonic);
+            logger.debug("Chunk ring {d}, count: {d} ({d}, {d})", .{ ring, count2, pos.x, pos.z });
             _ = world.encodedChunk(pos) catch |e| switch (e) {
                 error.Canceled => return error.Canceled,
                 error.OutOfMemory => {
@@ -213,6 +215,7 @@ fn pregenChunkRing(world: *World, ring: i32, center: World.Position, count: *std
             try zio.maybeYield();
         }
     }
+    logger.info("Finished chunk ring {d}, count: {d}", .{ ring, count2 });
 }
 
 fn pregenChunks(self: *Server) Io.Cancelable!void {
@@ -273,7 +276,7 @@ fn tickSynchronizer(self: *Server) Io.Cancelable!void {
             const tps = f_dtt / f_s;
 
             avg = (avg + @as(f32, @floatCast(tps))) / 2;
-            logger.debug("TPS: {d:.0}    MSPT: {d:.2}    AVG: {d:.1}", .{ tps, taken, avg });
+            logger.info("TPS: {d:.0}    MSPT: {d:.2}    AVG: {d:.1}", .{ tps, taken, avg });
             delta = .zero;
             delta_ticks = 0;
         }
@@ -1204,18 +1207,18 @@ fn sendChunksInner(conn: *Connection, apair: net.PacketType.AllocPair, world: *W
     var count: i32 = 0;
     var ring: i32 = 0;
     while (ring <= overworld.view_distance) : (ring += 1) {
-        var dz: i32 = -ring;
-        while (dz <= ring) : (dz += 1) {
-            var dx: i32 = -ring;
-            while (dx <= ring) : (dx += 1) {
-                if (@max(@abs(dx), @abs(dz)) != ring) continue;
-                const pos: World.Position = .{ .x = center.x + dx, .z = center.z + dz };
+    var dz: i32 = -ring;
+    while (dz <= ring) : (dz += 1) {
+        var dx: i32 = -ring;
+        while (dx <= ring) : (dx += 1) {
+            if (@max(@abs(dx), @abs(dz)) != ring) continue;
+            const pos: World.Position = .{ .x = center.x + dx, .z = center.z + dz };
 
                 const encoded = try world.encodedChunk(pos);
                 try send_state.sendPackets(net.packets.level_chunk_with_light_s2c.named("level_chunk_with_light", .{
-                    .x = pos.x,
-                    .z = pos.z,
-                    .data = encoded,
+                .x = pos.x,
+                .z = pos.z,
+                .data = encoded,
                 }));
 
                 count += 1;

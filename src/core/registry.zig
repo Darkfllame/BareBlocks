@@ -241,11 +241,11 @@ pub const TypeErasedRegistry = struct {
             return self.type_erased.registerMany(.{ .gpa = options.gpa, .arena = aa.allocator() }, entries, out);
         }
 
-        pub inline fn getEntry(self: *Dynamic, nid: RegistryEntryId) ?*const anyopaque {
+        pub inline fn getEntry(self: *const Dynamic, nid: RegistryEntryId) ?*const anyopaque {
             return self.type_erased.getEntry(nid);
         }
 
-        pub inline fn getNamedEntry(self: *Dynamic, id: Identifier) ?*const anyopaque {
+        pub inline fn getNamedEntry(self: *const Dynamic, id: Identifier) ?*const anyopaque {
             return self.type_erased.getNamedEntry(id);
         }
     };
@@ -341,21 +341,21 @@ pub const TypeErasedRegistry = struct {
         }
     }
 
-    pub fn getEntry(self: *TypeErasedRegistry, nid: RegistryEntryId) ?*const anyopaque {
+    pub fn getEntry(self: *const TypeErasedRegistry, nid: RegistryEntryId) ?*const anyopaque {
         const idx = @backingInt(nid);
         const size = @min(self.nid_mask.capacity(), self.ids.len, self.data.len);
         if (idx >= size or !self.nid_mask.isSet(idx)) return null;
         return self.data[idx];
     }
 
-    pub fn getNamedEntry(self: *TypeErasedRegistry, id: Identifier) ?*const anyopaque {
+    pub fn getNamedEntry(self: *const TypeErasedRegistry, id: Identifier) ?*const anyopaque {
         if (self.id2num.get(id)) |idx| {
             const size = @min(self.nid_mask.count(), self.ids.len, self.data.len);
             if (idx >= size or !self.nid_mask.isSet(idx)) {
                 @branchHint(.unlikely);
                 logger.warn("Ghost entry discovered in registry.{t}@{x} for {f}: FIX YO REGISTRY DAWG", .{ self.type, @intFromPtr(self), id.alt(.omit_minecraft) });
-                assert(self.id2num.remove(id));
-                if (idx < size) self.nid_mask.unset(idx);
+                assert(@constCast(&self.id2num).remove(id));
+                if (idx < size) @constCast(&self.nid_mask).unset(idx);
                 return null;
             }
             return self.data[idx];
@@ -555,11 +555,11 @@ pub fn Registry(comptime SubType: type) type {
             return self.type_erased.registerMany(options, entries, out);
         }
 
-        pub inline fn getEntry(self: *Self, nid: RegistryEntryId) ?*SubType {
+        pub inline fn getEntry(self: *const Self, nid: RegistryEntryId) ?*SubType {
             return @ptrCast(@alignCast(self.type_erased.getEntry(nid)));
         }
 
-        pub inline fn getNamedEntry(self: *Self, id: Identifier) ?*SubType {
+        pub inline fn getNamedEntry(self: *const Self, id: Identifier) ?*SubType {
             return @ptrCast(@alignCast(self.type_erased.getNamedEntry(id)));
         }
     };
@@ -610,11 +610,11 @@ pub fn DynamicRegistry(comptime SubType: type) type {
             return self.type_erased.registerMany(options, entries, out);
         }
 
-        pub inline fn getEntry(self: *Self, nid: RegistryEntryId) ?*const SubType {
+        pub inline fn getEntry(self: *const Self, nid: RegistryEntryId) ?*const SubType {
             return @ptrCast(@alignCast(self.type_erased.getEntry(nid)));
         }
 
-        pub inline fn getNamedEntry(self: *Self, id: Identifier) ?*const SubType {
+        pub inline fn getNamedEntry(self: *const Self, id: Identifier) ?*const SubType {
             return @ptrCast(@alignCast(self.type_erased.getNamedEntry(id)));
         }
     };

@@ -15,7 +15,7 @@ pub fn Awaitable(comptime T: type) type {
         }
 
         pub fn wait(self: *Self, io: Io) Io.Cancelable!T {
-            try self.wait(io);
+            try self.event.wait(io);
             return self.value;
         }
 
@@ -23,7 +23,7 @@ pub fn Awaitable(comptime T: type) type {
             const old = io.swapCancelProtection(.blocked);
             defer _ = io.swapCancelProtection(old);
 
-            try self.wait(io);
+            self.event.wait(io) catch unreachable;
             return self.value;
         }
     };

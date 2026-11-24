@@ -18,7 +18,7 @@ var zio_runtime: zio.Runtime = undefined;
 var global_arena: std.heap.ArenaAllocator = .init(.failing);
 
 pub const std_options = std.Options{
-    .log_level = .debug,
+    // .log_level = .debug,
     .log_scope_levels = &.{
         // .{ .scope = .zio, .level = .info },
         // .{ .scope = .@"core/server", .level = .info },

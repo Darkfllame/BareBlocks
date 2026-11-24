@@ -261,7 +261,7 @@ pub fn build(b: *Build) !void {
             "serial",
             "math",
         },
-        .strip = false,
+        
     });
     const core_mod = proj.createModule(b, .{
         .name = "core",
@@ -281,7 +281,7 @@ pub fn build(b: *Build) !void {
             "block_states",
             "worldgen",
         },
-        .strip = false,
+        
     });
     _ = core_mod;
     const block_states_mod = proj.createModule(b, .{
@@ -298,11 +298,14 @@ pub fn build(b: *Build) !void {
     const worldgen_mod = proj.createModule(b, .{
         .name = "worldgen",
         .root_source_file = b.path("src/worldgen/worldgen.zig"),
+        .optimize = switch (optimize) {
+            .debug => .safe,
+            else => .fast,
+        },
         .imports = &.{
             .{ .name = "worldgen_data", .module = worldgen_data_mod },
         },
         .local_imports = &.{ "block_states", "math", "utils" },
-        .strip = false,
     });
     _ = worldgen_mod;
     const serial_mod = proj.createModule(b, .{
@@ -330,10 +333,7 @@ pub fn build(b: *Build) !void {
         .name = "main",
         .root_source_file = b.path("src/main.zig"),
         .target = target,
-        .optimize = optimize,
-        .link_libc = false,
-        .error_tracing = true,
-        .strip = false,
+        .optimize = optimize,        
         .imports = &.{
             .{ .name = "zio", .module = zio_mod },
             .{ .name = "crypto", .module = crypto_mod },
